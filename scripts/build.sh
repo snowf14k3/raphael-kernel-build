@@ -26,7 +26,7 @@ scripts/kconfig/merge_config.sh -m .config \
 	"${config_fragment}" \
 	arch/arm64/configs/sm8150.config
 
-scripts/config --set-str LOCALVERSION "-sm8150-venus-test1"
+scripts/config --set-str LOCALVERSION "-sm8150-venus-test2"
 scripts/config --disable LOCALVERSION_AUTO
 scripts/config --module VIDEO_QCOM_VENUS
 scripts/config --enable SM_GCC_8150

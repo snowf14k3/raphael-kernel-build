@@ -12,10 +12,39 @@ index 500735949fe8..c1fce4987ec5 100644
  };
  
 diff --git a/drivers/media/platform/qcom/venus/core.c b/drivers/media/platform/qcom/venus/core.c
-index 4899419231d4..1d1dd8199694 100644
+index 4899419231d4..39816f1efcdf 100644
 --- a/drivers/media/platform/qcom/venus/core.c
 +++ b/drivers/media/platform/qcom/venus/core.c
-@@ -925,7 +925,7 @@ static const struct venus_resources sm8150_res = {
+@@ -447,6 +447,12 @@ static int venus_probe(struct platform_device *pdev)
+ 
+ 	platform_set_drvdata(pdev, core);
+ 
++	if (core->res->autosuspend_delay_ms) {
++		pm_runtime_set_autosuspend_delay(dev,
++					 core->res->autosuspend_delay_ms);
++		pm_runtime_use_autosuspend(dev);
++	}
++
+ 	pm_runtime_enable(dev);
+ 
+ 	ret = pm_runtime_get_sync(dev);
+@@ -495,8 +501,13 @@ static int venus_probe(struct platform_device *pdev)
+ 	if (ret)
+ 		goto err_of_depopulate;
+ 
+-	ret = pm_runtime_put_sync(dev);
+-	if (ret) {
++	if (core->res->autosuspend_delay_ms) {
++		pm_runtime_mark_last_busy(dev);
++		ret = pm_runtime_put_autosuspend(dev);
++	} else {
++		ret = pm_runtime_put_sync(dev);
++	}
++	if (ret < 0) {
+ 		pm_runtime_get_noresume(dev);
+ 		goto err_of_depopulate;
+ 	}
+@@ -925,9 +936,10 @@ static const struct venus_resources sm8150_res = {
  	.vcodec_pmdomains_num = 3,
  	.opp_pmdomain = (const char *[]) { "mmcx" },
  	.vcodec_num = 2,
@@ -23,8 +52,11 @@ index 4899419231d4..1d1dd8199694 100644
 +	.max_load = 3110400,	/* 4096x2160@90 */
  	.hfi_version = HFI_VERSION_4XX,
  	.vpu_version = VPU_VERSION_IRIS1,
++	.autosuspend_delay_ms = 1500,
  	.vmem_id = VIDC_RESOURCE_NONE,
-@@ -936,7 +936,7 @@ static const struct venus_resources sm8150_res = {
+ 	.vmem_size = 0,
+ 	.vmem_addr = 0,
+@@ -936,7 +948,7 @@ static const struct venus_resources sm8150_res = {
  	.cp_size = 0x25800000,
  	.cp_nonpixel_start = 0x1000000,
  	.cp_nonpixel_size = 0x24800000,
@@ -33,3 +65,36 @@ index 4899419231d4..1d1dd8199694 100644
  	.dec_nodename = "video-core0",
  	.enc_nodename = "video-core1",
  };
+diff --git a/drivers/media/platform/qcom/venus/core.h b/drivers/media/platform/qcom/venus/core.h
+index f26e72f79b12..546d48a48123 100644
+--- a/drivers/media/platform/qcom/venus/core.h
++++ b/drivers/media/platform/qcom/venus/core.h
+@@ -88,6 +88,7 @@ struct venus_resources {
+ 	unsigned int resets_num;
+ 	enum hfi_version hfi_version;
+ 	enum vpu_version vpu_version;
++	unsigned int autosuspend_delay_ms;
+ 	u8 num_vpp_pipes;
+ 	u32 max_load;
+ 	unsigned int vmem_id;
+diff --git a/drivers/media/platform/qcom/venus/hfi_venus.c b/drivers/media/platform/qcom/venus/hfi_venus.c
+index 9150dcbda58c..4dc37599712a 100644
+--- a/drivers/media/platform/qcom/venus/hfi_venus.c
++++ b/drivers/media/platform/qcom/venus/hfi_venus.c
+@@ -1633,7 +1633,15 @@ static int venus_suspend_3xx(struct venus_core *core)
+ 	ret = readx_poll_timeout(venus_cpu_and_video_core_idle, hdev, val, val,
+ 				 1500, 100 * 1500);
+ 	if (ret) {
+-		dev_err(dev, "wait for cpu and video core idle fail (%d)\n", ret);
++		if (IS_IRIS1(core))
++			dev_err(dev,
++				"wait for cpu and video core idle fail (%d), cpu-status %#x ctrl-status %#x\n",
++				ret,
++				readl(core->wrapper_base + WRAPPER_CPU_STATUS),
++				readl(core->cpu_cs_base + CPU_CS_SCIACMDARG0));
++		else
++			dev_err(dev, "wait for cpu and video core idle fail (%d)\n",
++				ret);
+ 		return ret;
+ 	}
+ 
