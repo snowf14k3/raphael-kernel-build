@@ -8,8 +8,8 @@ frame_hashes() {
 }
 if [[ "${1:-}" == --plan ]]; then
 	printf '%s\n' \
-		'Preflight: test7 kernel, SM8150 Venus nodes, idle devices, tools, free space.' \
-		'A: PM held on; H.264 320x240/720p/1080p decode; reopen.' \
+		'Preflight: test8 kernel, SM8150 Venus nodes, idle devices, tools, free space.' \
+		'A: PM held on; H.264 320x240/720p/1080p plus HEVC 8/10-bit decode.' \
 		'B: PM auto; observe suspended, decode, repeat for two cycles.' \
 		'Compare decode frame hashes with software and check exact frame counts.' \
 		'Hardware encode stays disabled unless VENUS_TEST_ENCODER=1 is explicitly set.' \
@@ -34,8 +34,8 @@ if [[ "${1:-}" == --self-test ]]; then
 fi
 [[ $# -eq 0 ]] || { echo 'Usage: sudo bash venus-test-suite.sh [--plan|--self-test]' >&2; exit 2; }
 [[ $EUID -eq 0 ]] || { echo '请使用 sudo bash venus-test-suite.sh。' >&2; exit 2; }
-[[ "$(uname -r)" == *sm8150-venus-test7* ]] || {
-	echo '当前不是 test7 内核，未开始测试，也未修改设备设置。' >&2; exit 2;
+[[ "$(uname -r)" == *sm8150-venus-test8* ]] || {
+	echo '当前不是 test8 内核，未开始测试，也未修改设备设置。' >&2; exit 2;
 }
 [[ "${VENUS_TEST_ENCODER:-0}" == 0 || "${VENUS_TEST_ENCODER:-0}" == 1 ]] || {
 	echo 'VENUS_TEST_ENCODER 只能是 0 或 1；未开始测试。' >&2; exit 2;
@@ -143,6 +143,12 @@ snapshot before
 grep -q 'h264_v4l2m2m' "$run_root/decoders.txt" || {
 	record preflight FAIL 'FFmpeg lacks h264_v4l2m2m'; exit 1;
 }
+grep -q 'hevc_v4l2m2m' "$run_root/decoders.txt" || {
+	record preflight FAIL 'FFmpeg lacks hevc_v4l2m2m'; exit 1;
+}
+grep -q 'libx265' "$run_root/encoders.txt" || {
+	record preflight FAIL 'FFmpeg lacks libx265 for local HEVC samples'; exit 1;
+}
 if [[ -w "$trace" ]]; then
 	trace_changed=1
 	set_knob "$trace" Y
@@ -156,10 +162,12 @@ run_ffmpeg() {
 	sync -f "$run_root"
 	return "$rc"
 }
-decode_case() {
-	local label="$1" sample="$2" frames="$3"
-	if ! run_ffmpeg "$label" -xerror -c:v h264_v4l2m2m -i "$run_root/$sample.mp4" \
-		-map 0:v:0 -an -pix_fmt yuv420p -f framemd5 "$run_root/$label.framemd5"; then
+decode_codec_case() {
+	local label="$1" sample="$2" frames="$3" decoder_name="$4" pixel_format="$5"
+	local sample_key="${sample%.*}"
+	if ! run_ffmpeg "$label" -xerror -c:v "$decoder_name" -i "$run_root/$sample" \
+		-map 0:v:0 -an -pix_fmt "$pixel_format" \
+		-f framemd5 "$run_root/$label.framemd5"; then
 		record "$label" FAIL 'hardware decode failed/timed out; see ffmpeg log'
 		snapshot "$label"
 		return 1
@@ -169,7 +177,7 @@ decode_case() {
 	fi
 	frame_hashes "$run_root/$label.framemd5" > "$run_root/$label.hashes"
 	if [[ "$(wc -l < "$run_root/$label.hashes")" -ne "$frames" ]] || \
-		! diff -u "$run_root/$sample.reference.hashes" "$run_root/$label.hashes" \
+		! diff -u "$run_root/$sample_key.reference.hashes" "$run_root/$label.hashes" \
 		> "$run_root/$label.diff"; then
 		record "$label" FAIL 'frame count or pixels differ from software'
 		snapshot "$label"
@@ -178,12 +186,26 @@ decode_case() {
 	record "$label" PASS "$frames frames; hardware confirmed; software hashes match"
 	snapshot "$label"
 }
+decode_case() {
+	decode_codec_case "$1" "$2.mp4" "$3" h264_v4l2m2m yuv420p
+}
 prepare_sample() {
 	local label="$1" size="$2" frames="$3"
 	run_ffmpeg "$label.generate" -f lavfi -i "testsrc2=size=$size:rate=30" \
 		-frames:v "$frames" -c:v libx264 -threads 2 -pix_fmt yuv420p "$run_root/$label.mp4" || return 1
 	run_ffmpeg "$label.reference" -xerror -c:v h264 -threads 2 -i "$run_root/$label.mp4" \
 		-map 0:v:0 -an -pix_fmt yuv420p -f framemd5 "$run_root/$label.reference.framemd5" || return 1
+	frame_hashes "$run_root/$label.reference.framemd5" > "$run_root/$label.reference.hashes"
+	[[ "$(wc -l < "$run_root/$label.reference.hashes")" -eq "$frames" ]]
+}
+prepare_hevc_sample() {
+	local label="$1" pixel_format="$2" frames="$3"
+	run_ffmpeg "$label.generate" -f lavfi -i testsrc2=size=320x240:rate=30 \
+		-frames:v "$frames" -c:v libx265 -threads 2 -pix_fmt "$pixel_format" \
+		-x265-params pools=2:frame-threads=1:log-level=error "$run_root/$label.mkv" || return 1
+	run_ffmpeg "$label.reference" -xerror -c:v hevc -threads 2 -i "$run_root/$label.mkv" \
+		-map 0:v:0 -an -pix_fmt "$pixel_format" \
+		-f framemd5 "$run_root/$label.reference.framemd5" || return 1
 	frame_hashes "$run_root/$label.reference.framemd5" > "$run_root/$label.reference.hashes"
 	[[ "$(wc -l < "$run_root/$label.reference.hashes")" -eq "$frames" ]]
 }
@@ -201,6 +223,13 @@ for spec in '720p 1280x720' '1080p 1920x1080'; do
 	decode_case "on-$label" "$label" 30 || stop_batch
 done
 decode_case on-reopen small 90 || stop_batch
+for spec in 'hevc8 yuv420p' 'hevc10 yuv420p10le'; do
+	read -r label pixel_format <<< "$spec"
+	prepare_hevc_sample "$label" "$pixel_format" 30 || {
+		record prepare FAIL "$label software generation failed"; exit 1;
+	}
+	decode_codec_case "on-$label" "$label.mkv" 30 hevc_v4l2m2m "$pixel_format" || stop_batch
+done
 if [[ "${VENUS_TEST_ENCODER:-0}" != 1 ]]; then
 	record hw-encode SKIP 'disabled by default after the test5 reboot; opt in with VENUS_TEST_ENCODER=1'
 elif grep -q 'h264_v4l2m2m' "$run_root/encoders.txt"; then

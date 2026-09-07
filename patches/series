@@ -3,3 +3,4 @@
 0003-media-venus-add-batch-diagnostics.patch
 0004-media-venus-complete-sm8150-vpu5-session-setup.patch
 0005-media-venus-fix-sm8150-hfi4-session-properties.patch
+0006-media-venus-fix-10bit-format-negotiation.patch

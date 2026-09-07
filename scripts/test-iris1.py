@@ -70,6 +70,28 @@ def validate_protocol_sources(driver):
     print("PASS: HFI 4xx WORK_ROUTE/low-latency packets and 12-entry parser invariants")
 
 
+def validate_format_sources(driver):
+    decoder = (driver / "vdec.c").read_text(encoding="utf-8")
+    hfi = (driver / "hfi.c").read_text(encoding="utf-8")
+    s_fmt = function(decoder, "vdec_s_fmt")
+    source_change = function(decoder, "vdec_event_change")
+    session_init = function(hfi, "hfi_session_init")
+
+    codec_sync = "inst->hfi_codec = venus_helper_get_codec(fmt->pixfmt);"
+    if codec_sync not in s_fmt:
+        raise RuntimeError("decoder S_FMT does not synchronize the selected HFI codec")
+    if "inst->hfi_codec = venus_helper_get_codec(pixfmt);" not in session_init:
+        raise RuntimeError("HFI session init is not using the shared codec mapping")
+
+    depth = source_change.find("if (inst->bit_depth != ev_data->bit_depth)")
+    select = source_change.find("format.fmt.pix_mp.pixelformat = inst->fmt_cap->pixfmt")
+    normalize = source_change.find("vdec_try_fmt_common(inst, &format)")
+    if min(depth, select, normalize) < 0 or not depth < select < normalize:
+        raise RuntimeError("10-bit capture format must be selected before normalization")
+
+    print("PASS: codec selection and 10-bit source-change ordering invariants")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("kernel", type=Path)
@@ -78,6 +100,7 @@ def main():
     repo = Path(__file__).resolve().parent.parent
     driver = args.kernel / "drivers/media/platform/qcom/venus"
     validate_protocol_sources(driver)
+    validate_format_sources(driver)
     power_sources = {
         "pm_helpers.c": [
             "core_clks_enable", "core_clks_disable", "core_clks_set_rate",
@@ -100,9 +123,17 @@ def main():
             "venus_helper_set_work_route",
         ],
     }
+    format_sources = {
+        "helpers.c": [
+            "venus_helper_get_codec", "venus_helper_check_codec",
+            "to_hfi_raw_fmt", "find_fmt_from_caps",
+            "venus_helper_check_format",
+        ],
+    }
     for name, sources in [("power", power_sources), ("hfi", hfi_sources),
                           ("queues", queue_sources),
-                          ("session", session_sources)]:
+                          ("session", session_sources),
+                          ("formats", format_sources)]:
         extracted = []
         for filename, names in sources.items():
             source = (driver / filename).read_text(encoding="utf-8")
