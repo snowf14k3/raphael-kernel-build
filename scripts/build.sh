@@ -20,9 +20,11 @@ cd "${source_dir}"
 
 make ARCH=arm64 LLVM=1 defconfig
 
+# Keep GengWei's Debian feature set, then let the configuration shipped with
+# this kernel branch override options that became incompatible with Linux 7.1.
 scripts/kconfig/merge_config.sh -m .config \
-	arch/arm64/configs/sm8150.config \
-	"${config_fragment}"
+	"${config_fragment}" \
+	arch/arm64/configs/sm8150.config
 
 scripts/config --set-str LOCALVERSION "-sm8150-venus-test1"
 scripts/config --disable LOCALVERSION_AUTO
@@ -31,11 +33,6 @@ scripts/config --enable SM_GCC_8150
 scripts/config --enable SM_VIDEOCC_8150
 scripts/config --enable INTERCONNECT_QCOM_SM8150
 scripts/config --enable ARM_SMMU
-# Raphael uses the Goodix GT9886 touchscreen.  The inherited config also
-# enables an unrelated Pixel 4 FTS driver which still uses the removed
-# legacy <linux/of_gpio.h> API and cannot be built on Linux 7.1.
-scripts/config --disable TOUCHSCREEN_STM_FTS_DOWNSTREAM
-scripts/config --disable TOUCHSCREEN_STM_FTS_DOWNSTREAM_SPI
 scripts/config --set-str SYSTEM_TRUSTED_KEYS ""
 scripts/config --set-str SYSTEM_REVOCATION_KEYS ""
 
