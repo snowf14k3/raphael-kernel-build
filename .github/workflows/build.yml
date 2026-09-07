@@ -1,0 +1,50 @@
+name: Build Raphael Venus test kernel
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: raphael-venus-kernel
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build kernel packages
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout build files
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            bc bison build-essential clang cpio debhelper dpkg-dev \
+            dwarves fakeroot flex git kmod libdw-dev libelf-dev \
+            libssl-dev lld llvm python3 rsync xz-utils zstd
+
+      - name: Build Raphael kernel
+        env:
+          KERNEL_REPOSITORY: https://github.com/snowf14k3/linux.git
+          KERNEL_BRANCH: raphael-7.1
+        run: bash scripts/build.sh
+
+      - name: Upload test kernel
+        uses: actions/upload-artifact@v4
+        with:
+          name: raphael-venus-test-kernel
+          path: artifacts/*
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Write summary
+        run: |
+          echo '## Raphael Venus test kernel' >> "$GITHUB_STEP_SUMMARY"
+          echo '' >> "$GITHUB_STEP_SUMMARY"
+          echo '下载页面底部的 `raphael-venus-test-kernel`，暂时不要直接安装。' >> "$GITHUB_STEP_SUMMARY"
+          echo '下载完成后回到当前对话，我们继续逐步操作。' >> "$GITHUB_STEP_SUMMARY"

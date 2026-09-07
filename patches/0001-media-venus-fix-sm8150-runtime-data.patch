@@ -1,0 +1,35 @@
+diff --git a/arch/arm64/boot/dts/qcom/sm8150-xiaomi-raphael.dts b/arch/arm64/boot/dts/qcom/sm8150-xiaomi-raphael.dts
+index 500735949fe8..c1fce4987ec5 100644
+--- a/arch/arm64/boot/dts/qcom/sm8150-xiaomi-raphael.dts
++++ b/arch/arm64/boot/dts/qcom/sm8150-xiaomi-raphael.dts
+@@ -1310,7 +1310,7 @@ &usb_1_hsphy {
+ };
+ 
+ &venus {
+-	firmware-name = "qcom/sm8150/Xiaomi/raphael/venus.mdt";
++	firmware-name = "qcom/sm8150/Xiaomi/raphael/venus.mbn";
+ 	status = "okay";
+ };
+ 
+diff --git a/drivers/media/platform/qcom/venus/core.c b/drivers/media/platform/qcom/venus/core.c
+index 4899419231d4..1d1dd8199694 100644
+--- a/drivers/media/platform/qcom/venus/core.c
++++ b/drivers/media/platform/qcom/venus/core.c
+@@ -925,7 +925,7 @@ static const struct venus_resources sm8150_res = {
+ 	.vcodec_pmdomains_num = 3,
+ 	.opp_pmdomain = (const char *[]) { "mmcx" },
+ 	.vcodec_num = 2,
+-	.max_load = 3916800,
++	.max_load = 3110400,	/* 4096x2160@90 */
+ 	.hfi_version = HFI_VERSION_4XX,
+ 	.vpu_version = VPU_VERSION_IRIS1,
+ 	.vmem_id = VIDC_RESOURCE_NONE,
+@@ -936,7 +936,7 @@ static const struct venus_resources sm8150_res = {
+ 	.cp_size = 0x25800000,
+ 	.cp_nonpixel_start = 0x1000000,
+ 	.cp_nonpixel_size = 0x24800000,
+-	.fwname = "qcom/sm8150/venus.mdt",
++	.fwname = "qcom/sm8150/venus.mbn",
+ 	.dec_nodename = "video-core0",
+ 	.enc_nodename = "video-core1",
+ };
