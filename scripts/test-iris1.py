@@ -53,7 +53,11 @@ def main():
         "hfi_msgs.c": ["sys_get_prop_image_version"],
         "hfi_venus.c": ["venus_peek_debug_queue"],
     }
-    for name, sources in [("power", power_sources), ("hfi", hfi_sources)]:
+    queue_sources = {
+        "hfi_venus.c": ["venus_write_queue", "venus_read_queue"],
+    }
+    for name, sources in [("power", power_sources), ("hfi", hfi_sources),
+                          ("queues", queue_sources)]:
         extracted = []
         for filename, names in sources.items():
             source = (driver / filename).read_text(encoding="utf-8")

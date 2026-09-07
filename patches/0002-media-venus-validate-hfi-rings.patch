@@ -1,0 +1,146 @@
+diff --git a/drivers/media/platform/qcom/venus/hfi_venus.c b/drivers/media/platform/qcom/venus/hfi_venus.c
+index ccf5ba4e3c18..ceff81069156 100644
+--- a/drivers/media/platform/qcom/venus/hfi_venus.c
++++ b/drivers/media/platform/qcom/venus/hfi_venus.c
+@@ -256,21 +256,25 @@ static int venus_write_queue(struct venus_hfi_device *hdev,
+ 	if (!qhdr)
+ 		return -EINVAL;
+ 
+-	venus_dump_packet(hdev, packet);
+-
+-	dwords = (*(u32 *)packet) >> 2;
+-	if (!dwords)
++	if (*(u32 *)packet < sizeof(struct hfi_pkt_hdr) ||
++	    *(u32 *)packet > IFACEQ_VAR_HUGE_PKT_SIZE ||
++	    *(u32 *)packet % sizeof(u32))
+ 		return -EINVAL;
++	dwords = (*(u32 *)packet) / sizeof(u32);
+ 
+-	rd_idx = qhdr->read_idx;
+-	wr_idx = qhdr->write_idx;
+-	qsize = qhdr->q_size;
++	rd_idx = READ_ONCE(qhdr->read_idx);
++	wr_idx = READ_ONCE(qhdr->write_idx);
++	qsize = READ_ONCE(qhdr->q_size);
+ 	/* ensure rd/wr indices's are read from memory */
+ 	rmb();
+ 
+-	if (qsize > IFACEQ_QUEUE_SIZE / 4)
++	if (!qsize || qsize > IFACEQ_QUEUE_SIZE / sizeof(u32) ||
++	    qsize > queue->qmem.size / sizeof(u32) ||
++	    rd_idx >= qsize || wr_idx >= qsize)
+ 		return -EINVAL;
+ 
++	venus_dump_packet(hdev, packet);
++
+ 	if (wr_idx >= rd_idx)
+ 		empty_space = qsize - (wr_idx - rd_idx);
+ 	else
+@@ -323,7 +327,7 @@ static int venus_read_queue(struct venus_hfi_device *hdev,
+ 	struct hfi_pkt_hdr *pkt_hdr = NULL;
+ 	struct hfi_queue_header *qhdr;
+ 	u32 dwords, new_rd_idx;
+-	u32 rd_idx, wr_idx, type, qsize;
++	u32 rd_idx, wr_idx, type, qsize, bytes, available;
+ 	u32 *rd_ptr;
+ 	u32 recv_request = 0;
+ 	int ret = 0;
+@@ -335,12 +339,14 @@ static int venus_read_queue(struct venus_hfi_device *hdev,
+ 	if (!qhdr)
+ 		return -EINVAL;
+ 
+-	type = qhdr->type;
+-	rd_idx = qhdr->read_idx;
+-	wr_idx = qhdr->write_idx;
+-	qsize = qhdr->q_size;
++	type = READ_ONCE(qhdr->type);
++	rd_idx = READ_ONCE(qhdr->read_idx);
++	wr_idx = READ_ONCE(qhdr->write_idx);
++	qsize = READ_ONCE(qhdr->q_size);
+ 
+-	if (qsize > IFACEQ_QUEUE_SIZE / 4)
++	if (!qsize || qsize > IFACEQ_QUEUE_SIZE / sizeof(u32) ||
++	    qsize > queue->qmem.size / sizeof(u32) ||
++	    rd_idx >= qsize || wr_idx >= qsize)
+ 		return -EINVAL;
+ 
+ 	/* make sure data is valid before using it */
+@@ -370,9 +376,12 @@ static int venus_read_queue(struct venus_hfi_device *hdev,
+ 	    rd_ptr > (u32 *)(queue->qmem.kva + queue->qmem.size - sizeof(*rd_ptr)))
+ 		return -EINVAL;
+ 
+-	dwords = *rd_ptr >> 2;
+-	if (!dwords)
+-		return -EINVAL;
++	bytes = READ_ONCE(*rd_ptr);
++	available = (wr_idx + qsize - rd_idx) % qsize;
++	if (bytes < sizeof(struct hfi_pkt_hdr) || bytes % sizeof(u32) ||
++	    bytes / sizeof(u32) > available)
++		return -EBADMSG;
++	dwords = bytes / sizeof(u32);
+ 
+ 	new_rd_idx = rd_idx + dwords;
+ 	if (((dwords << 2) <= IFACEQ_VAR_HUGE_PKT_SIZE) && rd_idx <= qsize) {
+@@ -402,8 +411,8 @@ static int venus_read_queue(struct venus_hfi_device *hdev,
+ 	/* ensure updating read index */
+ 	wmb();
+ 
+-	rd_idx = qhdr->read_idx;
+-	wr_idx = qhdr->write_idx;
++	rd_idx = READ_ONCE(qhdr->read_idx);
++	wr_idx = READ_ONCE(qhdr->write_idx);
+ 	/* ensure rd/wr indices are read from memory */
+ 	rmb();
+ 
+@@ -845,20 +854,6 @@ static int venus_iface_dbgq_read_nolock(struct venus_hfi_device *hdev,
+ 	return 0;
+ }
+ 
+-static int venus_iface_dbgq_read(struct venus_hfi_device *hdev, void *pkt)
+-{
+-	int ret;
+-
+-	if (!pkt)
+-		return -EINVAL;
+-
+-	mutex_lock(&hdev->lock);
+-	ret = venus_iface_dbgq_read_nolock(hdev, pkt);
+-	mutex_unlock(&hdev->lock);
+-
+-	return ret;
+-}
+-
+ static void venus_set_qhdr_defaults(struct hfi_queue_header *qhdr)
+ {
+ 	qhdr->status = 1;
+@@ -1092,7 +1087,9 @@ static void venus_flush_debug_queue(struct venus_hfi_device *hdev)
+ 	struct device *dev = hdev->core->dev;
+ 	void *packet = hdev->dbg_buf;
+ 
+-	while (!venus_iface_dbgq_read(hdev, packet)) {
++	/* The IRQ thread and command-error paths share dbg_buf. */
++	mutex_lock(&hdev->lock);
++	while (!venus_iface_dbgq_read_nolock(hdev, packet)) {
+ 		struct hfi_msg_sys_coverage_pkt *pkt = packet;
+ 
+ 		if (pkt->hdr.pkt_type != HFI_MSG_SYS_COV) {
+@@ -1106,8 +1103,9 @@ static void venus_flush_debug_queue(struct venus_hfi_device *hdev)
+ 				    pkt->hdr.size > sizeof(hdev->dbg_buf))
+ 					continue;
+ 
+-				len = min_t(unsigned int,
+-					    pkt->hdr.size - sizeof(*pkt), 512);
++				len = min_t(unsigned int, pkt->msg_size,
++					    pkt->hdr.size - sizeof(*pkt));
++				len = min(len, 512U);
+ 				dev_info_ratelimited(dev, "venus-test4: FW: %.*s\n",
+ 						     (int)len, pkt->msg_data);
+ 			} else {
+@@ -1115,6 +1113,7 @@ static void venus_flush_debug_queue(struct venus_hfi_device *hdev)
+ 			}
+ 		}
+ 	}
++	mutex_unlock(&hdev->lock);
+ }
+ 
+ static int venus_prepare_power_collapse(struct venus_hfi_device *hdev,

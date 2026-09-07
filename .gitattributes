@@ -3,3 +3,4 @@
 *.c text eol=lf
 # Unified-diff context lines deliberately contain a leading space.
 *.patch text eol=lf -whitespace
+patches/series text eol=lf
