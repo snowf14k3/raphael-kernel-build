@@ -6,16 +6,23 @@ source_dir="${build_root}/linux-src"
 artifact_dir="${build_root}/artifacts"
 config_fragment="${build_root}/raphael.config"
 patch_file="${build_root}/patches/0001-media-venus-fix-sm8150-runtime-data.patch"
+expected_source_commit="58f3df07833f2382fe2fbc28f996c4c85817c1f6"
 build_commit="$(git -C "${build_root}" rev-parse HEAD)"
 patch_sha256="$(sha256sum "${patch_file}" | cut -d ' ' -f 1)"
 
 git clone --depth 1 --branch "${KERNEL_BRANCH}" \
 	"${KERNEL_REPOSITORY}" "${source_dir}"
 
+if [[ "$(git -C "${source_dir}" rev-parse HEAD)" != "${expected_source_commit}" ]]; then
+	echo "Kernel branch moved: rebase and verify the Venus patch before building." >&2
+	exit 1
+fi
+
 git -C "${source_dir}" apply --check "${patch_file}"
 git -C "${source_dir}" apply "${patch_file}"
 git -C "${source_dir}" diff --check
 git -C "${source_dir}" diff --stat
+python3 "${build_root}/scripts/test-iris1.py" "${source_dir}" --cc clang
 
 curl --fail --location --silent --show-error \
 	-o "${config_fragment}" \
@@ -31,7 +38,7 @@ scripts/kconfig/merge_config.sh -m .config \
 	"${config_fragment}" \
 	arch/arm64/configs/sm8150.config
 
-scripts/config --set-str LOCALVERSION "-sm8150-venus-test3"
+scripts/config --set-str LOCALVERSION "-sm8150-venus-test4"
 scripts/config --disable LOCALVERSION_AUTO
 scripts/config --module VIDEO_QCOM_VENUS
 scripts/config --enable SM_GCC_8150

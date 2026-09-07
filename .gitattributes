@@ -1,0 +1,5 @@
+*.sh text eol=lf
+*.py text eol=lf
+*.c text eol=lf
+# Unified-diff context lines deliberately contain a leading space.
+*.patch text eol=lf -whitespace

@@ -12,9 +12,18 @@ index 500735949fe8..c1fce4987ec5 100644
  };
  
 diff --git a/drivers/media/platform/qcom/venus/core.c b/drivers/media/platform/qcom/venus/core.c
-index 4899419231d4..39816f1efcdf 100644
+index 4899419231d4..5fffdca58038 100644
 --- a/drivers/media/platform/qcom/venus/core.c
 +++ b/drivers/media/platform/qcom/venus/core.c
+@@ -408,7 +408,7 @@ static int venus_probe(struct platform_device *pdev)
+ 
+ 	mutex_init(&core->pm_lock);
+ 
+-	core->pm_ops = venus_pm_get(core->res->hfi_version);
++	core->pm_ops = venus_pm_get(core);
+ 	if (!core->pm_ops)
+ 		return -ENODEV;
+ 
 @@ -447,6 +447,12 @@ static int venus_probe(struct platform_device *pdev)
  
  	platform_set_drvdata(pdev, core);
@@ -44,19 +53,124 @@ index 4899419231d4..39816f1efcdf 100644
  		pm_runtime_get_noresume(dev);
  		goto err_of_depopulate;
  	}
-@@ -925,9 +936,10 @@ static const struct venus_resources sm8150_res = {
+@@ -578,16 +589,25 @@ static __maybe_unused int venus_runtime_suspend(struct device *dev)
+ {
+ 	struct venus_core *core = dev_get_drvdata(dev);
+ 	const struct venus_pm_ops *pm_ops = core->pm_ops;
+-	int ret;
++	int ret, error;
+ 
+ 	ret = hfi_core_suspend(core);
+ 	if (ret)
+ 		return ret;
+ 
++	if (IS_IRIS1(core) && !core->iris1_irq_disabled) {
++		/* Drain the threaded handler before removing register access. */
++		disable_irq(core->irq);
++		core->iris1_irq_disabled = true;
++	}
++
+ 	if (pm_ops->core_power) {
+ 		ret = pm_ops->core_power(core, POWER_OFF);
+-		if (ret)
++		if (ret) {
++			if (IS_IRIS1(core))
++				goto err_cpucfg_path;
+ 			return ret;
++		}
+ 	}
+ 
+ 	ret = icc_set_bw(core->cpucfg_path, 0, 0);
+@@ -603,8 +623,19 @@ static __maybe_unused int venus_runtime_suspend(struct device *dev)
+ err_video_path:
+ 	icc_set_bw(core->cpucfg_path, kbps_to_icc(1000), 0);
+ err_cpucfg_path:
++	error = 0;
+ 	if (pm_ops->core_power)
+-		pm_ops->core_power(core, POWER_ON);
++		error = pm_ops->core_power(core, POWER_ON);
++	if (IS_IRIS1(core)) {
++		if (!error)
++			error = hfi_core_resume(core, false);
++		if (error)
++			dev_err(dev, "IRIS1 suspend rollback failed: %d\n", error);
++		else if (core->iris1_irq_disabled) {
++			core->iris1_irq_disabled = false;
++			enable_irq(core->irq);
++		}
++	}
+ 
+ 	return ret;
+ }
+@@ -633,7 +664,7 @@ static __maybe_unused int venus_runtime_resume(struct device *dev)
+ {
+ 	struct venus_core *core = dev_get_drvdata(dev);
+ 	const struct venus_pm_ops *pm_ops = core->pm_ops;
+-	int ret;
++	int ret, error;
+ 
+ 	ret = icc_set_bw(core->video_path, kbps_to_icc(20000), 0);
+ 	if (ret)
+@@ -641,15 +672,40 @@ static __maybe_unused int venus_runtime_resume(struct device *dev)
+ 
+ 	ret = icc_set_bw(core->cpucfg_path, kbps_to_icc(1000), 0);
+ 	if (ret)
+-		return ret;
++		goto err_video_path;
+ 
+ 	if (pm_ops->core_power) {
+ 		ret = pm_ops->core_power(core, POWER_ON);
+ 		if (ret)
+-			return ret;
++			goto err_cpucfg_path;
++	}
++
++	ret = hfi_core_resume(core, false);
++	if (!ret) {
++		if (IS_IRIS1(core) && core->iris1_irq_disabled) {
++			core->iris1_irq_disabled = false;
++			enable_irq(core->irq);
++		}
++		return 0;
+ 	}
++	if (!IS_IRIS1(core))
++		return ret;
+ 
+-	return hfi_core_resume(core, false);
++	error = pm_ops->core_power(core, POWER_OFF);
++	if (error) {
++		dev_err(dev, "IRIS1 resume rollback failed: %d\n", error);
++		/* Keep interconnect access if safe power removal was not possible. */
++		return ret;
++	}
++err_cpucfg_path:
++	if (IS_IRIS1(core) && core->iris1_pd_mask)
++		return ret;
++	if (IS_IRIS1(core))
++		icc_set_bw(core->cpucfg_path, 0, 0);
++err_video_path:
++	if (IS_IRIS1(core))
++		icc_set_bw(core->video_path, 0, 0);
++	return ret;
+ }
+ 
+ static const struct dev_pm_ops venus_pm_ops = {
+@@ -924,10 +980,12 @@ static const struct venus_resources sm8150_res = {
+ 	.vcodec_pmdomains = (const char *[]) { "venus", "vcodec0", "vcodec1" },
  	.vcodec_pmdomains_num = 3,
  	.opp_pmdomain = (const char *[]) { "mmcx" },
- 	.vcodec_num = 2,
+-	.vcodec_num = 2,
 -	.max_load = 3916800,
-+	.max_load = 3110400,	/* 4096x2160@90 */
++	/* MVS0 is the video codec; MVS1 is CVP, not a second video core. */
++	.vcodec_num = 1,
++	.max_load = 3916800,	/* SM8150 downstream max-hw-load */
  	.hfi_version = HFI_VERSION_4XX,
  	.vpu_version = VPU_VERSION_IRIS1,
 +	.autosuspend_delay_ms = 1500,
  	.vmem_id = VIDC_RESOURCE_NONE,
  	.vmem_size = 0,
  	.vmem_addr = 0,
-@@ -936,7 +948,7 @@ static const struct venus_resources sm8150_res = {
+@@ -936,7 +994,7 @@ static const struct venus_resources sm8150_res = {
  	.cp_size = 0x25800000,
  	.cp_nonpixel_start = 0x1000000,
  	.cp_nonpixel_size = 0x24800000,
@@ -66,7 +180,7 @@ index 4899419231d4..39816f1efcdf 100644
  	.enc_nodename = "video-core1",
  };
 diff --git a/drivers/media/platform/qcom/venus/core.h b/drivers/media/platform/qcom/venus/core.h
-index f26e72f79b12..546d48a48123 100644
+index f26e72f79b12..340d62565cf2 100644
 --- a/drivers/media/platform/qcom/venus/core.h
 +++ b/drivers/media/platform/qcom/venus/core.h
 @@ -88,6 +88,7 @@ struct venus_resources {
@@ -77,8 +191,34 @@ index f26e72f79b12..546d48a48123 100644
  	u8 num_vpp_pipes;
  	u32 max_load;
  	unsigned int vmem_id;
+@@ -182,6 +183,12 @@ struct venus_format {
+  * @dump_core:	a flag indicating that a core dump is required
+  * @ocs:	OF changeset pointer
+  * @hwmode_dev:	a flag indicating that HW_CTRL_TRIGGER is used in clock driver
++ * @iris1_pd_mask: IRIS1 runtime-PM references owned by the core
++ * @iris1_clk_mask: IRIS1 clock groups enabled by the core
++ * @iris1_hw_mask: IRIS1 domains handed to firmware control
++ * @iris1_opp_on: IRIS1 performance vote is active
++ * @iris1_freq: last IRIS1 operating frequency, retained across suspend
++ * @iris1_irq_disabled: runtime PM owns one IRQ disable reference
+  */
+ struct venus_core {
+ 	void __iomem *base;
+@@ -242,6 +249,12 @@ struct venus_core {
+ 	unsigned long dump_core;
+ 	struct of_changeset *ocs;
+ 	bool hwmode_dev;
++	unsigned int iris1_pd_mask;
++	unsigned int iris1_clk_mask;
++	unsigned int iris1_hw_mask;
++	bool iris1_opp_on;
++	unsigned long iris1_freq;
++	bool iris1_irq_disabled;
+ };
+ 
+ struct vdec_controls {
 diff --git a/drivers/media/platform/qcom/venus/hfi.c b/drivers/media/platform/qcom/venus/hfi.c
-index 675e6fd1e9fa..b5d661306482 100644
+index 675e6fd1e9fa..5dfe4ba64779 100644
 --- a/drivers/media/platform/qcom/venus/hfi.c
 +++ b/drivers/media/platform/qcom/venus/hfi.c
 @@ -213,14 +213,21 @@ int hfi_session_init(struct venus_inst *inst, u32 pixfmt)
@@ -100,7 +240,7 @@ index 675e6fd1e9fa..b5d661306482 100644
  
  	inst->state = INST_INIT;
 +	if (IS_IRIS1(core))
-+		dev_info(core->dev, "venus-test3: session_init OK type=%u codec=%#x\n",
++		dev_info(core->dev, "venus-test4: session_init OK type=%u codec=%#x\n",
 +			 inst->session_type, inst->hfi_codec);
  
  	return 0;
@@ -120,7 +260,7 @@ index 675e6fd1e9fa..b5d661306482 100644
  	reinit_completion(&inst->done);
  
 +	if (IS_IRIS1(core))
-+		dev_info(core->dev, "venus-test3: get_property type=%#x session_type=%u\n",
++		dev_info(core->dev, "venus-test4: get_property type=%#x session_type=%u\n",
 +			 ptype, inst->session_type);
 +
  	ret = ops->session_get_property(inst, ptype);
@@ -140,28 +280,125 @@ index 675e6fd1e9fa..b5d661306482 100644
  	*hprop = inst->hprop;
  
 diff --git a/drivers/media/platform/qcom/venus/hfi_msgs.c b/drivers/media/platform/qcom/venus/hfi_msgs.c
-index 47b99d5b5af7..80def38e316a 100644
+index 47b99d5b5af7..dff29366d03d 100644
 --- a/drivers/media/platform/qcom/venus/hfi_msgs.c
 +++ b/drivers/media/platform/qcom/venus/hfi_msgs.c
-@@ -306,6 +306,10 @@ sys_get_prop_image_version(struct venus_core *core,
- 	if (!img_ver)
+@@ -291,40 +291,49 @@ sys_get_prop_image_version(struct venus_core *core,
+ {
+ 	struct device *dev = core->dev;
+ 	u8 *smem_tbl_ptr;
+-	u8 *img_ver;
+-	int req_bytes;
++	char img_ver[VER_STR_SZ + 1];
++	struct firmware_version version = { 0 };
+ 	size_t smem_blk_sz;
+ 	int ret;
+ 
+-	req_bytes = pkt->hdr.size - sizeof(*pkt);
+-
+-	if (req_bytes < VER_STR_SZ || !pkt->data[0] || pkt->num_properties > 1)
++	if (pkt->hdr.size < sizeof(*pkt) + VER_STR_SZ ||
++	    !pkt->data[0] || pkt->num_properties != 1)
+ 		/* bad packet */
  		return;
  
-+	if (IS_IRIS1(core))
-+		dev_info(dev, "venus-test3: raw firmware version: %.*s\n",
-+			 VER_STR_SZ, img_ver);
+-	img_ver = pkt->data;
+-	if (!img_ver)
+-		return;
++	/* The firmware field is fixed-width and need not be NUL-terminated. */
++	memcpy(img_ver, pkt->data, VER_STR_SZ);
++	img_ver[VER_STR_SZ] = '\0';
 +
++	if (IS_IRIS1(core)) {
++		dev_info(dev, "venus-test4: raw firmware version: %.*s\n",
++			 VER_STR_SZ, img_ver);
++		ret = sscanf(img_ver, "14:VIDEO.IR.%u.%u-%u",
++			     &version.major, &version.minor, &version.rev);
++		if (ret == 3)
++			goto done;
++	}
+ 
  	ret = sscanf(img_ver, "14:video-firmware.%u.%u-%u",
- 		     &core->venus_ver.major, &core->venus_ver.minor, &core->venus_ver.rev);
- 	if (ret)
+-		     &core->venus_ver.major, &core->venus_ver.minor, &core->venus_ver.rev);
+-	if (ret)
++		     &version.major, &version.minor, &version.rev);
++	if (ret == 3)
+ 		goto done;
+ 
+ 	ret = sscanf(img_ver, "14:VIDEO.VPU.%u.%u-%u",
+-		     &core->venus_ver.major, &core->venus_ver.minor, &core->venus_ver.rev);
+-	if (ret)
++		     &version.major, &version.minor, &version.rev);
++	if (ret == 3)
+ 		goto done;
+ 
+ 	ret = sscanf(img_ver, "14:VIDEO.VE.%u.%u-%u",
+-		     &core->venus_ver.major, &core->venus_ver.minor, &core->venus_ver.rev);
+-	if (ret)
++		     &version.major, &version.minor, &version.rev);
++	if (ret == 3)
+ 		goto done;
+ 
+ 	dev_err(dev, VDBGL "error reading F/W version\n");
+ 	return;
+ 
+ done:
++	core->venus_ver = version;
+ 	dev_dbg(dev, VDBGL "F/W version: %s, major %u, minor %u, revision %u\n",
+ 		img_ver, core->venus_ver.major, core->venus_ver.minor, core->venus_ver.rev);
+ 
 diff --git a/drivers/media/platform/qcom/venus/hfi_venus.c b/drivers/media/platform/qcom/venus/hfi_venus.c
-index 9150dcbda58c..b38f01ebc1a1 100644
+index 9150dcbda58c..ccf5ba4e3c18 100644
 --- a/drivers/media/platform/qcom/venus/hfi_venus.c
 +++ b/drivers/media/platform/qcom/venus/hfi_venus.c
-@@ -148,6 +148,42 @@ static bool venus_is_valid_state(struct venus_hfi_device *hdev)
+@@ -148,6 +148,87 @@ static bool venus_is_valid_state(struct venus_hfi_device *hdev)
  	return hdev->state != VENUS_STATE_DEINIT;
  }
  
++/* Snapshot pending debug packets without consuming the firmware ring. */
++static void venus_peek_debug_queue(struct venus_hfi_device *hdev)
++{
++	struct iface_queue *queue = &hdev->queues[IFACEQ_DBG_IDX];
++	struct hfi_queue_header *qhdr = queue->qhdr;
++	u32 snapshot[128], *ring = queue->qmem.kva;
++	struct hfi_msg_sys_debug_pkt *pkt = (void *)snapshot;
++	u32 rd, wr, size, available, bytes, words, copied, i, count;
++
++	if (!qhdr || !ring)
++		return;
++	size = READ_ONCE(qhdr->q_size);
++	rd = READ_ONCE(qhdr->read_idx);
++	wr = READ_ONCE(qhdr->write_idx);
++	if (!size || size > queue->qmem.size / sizeof(u32) ||
++	    rd >= size || wr >= size)
++		return;
++	/* Pair the published write index with the packet payload. */
++	dma_rmb();
++	available = (wr + size - rd) % size;
++
++	for (count = 0; count < 3 && available; count++) {
++		bytes = READ_ONCE(ring[rd]);
++		if (bytes < sizeof(*pkt) || bytes % sizeof(u32))
++			break;
++		words = bytes / sizeof(u32);
++		if (words > available || bytes > IFACEQ_VAR_HUGE_PKT_SIZE)
++			break;
++		copied = min_t(u32, words, ARRAY_SIZE(snapshot));
++		for (i = 0; i < copied; i++)
++			snapshot[i] = READ_ONCE(ring[(rd + i) % size]);
++		if (pkt->hdr.pkt_type == HFI_MSG_SYS_DEBUG &&
++		    pkt->msg_size <= bytes - sizeof(*pkt)) {
++			u32 len = min_t(u32, pkt->msg_size,
++					copied * sizeof(u32) - sizeof(*pkt));
++
++			dev_err(hdev->core->dev, "venus-test4: pending FW debug: %.*s\n",
++				len, pkt->msg_data);
++		}
++		rd = (rd + words) % size;
++		available -= words;
++	}
++}
++
 +/* Temporary IRIS1 bring-up diagnostics; callers must not hold hdev->lock. */
 +void venus_hfi_dump_state(struct venus_core *core, const char *where, int error)
 +{
@@ -178,7 +415,7 @@ index 9150dcbda58c..b38f01ebc1a1 100644
 +	 */
 +	mutex_lock(&hdev->lock);
 +	dev_err(core->dev,
-+		"venus-test3: %s: ret=%d state=%u powered=%u suspended=%u last_cmd=%#x irq=%#x\n",
++		"venus-test4: %s: ret=%d state=%u powered=%u suspended=%u last_cmd=%#x irq=%#x\n",
 +		where, error, hdev->state, READ_ONCE(hdev->power_enabled),
 +		READ_ONCE(hdev->suspended), hdev->last_packet_type,
 +		READ_ONCE(hdev->irq_status));
@@ -190,18 +427,46 @@ index 9150dcbda58c..b38f01ebc1a1 100644
 +			continue;
 +
 +		dev_err(core->dev,
-+			"venus-test3: q%u: rd=%u wr=%u size=%u rx_req=%u tx_req=%u dropped=%u\n",
++			"venus-test4: q%u: rd=%u wr=%u size=%u rx_req=%u tx_req=%u dropped=%u\n",
 +			i, READ_ONCE(qhdr->read_idx), READ_ONCE(qhdr->write_idx),
 +			READ_ONCE(qhdr->q_size), READ_ONCE(qhdr->rx_req),
 +			READ_ONCE(qhdr->tx_req), READ_ONCE(qhdr->pkt_drop_cnt));
 +	}
++	venus_peek_debug_queue(hdev);
 +	mutex_unlock(&hdev->lock);
 +}
 +
  static void venus_dump_packet(struct venus_hfi_device *hdev, const void *packet)
  {
  	size_t pkt_size = *(u32 *)packet;
-@@ -1014,7 +1050,21 @@ static void venus_flush_debug_queue(struct venus_hfi_device *hdev)
+@@ -589,7 +670,8 @@ static int venus_halt_axi(struct venus_hfi_device *hdev)
+ 	u32 mask_val;
+ 	int ret;
+ 
+-	if (IS_AR50_LITE(hdev->core))
++	/* IRIS1 downstream collapses after PC_READY + SCM, without v4 AXI HALT. */
++	if (IS_IRIS1(hdev->core) || IS_AR50_LITE(hdev->core))
+ 		return 0;
+ 
+ 	if (IS_IRIS2(hdev->core) || IS_IRIS2_1(hdev->core)) {
+@@ -978,10 +1060,12 @@ static int venus_sys_set_default_properties(struct venus_hfi_device *hdev)
+ 			dev_warn(dev, "setting idle response ON failed (%d)\n", ret);
+ 	}
+ 
+-	ret = venus_sys_set_power_control(hdev, venus_fw_low_power_mode);
+-	if (ret)
+-		dev_warn(dev, "setting hw power collapse ON failed (%d)\n",
+-			 ret);
++	/* IRIS1 downstream sends this with session defaults, not SYS_INIT. */
++	if (!IS_IRIS1(hdev->core)) {
++		ret = venus_sys_set_power_control(hdev, venus_fw_low_power_mode);
++		if (ret)
++			dev_warn(dev, "setting hw power collapse ON failed (%d)\n", ret);
++	}
+ 
+ 	/* For specific venus core, it is mandatory to set the UBWC configuration */
+ 	if (res->ubwc_conf) {
+@@ -1014,7 +1098,21 @@ static void venus_flush_debug_queue(struct venus_hfi_device *hdev)
  		if (pkt->hdr.pkt_type != HFI_MSG_SYS_COV) {
  			struct hfi_msg_sys_debug_pkt *pkt = packet;
  
@@ -216,7 +481,7 @@ index 9150dcbda58c..b38f01ebc1a1 100644
 +
 +				len = min_t(unsigned int,
 +					    pkt->hdr.size - sizeof(*pkt), 512);
-+				dev_info_ratelimited(dev, "venus-test3: FW: %.*s\n",
++				dev_info_ratelimited(dev, "venus-test4: FW: %.*s\n",
 +						     (int)len, pkt->msg_data);
 +			} else {
 +				dev_dbg(dev, VDBGFW "%s", pkt->msg_data);
@@ -224,11 +489,25 @@ index 9150dcbda58c..b38f01ebc1a1 100644
  		}
  	}
  }
-@@ -1633,7 +1683,16 @@ static int venus_suspend_3xx(struct venus_core *core)
+@@ -1249,6 +1347,12 @@ static int venus_session_init(struct venus_inst *inst, u32 session_type,
+ 	if (ret)
+ 		goto err;
+ 
++	if (IS_IRIS1(inst->core)) {
++		ret = venus_sys_set_power_control(hdev, venus_fw_low_power_mode);
++		if (ret)
++			goto err;
++	}
++
+ 	ret = pkt_session_init(&pkt, inst, session_type, codec);
+ 	if (ret)
+ 		goto err;
+@@ -1633,8 +1737,18 @@ static int venus_suspend_3xx(struct venus_core *core)
  	ret = readx_poll_timeout(venus_cpu_and_video_core_idle, hdev, val, val,
  				 1500, 100 * 1500);
  	if (ret) {
 -		dev_err(dev, "wait for cpu and video core idle fail (%d)\n", ret);
+-		return ret;
 +		if (IS_IRIS1(core))
 +			dev_err(dev,
 +				"wait for cpu and video core idle fail (%d), cpu-status %#x ctrl-status %#x\n",
@@ -239,9 +518,11 @@ index 9150dcbda58c..b38f01ebc1a1 100644
 +			dev_err(dev, "wait for cpu and video core idle fail (%d)\n",
 +				ret);
 +		venus_hfi_dump_state(core, "suspend idle wait", ret);
- 		return ret;
++		/* No PC_PREP was sent: retain power and allow a later PM attempt. */
++		return IS_IRIS1(core) ? -EAGAIN : ret;
  	}
  
+ 	ret = venus_prepare_power_collapse(hdev, false);
 diff --git a/drivers/media/platform/qcom/venus/hfi_venus.h b/drivers/media/platform/qcom/venus/hfi_venus.h
 index 1b656ef2bf07..60594cba8511 100644
 --- a/drivers/media/platform/qcom/venus/hfi_venus.h
@@ -253,8 +534,248 @@ index 1b656ef2bf07..60594cba8511 100644
 +void venus_hfi_dump_state(struct venus_core *core, const char *where, int error);
  
  #endif
+diff --git a/drivers/media/platform/qcom/venus/pm_helpers.c b/drivers/media/platform/qcom/venus/pm_helpers.c
+index 73f74403edab..8e6c2fb57367 100644
+--- a/drivers/media/platform/qcom/venus/pm_helpers.c
++++ b/drivers/media/platform/qcom/venus/pm_helpers.c
+@@ -95,6 +95,12 @@ static int core_clks_set_rate(struct venus_core *core, unsigned long freq)
+ 	if (ret)
+ 		return ret;
+ 
++	/* MVSC, MVS0 and MVS1 share VIDEO_CC_IRIS_CLK_SRC on SM8150. */
++	if (IS_IRIS1(core)) {
++		core->iris1_freq = freq;
++		return 0;
++	}
++
+ 	ret = clk_set_rate(core->vcodec0_clks[0], freq);
+ 	if (ret)
+ 		return ret;
+@@ -1086,6 +1092,186 @@ static int core_power_v4(struct venus_core *core, int on)
+ 	return ret;
+ }
+ 
++/*
++ * SM8150 downstream powers iris-ctl, vcodec and cvp before loading firmware.
++ * Keep those resources with the parent device, including during SESSION_INIT;
++ * the generic v4 per-session votes arrive too late for IRIS1 firmware.
++ * Runtime PM serializes this state; core_put runs after runtime PM is disabled.
++ */
++static int iris1_power_off(struct venus_core *core)
++{
++	struct device *dev = core->dev;
++	int i, ret, error = 0;
++
++	/* Never remove clocks or power while firmware still owns a domain. */
++	for (i = 2; i > 0; i--) {
++		if (!(core->iris1_hw_mask & BIT(i)))
++			continue;
++		ret = dev_pm_genpd_set_hwmode(core->pmdomains->pd_devs[i], false);
++		if (ret)
++			return ret;
++		core->iris1_hw_mask &= ~BIT(i);
++	}
++
++	if (core->iris1_clk_mask & BIT(2))
++		vcodec_clks_disable(core, core->vcodec1_clks);
++	if (core->iris1_clk_mask & BIT(1))
++		vcodec_clks_disable(core, core->vcodec0_clks);
++	if (core->iris1_clk_mask & BIT(0))
++		core_clks_disable(core);
++	core->iris1_clk_mask = 0;
++
++	for (i = 2; i >= 0; i--) {
++		if (!(core->iris1_pd_mask & BIT(i)))
++			continue;
++		ret = pm_runtime_put_sync(core->pmdomains->pd_devs[i]);
++		/* put_sync consumes our reference even when the callback fails. */
++		core->iris1_pd_mask &= ~BIT(i);
++		if (ret < 0 && !error)
++			error = ret;
++	}
++
++	if (core->iris1_opp_on) {
++		ret = dev_pm_opp_set_rate(dev, 0);
++		if (!ret)
++			core->iris1_opp_on = false;
++		else if (!error)
++			error = ret;
++	}
++
++	return error;
++}
++
++static int core_power_iris1(struct venus_core *core, int on)
++{
++	struct device *dev = core->dev;
++	unsigned long freq = core->iris1_freq;
++	struct dev_pm_opp *opp;
++	unsigned int i;
++	int ret, error;
++
++	if (on == POWER_OFF)
++		return iris1_power_off(core);
++
++	if (core->iris1_pd_mask == GENMASK(2, 0) &&
++	    core->iris1_clk_mask == GENMASK(2, 0) &&
++	    core->iris1_hw_mask == GENMASK(2, 1) && core->iris1_opp_on)
++		return 0;
++
++	/* A failed resume may have retained resources for safe teardown. */
++	if (core->iris1_pd_mask || core->iris1_clk_mask || core->iris1_opp_on) {
++		ret = iris1_power_off(core);
++		if (ret)
++			return ret;
++	}
++
++	for (i = 0; i < 3; i++) {
++		ret = pm_runtime_resume_and_get(core->pmdomains->pd_devs[i]);
++		if (ret < 0)
++			goto err;
++		core->iris1_pd_mask |= BIT(i);
++
++		if (!i)
++			continue;
++		/* Use SM8150 GDSC control, never the legacy v4 wrapper offsets. */
++		ret = dev_pm_genpd_set_hwmode(core->pmdomains->pd_devs[i], false);
++		if (ret)
++			goto err;
++	}
++
++	ret = core_resets_reset(core);
++	if (ret)
++		goto err;
++
++	/* Vote MMCX as well as the RCG: the bootloader may leave it at XO. */
++	if (!freq) {
++		/* Downstream starts at the highest allowed rate before load scaling. */
++		freq = ULONG_MAX;
++		opp = dev_pm_opp_find_freq_floor(dev, &freq);
++	} else {
++		opp = dev_pm_opp_find_freq_ceil(dev, &freq);
++	}
++	if (IS_ERR(opp)) {
++		ret = PTR_ERR(opp);
++		goto err;
++	}
++	dev_pm_opp_put(opp);
++	ret = core_clks_set_rate(core, freq);
++	if (ret)
++		goto err;
++	core->iris1_opp_on = true;
++
++	ret = core_clks_enable(core);
++	if (ret)
++		goto err;
++	core->iris1_clk_mask |= BIT(0);
++	ret = vcodec_clks_enable(core, core->vcodec0_clks);
++	if (ret)
++		goto err;
++	core->iris1_clk_mask |= BIT(1);
++	ret = vcodec_clks_enable(core, core->vcodec1_clks);
++	if (ret)
++		goto err;
++	core->iris1_clk_mask |= BIT(2);
++
++	/* Like downstream, hand off MVS0/MVS1 only after all clocks are on. */
++	for (i = 1; i < 3; i++) {
++		ret = dev_pm_genpd_set_hwmode(core->pmdomains->pd_devs[i], true);
++		if (ret)
++			goto err;
++		core->iris1_hw_mask |= BIT(i);
++	}
++
++	dev_info_once(dev, "venus-test4: IRIS1 resources ready at %lu Hz (MVSC, MVS0, CVP)\n",
++		      clk_get_rate(core->clks[0]));
++	return 0;
++
++err:
++	error = iris1_power_off(core);
++	if (error)
++		dev_err(dev, "IRIS1 power-on rollback failed: %d\n", error);
++	return ret;
++}
++
++static void core_put_iris1(struct venus_core *core)
++{
++	int ret;
++
++	/* Also release a failed probe/resume, which cannot call runtime_suspend. */
++	ret = iris1_power_off(core);
++	if (ret)
++		dev_err(core->dev, "IRIS1 resource release failed: %d\n", ret);
++}
++
++static int coreid_power_iris1(struct venus_inst *inst, int on)
++{
++	struct venus_core *core = inst->core;
++	int ret;
++
++	if (on == POWER_OFF) {
++		mutex_lock(&core->lock);
++		inst->clk_data.core_id = VIDC_CORE_ID_DEFAULT;
++		inst->core_acquired = false;
++		mutex_unlock(&core->lock);
++		return 0;
++	}
++	if (inst->core_acquired)
++		return 0;
++
++	/*
++	 * Keep v4 load admission and encoder low-power selection. vcodec_num = 1
++	 * confines both encode and decode to MVS0; CVP belongs to core runtime PM.
++	 */
++	ret = decide_core(inst);
++	mutex_lock(&core->lock);
++	if (ret)
++		inst->clk_data.core_id = VIDC_CORE_ID_DEFAULT;
++	else
++		inst->core_acquired = true;
++	mutex_unlock(&core->lock);
++	return ret;
++}
++
+ static unsigned long calculate_inst_freq(struct venus_inst *inst,
+ 					 unsigned long filled_len)
+ {
+@@ -1204,9 +1390,20 @@ static const struct venus_pm_ops pm_ops_v4 = {
+ 	.load_scale = load_scale_v4,
+ };
+ 
+-const struct venus_pm_ops *venus_pm_get(enum hfi_version version)
++static const struct venus_pm_ops pm_ops_iris1 = {
++	.core_get = core_get_v4,
++	.core_put = core_put_iris1,
++	.core_power = core_power_iris1,
++	.coreid_power = coreid_power_iris1,
++	.load_scale = load_scale_v4,
++};
++
++const struct venus_pm_ops *venus_pm_get(struct venus_core *core)
+ {
+-	switch (version) {
++	if (IS_IRIS1(core))
++		return &pm_ops_iris1;
++
++	switch (core->res->hfi_version) {
+ 	case HFI_VERSION_1XX:
+ 	default:
+ 		return &pm_ops_v1;
+diff --git a/drivers/media/platform/qcom/venus/pm_helpers.h b/drivers/media/platform/qcom/venus/pm_helpers.h
+index a492c50c5543..cab1b48dc374 100644
+--- a/drivers/media/platform/qcom/venus/pm_helpers.h
++++ b/drivers/media/platform/qcom/venus/pm_helpers.h
+@@ -27,7 +27,7 @@ struct venus_pm_ops {
+ 	int (*load_scale)(struct venus_inst *inst);
+ };
+ 
+-const struct venus_pm_ops *venus_pm_get(enum hfi_version version);
++const struct venus_pm_ops *venus_pm_get(struct venus_core *core);
+ 
+ static inline int venus_pm_load_scale(struct venus_inst *inst)
+ {
 diff --git a/drivers/media/platform/qcom/venus/vdec.c b/drivers/media/platform/qcom/venus/vdec.c
-index daa8f56610c7..30983d1d4b59 100644
+index daa8f56610c7..0ff1a64c4b73 100644
 --- a/drivers/media/platform/qcom/venus/vdec.c
 +++ b/drivers/media/platform/qcom/venus/vdec.c
 @@ -958,20 +958,32 @@ static int vdec_queue_setup(struct vb2_queue *q,
@@ -264,7 +785,7 @@ index daa8f56610c7..30983d1d4b59 100644
 -	if (ret)
 +	if (ret) {
 +		if (IS_IRIS1(core))
-+			dev_err(core->dev, "venus-test3: queue_setup pm_get: %d\n", ret);
++			dev_err(core->dev, "venus-test4: queue_setup pm_get: %d\n", ret);
  		return ret;
 +	}
  
@@ -272,7 +793,7 @@ index daa8f56610c7..30983d1d4b59 100644
 -	if (ret)
 +	if (ret) {
 +		if (IS_IRIS1(core))
-+			dev_err(core->dev, "venus-test3: queue_setup session_init: %d\n", ret);
++			dev_err(core->dev, "venus-test4: queue_setup session_init: %d\n", ret);
  		goto put_power;
 +	}
  
@@ -280,7 +801,7 @@ index daa8f56610c7..30983d1d4b59 100644
 -	if (ret)
 +	if (ret) {
 +		if (IS_IRIS1(core))
-+			dev_err(core->dev, "venus-test3: queue_setup num_buffers: %d\n", ret);
++			dev_err(core->dev, "venus-test4: queue_setup num_buffers: %d\n", ret);
  		goto put_power;
 +	}
  
@@ -288,7 +809,7 @@ index daa8f56610c7..30983d1d4b59 100644
 -	if (ret)
 +	if (ret) {
 +		if (IS_IRIS1(core))
-+			dev_err(core->dev, "venus-test3: queue_setup pm_put: %d\n", ret);
++			dev_err(core->dev, "venus-test4: queue_setup pm_put: %d\n", ret);
  		return ret;
 +	}
  
