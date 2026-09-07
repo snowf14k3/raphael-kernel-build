@@ -31,6 +31,11 @@ scripts/config --enable SM_GCC_8150
 scripts/config --enable SM_VIDEOCC_8150
 scripts/config --enable INTERCONNECT_QCOM_SM8150
 scripts/config --enable ARM_SMMU
+# Raphael uses the Goodix GT9886 touchscreen.  The inherited config also
+# enables an unrelated Pixel 4 FTS driver which still uses the removed
+# legacy <linux/of_gpio.h> API and cannot be built on Linux 7.1.
+scripts/config --disable TOUCHSCREEN_STM_FTS_DOWNSTREAM
+scripts/config --disable TOUCHSCREEN_STM_FTS_DOWNSTREAM_SPI
 scripts/config --set-str SYSTEM_TRUSTED_KEYS ""
 scripts/config --set-str SYSTEM_REVOCATION_KEYS ""
 
