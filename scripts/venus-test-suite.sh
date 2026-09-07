@@ -8,7 +8,7 @@ frame_hashes() {
 }
 if [[ "${1:-}" == --plan ]]; then
 	printf '%s\n' \
-		'Preflight: test5 kernel, SM8150 Venus nodes, idle devices, tools, free space.' \
+		'Preflight: test6 kernel, SM8150 Venus nodes, idle devices, tools, free space.' \
 		'A: PM held on; H.264 320x240/720p/1080p; hardware encode; reopen.' \
 		'B: PM auto; observe suspended, decode, repeat for two cycles.' \
 		'Compare decode frame hashes with software and check exact frame counts.' \
@@ -33,10 +33,10 @@ if [[ "${1:-}" == --self-test ]]; then
 fi
 [[ $# -eq 0 ]] || { echo 'Usage: sudo bash venus-test-suite.sh [--plan|--self-test]' >&2; exit 2; }
 [[ $EUID -eq 0 ]] || { echo '请使用 sudo bash venus-test-suite.sh。' >&2; exit 2; }
-[[ "$(uname -r)" == *sm8150-venus-test5* ]] || {
-	echo '当前不是 test5 内核，未开始测试，也未修改设备设置。' >&2; exit 2;
+[[ "$(uname -r)" == *sm8150-venus-test6* ]] || {
+	echo '当前不是 test6 内核，未开始测试，也未修改设备设置。' >&2; exit 2;
 }
-for command in ffmpeg timeout tar awk diff cmp sha256sum fuser dmesg readlink; do
+for command in ffmpeg timeout tar awk diff cmp sha256sum fuser dmesg readlink sync; do
 	command -v "$command" >/dev/null || { echo "缺少命令：$command；未开始测试。" >&2; exit 2; }
 done
 dev=/sys/bus/platform/devices/aa00000.video-codec
@@ -75,6 +75,7 @@ summary="$run_root/summary.tsv"
 printf 'test\tresult\tdetail\n' > "$summary"
 record() {
 	printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "$summary"
+	sync -f "$summary"
 	printf '%-24s %s\n' "$1" "$2"
 }
 set_knob() {
@@ -148,6 +149,7 @@ run_ffmpeg() {
 	if timeout -k 5s 25s ffmpeg -nostdin -hide_banner -loglevel info "$@" \
 		> "$run_root/$label.ffmpeg.log" 2>&1; then rc=0; else rc=$?; fi
 	printf '\ncommand_exit=%s\n' "$rc" >> "$run_root/$label.ffmpeg.log"
+	sync -f "$run_root"
 	return "$rc"
 }
 decode_case() {

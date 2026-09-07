@@ -18,6 +18,12 @@ def function(source, name):
         source, re.MULTILINE,
     )
     if not start:
+        start = re.search(
+            r"^[A-Za-z_][A-Za-z0-9_ \t*]*\b" + re.escape(name) +
+            r"\([^;{]*\)\s*\{",
+            source, re.MULTILINE,
+        )
+    if not start:
         raise RuntimeError(f"Function not found: {name}")
     opening = source.index("{", start.start())
     depth = 0
@@ -56,8 +62,12 @@ def main():
     queue_sources = {
         "hfi_venus.c": ["venus_write_queue", "venus_read_queue"],
     }
+    session_sources = {
+        "helpers.c": ["venus_helper_set_work_route"],
+    }
     for name, sources in [("power", power_sources), ("hfi", hfi_sources),
-                          ("queues", queue_sources)]:
+                          ("queues", queue_sources),
+                          ("session", session_sources)]:
         extracted = []
         for filename, names in sources.items():
             source = (driver / filename).read_text(encoding="utf-8")

@@ -1,3 +1,4 @@
 0001-media-venus-fix-sm8150-runtime-data.patch
 0002-media-venus-validate-hfi-rings.patch
 0003-media-venus-add-batch-diagnostics.patch
+0004-media-venus-complete-sm8150-vpu5-session-setup.patch
