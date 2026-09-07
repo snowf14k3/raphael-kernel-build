@@ -8,10 +8,11 @@ frame_hashes() {
 }
 if [[ "${1:-}" == --plan ]]; then
 	printf '%s\n' \
-		'Preflight: test6 kernel, SM8150 Venus nodes, idle devices, tools, free space.' \
-		'A: PM held on; H.264 320x240/720p/1080p; hardware encode; reopen.' \
+		'Preflight: test7 kernel, SM8150 Venus nodes, idle devices, tools, free space.' \
+		'A: PM held on; H.264 320x240/720p/1080p decode; reopen.' \
 		'B: PM auto; observe suspended, decode, repeat for two cycles.' \
 		'Compare decode frame hashes with software and check exact frame counts.' \
+		'Hardware encode stays disabled unless VENUS_TEST_ENCODER=1 is explicitly set.' \
 		'Restore original PM/debug settings; save local logs and report.tar.gz.' \
 		'Stop issuing codec jobs after a timeout or functional failure.'
 	exit 0
@@ -33,8 +34,11 @@ if [[ "${1:-}" == --self-test ]]; then
 fi
 [[ $# -eq 0 ]] || { echo 'Usage: sudo bash venus-test-suite.sh [--plan|--self-test]' >&2; exit 2; }
 [[ $EUID -eq 0 ]] || { echo '请使用 sudo bash venus-test-suite.sh。' >&2; exit 2; }
-[[ "$(uname -r)" == *sm8150-venus-test6* ]] || {
-	echo '当前不是 test6 内核，未开始测试，也未修改设备设置。' >&2; exit 2;
+[[ "$(uname -r)" == *sm8150-venus-test7* ]] || {
+	echo '当前不是 test7 内核，未开始测试，也未修改设备设置。' >&2; exit 2;
+}
+[[ "${VENUS_TEST_ENCODER:-0}" == 0 || "${VENUS_TEST_ENCODER:-0}" == 1 ]] || {
+	echo 'VENUS_TEST_ENCODER 只能是 0 或 1；未开始测试。' >&2; exit 2;
 }
 for command in ffmpeg timeout tar awk diff cmp sha256sum fuser dmesg readlink sync; do
 	command -v "$command" >/dev/null || { echo "缺少命令：$command；未开始测试。" >&2; exit 2; }
@@ -197,7 +201,9 @@ for spec in '720p 1280x720' '1080p 1920x1080'; do
 	decode_case "on-$label" "$label" 30 || stop_batch
 done
 decode_case on-reopen small 90 || stop_batch
-if grep -q 'h264_v4l2m2m' "$run_root/encoders.txt"; then
+if [[ "${VENUS_TEST_ENCODER:-0}" != 1 ]]; then
+	record hw-encode SKIP 'disabled by default after the test5 reboot; opt in with VENUS_TEST_ENCODER=1'
+elif grep -q 'h264_v4l2m2m' "$run_root/encoders.txt"; then
 	if ! run_ffmpeg hw-encode -f lavfi -i testsrc2=size=320x240:rate=30 \
 		-frames:v 30 -pix_fmt nv12 -c:v h264_v4l2m2m -b:v 1000k "$run_root/encoded.h264"; then
 		record hw-encode FAIL 'encoder failed/timed out'; stop_batch;

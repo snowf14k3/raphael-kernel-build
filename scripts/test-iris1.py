@@ -39,6 +39,37 @@ def function(source, name):
     raise RuntimeError(f"Unterminated function: {name}")
 
 
+def validate_protocol_sources(driver):
+    cmds = (driver / "hfi_cmds.c").read_text(encoding="utf-8")
+    helper = (driver / "hfi_helper.h").read_text(encoding="utf-8")
+    messages = (driver / "hfi_msgs.c").read_text(encoding="utf-8")
+
+    packetizer = function(cmds, "pkt_session_set_property_4xx")
+    route_case = packetizer.find("case HFI_PROPERTY_PARAM_WORK_ROUTE:")
+    fallback = packetizer.find("default:")
+    if route_case < 0 or fallback < route_case:
+        raise RuntimeError("HFI 4xx WORK_ROUTE is not handled before fallback")
+    route_body = packetizer[route_case:fallback]
+    for required in ("wr->video_work_route = in->video_work_route",
+                     "sizeof(u32) + sizeof(*wr)"):
+        if required not in route_body:
+            raise RuntimeError(f"Incomplete HFI 4xx WORK_ROUTE packet: {required}")
+
+    legacy = function(cmds, "pkt_session_set_property_1x")
+    if "case HFI_PROPERTY_PARAM_VENC_LOW_LATENCY_MODE:" not in legacy:
+        raise RuntimeError("VENC low-latency property has no generic packetizer")
+
+    if "#define HFI_BUFFER_TYPE_MAX\t\t\t12" not in helper or \
+       "internal recon requirement" not in helper:
+        raise RuntimeError("HFI 4xx buffer-requirement capacity is incomplete")
+    parser = function(messages, "session_get_prop_buf_req")
+    bounds = parser.find("if (idx >= HFI_BUFFER_TYPE_MAX)")
+    copy = parser.find("memcpy(&bufreq[idx]")
+    if bounds < 0 or copy < 0 or bounds > copy:
+        raise RuntimeError("Buffer-requirement bounds check must precede memcpy")
+    print("PASS: HFI 4xx WORK_ROUTE/low-latency packets and 12-entry parser invariants")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("kernel", type=Path)
@@ -46,6 +77,7 @@ def main():
     args = parser.parse_args()
     repo = Path(__file__).resolve().parent.parent
     driver = args.kernel / "drivers/media/platform/qcom/venus"
+    validate_protocol_sources(driver)
     power_sources = {
         "pm_helpers.c": [
             "core_clks_enable", "core_clks_disable", "core_clks_set_rate",
@@ -63,7 +95,10 @@ def main():
         "hfi_venus.c": ["venus_write_queue", "venus_read_queue"],
     }
     session_sources = {
-        "helpers.c": ["venus_helper_set_work_route"],
+        "helpers.c": [
+            "venus_helper_get_work_mode", "venus_helper_set_work_mode",
+            "venus_helper_set_work_route",
+        ],
     }
     for name, sources in [("power", power_sources), ("hfi", hfi_sources),
                           ("queues", queue_sources),
