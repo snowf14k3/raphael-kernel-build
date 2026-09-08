@@ -8,9 +8,23 @@ config_fragment="${build_root}/raphael.config"
 patch_file="${build_root}/patches/0001-media-venus-fix-sm8150-runtime-data.patch"
 patch_dir="${build_root}/patches"
 patch_manifest="${build_root}/patches.sha256"
+ccache_dir="${build_root}/.ccache"
 expected_source_commit="58f3df07833f2382fe2fbc28f996c4c85817c1f6"
 build_commit="$(git -C "${build_root}" rev-parse HEAD)"
 patch_sha256="$(sha256sum "${patch_file}" | cut -d ' ' -f 1)"
+
+export CCACHE_DIR="${ccache_dir}"
+export CCACHE_BASEDIR="${build_root}"
+export CCACHE_COMPILERCHECK=content
+export CCACHE_NOHASHDIR=true
+# Kernel-generated timestamps otherwise make equivalent compilations miss the
+# cache.  Keep the compiler input deterministic as recommended by Kbuild.
+export KBUILD_BUILD_TIMESTAMP=''
+
+mkdir -p "${CCACHE_DIR}"
+ccache --set-config=max_size=2G
+ccache --set-config=compression=true
+ccache --zero-stats
 
 git clone --depth 1 --branch "${KERNEL_BRANCH}" \
 	"${KERNEL_REPOSITORY}" "${source_dir}"
@@ -44,7 +58,9 @@ curl --fail --location --silent --show-error \
 
 cd "${source_dir}"
 
-make ARCH=arm64 LLVM=1 defconfig
+make_args=(ARCH=arm64 LLVM=1 "CC=ccache clang")
+
+make "${make_args[@]}" defconfig
 
 # Keep GengWei's Debian feature set, then let the configuration shipped with
 # this kernel branch override options that became incompatible with Linux 7.1.
@@ -69,7 +85,7 @@ scripts/config --enable DYNAMIC_FTRACE
 scripts/config --set-str SYSTEM_TRUSTED_KEYS ""
 scripts/config --set-str SYSTEM_REVOCATION_KEYS ""
 
-make ARCH=arm64 LLVM=1 olddefconfig
+make "${make_args[@]}" olddefconfig
 
 for required in DEBUG_FS DYNAMIC_DEBUG FTRACE FUNCTION_TRACER DYNAMIC_FTRACE; do
 	grep -qx "CONFIG_${required}=y" .config || {
@@ -82,7 +98,8 @@ grep -E \
 	'CONFIG_VIDEO_QCOM_VENUS|CONFIG_SM_GCC_8150|CONFIG_SM_VIDEOCC_8150|CONFIG_INTERCONNECT_QCOM_SM8150|CONFIG_ARM_SMMU' \
 	.config
 
-make -j"$(nproc)" ARCH=arm64 LLVM=1 bindeb-pkg
+make -j"$(nproc)" "${make_args[@]}" bindeb-pkg
+ccache --show-stats
 
 dtb="${source_dir}/arch/arm64/boot/dts/qcom/sm8150-xiaomi-raphael.dtb"
 test -s "${dtb}"
@@ -107,7 +124,7 @@ install -m 0644 "${build_root}/docs/venus-test14.md" "${artifact_dir}/TESTING.md
 install -m 0644 "${build_root}/docs/venus-sm8150-encoder-audit.md" \
 	"${artifact_dir}/ENCODER-AUDIT.md"
 
-kernel_release="$(make -s ARCH=arm64 LLVM=1 kernelrelease)"
+kernel_release="$(make -s "${make_args[@]}" kernelrelease)"
 commit="$(git rev-parse HEAD)"
 
 printf 'kernel_release=%s\nsource_commit=%s\nsource_branch=%s\n' \

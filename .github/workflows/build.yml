@@ -24,15 +24,33 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            bc bison build-essential clang cpio debhelper dpkg-dev \
+            bc bison build-essential ccache clang cpio debhelper dpkg-dev \
             dwarves fakeroot flex git kmod libdw-dev libelf-dev \
             libssl-dev lld llvm python3 rsync xz-utils zstd
 
+      - name: Restore kernel compiler cache
+        id: ccache-restore
+        uses: actions/cache/restore@v6
+        with:
+          path: .ccache
+          key: raphael-kernel-ccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            raphael-kernel-ccache-v1-${{ runner.os }}-${{ runner.arch }}-
+
       - name: Build Raphael kernel
+        id: build-kernel
         env:
           KERNEL_REPOSITORY: https://github.com/snowf14k3/linux.git
           KERNEL_BRANCH: raphael-7.1
         run: bash scripts/build.sh
+
+      - name: Save kernel compiler cache
+        if: steps.build-kernel.outcome == 'success' || steps.build-kernel.outcome == 'failure'
+        continue-on-error: true
+        uses: actions/cache/save@v6
+        with:
+          path: .ccache
+          key: ${{ steps.ccache-restore.outputs.cache-primary-key }}
 
       - name: Upload test kernel
         id: upload-kernel
