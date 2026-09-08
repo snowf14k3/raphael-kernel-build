@@ -10,3 +10,5 @@
 0010-media-venus-fix-SM8150-encoder-control-defaults.patch
 0011-media-venus-refresh-SM8150-encoder-buffer-requiremen.patch
 0012-drm-panel-ams639rq08-coalesce-brightness-updates.patch
+0013-drm-panel-ams639rq08-use-hs-for-runtime-brightness.patch
+0014-media-venus-stage-SM8150-encoder-bringup.patch

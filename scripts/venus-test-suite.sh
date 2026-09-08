@@ -8,13 +8,13 @@ frame_hashes() {
 }
 if [[ "${1:-}" == --plan ]]; then
 	printf '%s\n' \
-		'Preflight: test12 kernel, SM8150 Venus nodes, idle devices, tools, free space.' \
+		'Preflight: test13 kernel, SM8150 Venus nodes, idle devices, tools, free space.' \
 		'A: PM held on; H.264 320x240/720p/1080p plus HEVC 8-bit decode.' \
 		'HEVC Main10 is skipped by default because Debian FFmpeg lacks V4L2 P010 mapping.' \
 		'B: PM auto; observe suspended, decode, repeat for two cycles.' \
 		'Compare decode frame hashes with software and check exact frame counts.' \
 		'Encoder protocol preflight stays locked unless VENUS_TEST_ENCODER=1 is set.' \
-		'Encoder DMA/LOAD/START is never enabled by this test suite.' \
+		'Encoder internal buffers, LOAD/START and user DMA are never enabled by this test suite.' \
 		'Restore original PM/debug settings; save local logs and report.tar.gz.' \
 		'Stop issuing codec jobs after a timeout or functional failure.'
 	exit 0
@@ -36,14 +36,14 @@ if [[ "${1:-}" == --self-test ]]; then
 fi
 [[ $# -eq 0 ]] || { echo 'Usage: sudo bash venus-test-suite.sh [--plan|--self-test]' >&2; exit 2; }
 [[ $EUID -eq 0 ]] || { echo '请使用 sudo bash venus-test-suite.sh。' >&2; exit 2; }
-[[ "$(uname -r)" == *sm8150-venus-test12* ]] || {
-	echo '当前不是 test12 内核，未开始测试，也未修改设备设置。' >&2; exit 2;
+[[ "$(uname -r)" == *sm8150-venus-test13* ]] || {
+	echo '当前不是 test13 内核，未开始测试，也未修改设备设置。' >&2; exit 2;
 }
 [[ "${VENUS_TEST_ENCODER:-0}" == 0 || "${VENUS_TEST_ENCODER:-0}" == 1 ]] || {
 	echo 'VENUS_TEST_ENCODER 只能是 0 或 1；未开始测试。' >&2; exit 2;
 }
 if [[ "${VENUS_TEST_ENCODER_DMA:-0}" != 0 ]]; then
-	echo 'test12 自动脚本禁止开启编码 DMA；未开始测试。' >&2; exit 2;
+	echo 'test13 自动脚本禁止开启编码 DMA；未开始测试。' >&2; exit 2;
 fi
 for command in ffmpeg timeout tar awk diff cmp sha256sum fuser dmesg logger readlink sync; do
 	command -v "$command" >/dev/null || { echo "缺少命令：$command；未开始测试。" >&2; exit 2; }
@@ -76,18 +76,18 @@ fi
 run_root="$(mktemp -d /var/tmp/venus-batch.XXXXXX)"
 trace=/sys/module/venus_core/parameters/iris1_debug
 encoder_protocol_gate=/sys/module/venus_enc/parameters/iris1_encoder
-encoder_dma_gate=/sys/module/venus_enc/parameters/iris1_encoder_dma
+encoder_stage_gate=/sys/module/venus_enc/parameters/iris1_encoder_stage
 original_power="$(< "$control")"
 original_trace=
 original_encoder_protocol_gate=
-original_encoder_dma_gate=
+original_encoder_stage_gate=
 [[ ! -r "$trace" ]] || original_trace="$(< "$trace")"
 [[ ! -r "$encoder_protocol_gate" ]] || original_encoder_protocol_gate="$(< "$encoder_protocol_gate")"
-[[ ! -r "$encoder_dma_gate" ]] || original_encoder_dma_gate="$(< "$encoder_dma_gate")"
+[[ ! -r "$encoder_stage_gate" ]] || original_encoder_stage_gate="$(< "$encoder_stage_gate")"
 power_changed=0
 trace_changed=0
 encoder_protocol_gate_changed=0
-encoder_dma_gate_changed=0
+encoder_stage_gate_changed=0
 summary="$run_root/summary.tsv"
 printf 'test\tresult\tdetail\n' > "$summary"
 record() {
@@ -123,8 +123,8 @@ finish() {
 	if (( trace_changed )); then
 		set_knob "$trace" "$original_trace" || { record restore-debug FAIL 'restore manually'; rc=1; }
 	fi
-	if (( encoder_dma_gate_changed )); then
-		set_knob "$encoder_dma_gate" "$original_encoder_dma_gate" || { record restore-encoder-dma-gate FAIL 'restore manually'; rc=1; }
+	if (( encoder_stage_gate_changed )); then
+		set_knob "$encoder_stage_gate" "$original_encoder_stage_gate" || { record restore-encoder-stage-gate FAIL 'restore manually'; rc=1; }
 	fi
 	if (( encoder_protocol_gate_changed )); then
 		set_knob "$encoder_protocol_gate" "$original_encoder_protocol_gate" || { record restore-encoder-protocol-gate FAIL 'restore manually'; rc=1; }
@@ -251,36 +251,36 @@ for spec in 'hevc8 yuv420p'; do
 done
 record on-hevc10 SKIP 'kernel exposes Main10/P010; Debian FFmpeg 7.1 V4L2 lacks P010 mapping'
 if [[ "${VENUS_TEST_ENCODER:-0}" != 1 ]]; then
-	record encoder-protocol SKIP 'both encoder safety locks kept off'
-	record hw-encode SKIP 'test12 suite never enables the encoder DMA gate'
+	record encoder-protocol SKIP 'encoder gate kept off and checkpoint kept at protocol-only'
+	record hw-encode SKIP 'test13 suite never advances an encoder hardware checkpoint'
 elif grep -q 'h264_v4l2m2m' "$run_root/encoders.txt"; then
-	[[ -w "$encoder_protocol_gate" && -w "$encoder_dma_gate" ]] || {
-		record encoder-protocol FAIL 'kernel encoder safety locks are unavailable'; stop_batch;
+	[[ -w "$encoder_protocol_gate" && -w "$encoder_stage_gate" ]] || {
+		record encoder-protocol FAIL 'kernel encoder gates are unavailable'; stop_batch;
 	}
-	encoder_dma_gate_changed=1
-	set_knob "$encoder_dma_gate" N || {
-		record encoder-protocol FAIL 'cannot force DMA safety lock off'; stop_batch;
+	encoder_stage_gate_changed=1
+	set_knob "$encoder_stage_gate" 0 || {
+		record encoder-protocol FAIL 'cannot force encoder checkpoint to protocol-only'; stop_batch;
 	}
 	encoder_protocol_gate_changed=1
 	set_knob "$encoder_protocol_gate" Y || {
 		record encoder-protocol FAIL 'cannot unlock protocol-only gate'; stop_batch;
 	}
-	logger -t venus-test12-host 'ENCODER_PROTOCOL_PREFLIGHT_BEGIN'
+	logger -t venus-test13-host 'ENCODER_PROTOCOL_PREFLIGHT_BEGIN'
 	sync
 	protocol_rc=0
-	run_ffmpeg encoder-protocol -f lavfi -i testsrc2=size=96x96:rate=1 \
+	run_ffmpeg encoder-protocol -f lavfi -i testsrc2=size=128x96:rate=1 \
 		-frames:v 1 -pix_fmt nv12 -c:v h264_v4l2m2m -g 1 -b:v 128k \
 		-f h264 "$run_root/protocol-locked.h264" || protocol_rc=$?
 	timeout -k 2s 5s dmesg > "$run_root/encoder-protocol.dmesg.log" 2>&1 || true
 	if (( protocol_rc == 0 || protocol_rc == 124 || protocol_rc == 137 )) || \
-		! grep -q 'protocol preflight passed; encoder DMA and LOAD/START remain safety-locked' \
+		! grep -q 'protocol preflight passed; set iris1_encoder_stage=1' \
 		"$run_root/encoder-protocol.dmesg.log"; then
 		record encoder-protocol FAIL 'expected a prompt safety-lock rejection; see logs'; stop_batch;
 	fi
-	record encoder-protocol PASS 'HFI setup completed; DMA, internal buffers and LOAD/START stayed locked'
+	record encoder-protocol PASS 'HFI setup completed; internal buffers, LOAD/START and user DMA stayed locked'
 	snapshot encoder-protocol
 
-	record hw-encode SKIP 'test11 hard-locked during DMA; test12 suite keeps the DMA gate off'
+	record hw-encode SKIP 'test12 hard-locked in the combined path; staged checkpoints require manual testing'
 else
 	record encoder-protocol SKIP 'FFmpeg lacks h264_v4l2m2m encoder'
 	record hw-encode SKIP 'FFmpeg lacks h264_v4l2m2m encoder'

@@ -126,6 +126,7 @@ def validate_encoder_sources(driver):
     commands = (driver / "hfi_cmds.c").read_text(encoding="utf-8")
     command_header = (driver / "hfi_cmds.h").read_text(encoding="utf-8")
     helper = (driver / "hfi_helper.h").read_text(encoding="utf-8")
+    hfi = (driver / "hfi.c").read_text(encoding="utf-8")
     venus = (driver / "hfi_venus.c").read_text(encoding="utf-8")
     helpers = (driver / "helpers.c").read_text(encoding="utf-8")
     encoder = (driver / "venc.c").read_text(encoding="utf-8")
@@ -182,6 +183,23 @@ def validate_encoder_sources(driver):
             raise RuntimeError(f"HFI 4xx FRAME_QP packet is incomplete: {required}")
 
     legacy_packetizer = function(commands, "pkt_session_set_property_1x")
+    # VPU5 falls through the 4xx/3xx packetizers to these common cases.
+    for property_name in ("HFI_PROPERTY_PARAM_VENC_BITRATE_SAVINGS",
+                          "HFI_PROPERTY_PARAM_VPE_ROTATION",
+                          "HFI_PROPERTY_PARAM_NAL_STREAM_FORMAT_SELECT"):
+        if f"case {property_name}:" not in legacy_packetizer:
+            raise RuntimeError(
+                f"VPU5 property has no common packetizer: {property_name}")
+    property_ids = {
+        "HFI_PROPERTY_PARAM_VENC_BITRATE_SAVINGS": "0x2005038",
+        "HFI_PROPERTY_PARAM_VPE_ROTATION": "0x3007001",
+    }
+    for property_name, expected_id in property_ids.items():
+        match = re.search(r"^#define\s+" + re.escape(property_name) +
+                          r"\s+(0x[0-9a-fA-F]+)$", helper, re.MULTILINE)
+        if not match or match.group(1).lower() != expected_id.lower():
+            raise RuntimeError(
+                f"VPU5 property ID differs from downstream: {property_name}")
     profile_case = legacy_packetizer.find("case HFI_PROPERTY_PARAM_PROFILE_LEVEL_CURRENT:")
     next_case = legacy_packetizer.find("case ", profile_case + 5)
     profile_body = legacy_packetizer[profile_case:next_case]
@@ -196,6 +214,10 @@ def validate_encoder_sources(driver):
     properties = function(encoder, "venc_set_properties")
     for required in ("!ctr->rc_enable", "HFI_PROPERTY_CONFIG_VENC_FRAME_QP",
                      "IS_IRIS1(inst->core) ? HFI_LAYER_ID_ALL : 0",
+                     "HFI_PROPERTY_PARAM_VENC_BITRATE_SAVINGS",
+                     "HFI_PROPERTY_PARAM_NAL_STREAM_FORMAT_SELECT",
+                     "HFI_NAL_FORMAT_STARTCODES",
+                     "!IS_IRIS1(inst->core) || ctr->ltr_count",
                      "ltr_mode.ltr_mode = HFI_LTR_MODE_MANUAL",
                      "ltr_mode.trust_mode = 1",
                      "VPU5 downstream leaves VUI timing disabled"):
@@ -227,6 +249,13 @@ def validate_encoder_sources(driver):
     if "if (!IS_IRIS1(inst->core))" not in init_session or \
        "venc_set_properties(inst, true)" not in init_session:
         raise RuntimeError("VPU5 properties are still duplicated during queue setup")
+    initial_counts = init_session.find("VENUS_IRIS1_ENC_MIN_BUFFERS")
+    input_resolution = init_session.find("venus_helper_set_input_resolution")
+    stride_guard = init_session.find("if (!IS_IRIS1(inst->core))")
+    stride_property = init_session.find("venus_helper_set_stride")
+    if min(initial_counts, input_resolution, stride_guard, stride_property) < 0 or \
+       initial_counts > input_resolution or stride_guard > stride_property:
+        raise RuntimeError("VPU5 initial 4/4 counts or linear-NV12 stride omission is incomplete")
 
     if "bufreq_cache[HFI_BUFFER_TYPE_MAX]" not in core_header or \
        "bufreq_cache_valid" not in core_header:
@@ -284,35 +313,84 @@ def validate_encoder_sources(driver):
     set_num_bufs = function(helpers, "venus_helper_set_num_bufs")
     for required in ("buf_count.count_min_host = input_bufs",
                      "buf_count.count_min_host = output_bufs",
-                     "hfi_bufreq_get_count_min(&bufreq, ver)"):
+                     "venus_helper_get_bufreq(inst, HFI_BUFFER_INPUT",
+                     "venus_helper_get_bufreq(inst, HFI_BUFFER_OUTPUT"):
         if required not in set_num_bufs:
             raise RuntimeError(f"HFI4 host buffer count is incomplete: {required}")
+    if set_num_bufs.count("hfi_bufreq_get_count_min(&bufreq, ver)") != 2:
+        raise RuntimeError(
+            "IRIS1 final count_min_host must use both firmware minima")
+    if set_num_bufs.count("iris1_encoder && inst->bufreq_cache_valid") != 2:
+        raise RuntimeError(
+            "IRIS1 initial 4/4 must not consult the unavailable requirements cache")
+    for required in ('source=%s', '"firmware" : "initial"'):
+        if required not in set_num_bufs:
+            raise RuntimeError(
+                f"IRIS1 buffer-count phase diagnostics are incomplete: {required}")
 
     intbufs = function(helpers, "intbufs_set_buffer")
-    if "i < bufreq.count_actual" not in intbufs:
-        raise RuntimeError("Internal buffers are not allocated count_actual times")
+    for required in ("i < bufreq.count_actual",
+                     "SET_BUFFERS begin", "SET_BUFFERS queued",
+                     "not requested by firmware, skip"):
+        if required not in intbufs:
+            raise RuntimeError(f"Internal-buffer diagnostics are incomplete: {required}")
+    for required in ("ALIGN(bufreq.size, SZ_4K)",
+                     "upper_32_bits(buf->da)",
+                     "bd.buffer_size = buf->size",
+                     "bd.device_addr = buf->da"):
+        if required not in intbufs:
+            raise RuntimeError(
+                f"IRIS1 internal DMA size/address guard is incomplete: {required}")
+
+    process_buf = function(helpers, "session_process_buf")
+    address_guard = process_buf.find("upper_32_bits(buf->dma_addr)")
+    address_copy = process_buf.find("fdata.device_addr = buf->dma_addr")
+    if min(address_guard, address_copy) < 0 or address_guard > address_copy:
+        raise RuntimeError(
+            "Frame IOVA is truncated into the HFI field before validation")
+    for required in ("queue %s tag=%u", "alloc=%u filled=%u offset=%u"):
+        if required not in process_buf:
+            raise RuntimeError(
+                f"Encoder FTB/ETB submit diagnostics are incomplete: {required}")
+
+    intbuf_free = function(helpers, "intbufs_unset_buffers")
+    for required in ("RELEASE_BUFFERS begin", "RELEASE_BUFFERS done",
+                     "bd.response_required = true", "first_err"):
+        if required not in intbuf_free:
+            raise RuntimeError(f"Internal-buffer cleanup diagnostics are incomplete: {required}")
+
+    intbuf_alloc = function(helpers, "venus_helper_intbufs_alloc")
+    protocol_gate = intbuf_alloc.find(
+        "inst->enc_test_stage == VENUS_IRIS1_ENC_STAGE_PROTOCOL")
+    zero_buffers = intbuf_alloc.find("arr_sz = 0", protocol_gate)
+    prefix_gate = intbuf_alloc.find(
+        "inst->enc_test_stage <= VENUS_IRIS1_ENC_STAGE_INTERNAL")
+    if min(protocol_gate, zero_buffers, prefix_gate) < 0 or \
+       not protocol_gate < zero_buffers < prefix_gate:
+        raise RuntimeError("Stage 0 is not independently protected from internal DMA")
 
     start = function(encoder, "venc_start_streaming")
     stop = function(encoder, "venc_stop_streaming")
     start_get = start.find("venc_pm_get(inst)")
+    start_properties = start.find("venc_set_properties(inst, false)")
+    start_rotation = start.find("venc_iris1_set_rotation(inst)")
     start_route = start.find("venus_helper_set_work_route(inst)")
     start_mode = start.find("venus_helper_set_work_mode(inst)")
     start_core = start.find("venus_pm_acquire_core(inst)")
     start_preflight = start.find("venc_iris1_preflight(inst)")
-    start_properties = start.find("venc_set_properties(inst, !IS_IRIS1(inst->core))")
     start_requirements = start.find("venus_helper_cache_bufreqs(inst)")
     start_counts = start.find("venus_helper_set_num_bufs")
     start_bufsize = start.find("venus_helper_set_bufsize")
     final_requirements = start.find("venus_helper_cache_bufreqs(inst)",
                                     start_requirements + 1)
     start_verify = start.find("venc_verify_conf(inst)")
-    start_dma_gate = start.find("venc_iris1_dma_preflight(inst)")
+    start_stage_gate = start.find("venc_iris1_stage_preflight(inst)")
     start_hw = start.find("venus_helper_vb2_start_streaming(inst)")
     start_pin = start.find("inst->enc_pm_active = true")
-    ordered = (start_get, start_route, start_mode, start_core, start_preflight,
-               start_properties, start_requirements, start_counts,
+    ordered = (start_get, start_rotation, start_properties, start_route,
+               start_mode, start_core, start_preflight, start_requirements, start_counts,
                start_bufsize, final_requirements, start_verify,
-               start_dma_gate, start_hw, start_pin)
+               start_stage_gate, start_hw, start_pin)
     if min(ordered) < 0 or list(ordered) != sorted(ordered):
         raise RuntimeError("IRIS1 encoder setup/DMA/PM ordering differs from audited sequence")
     release_core = start.find("venus_pm_release_core(inst)", start.find("error:"))
@@ -320,11 +398,57 @@ def validate_encoder_sources(driver):
     if min(release_core, error_pm_put) < 0 or release_core > error_pm_put:
         raise RuntimeError("IRIS1 start error suspends power before releasing core ownership")
 
-    dma_preflight = function(encoder, "venc_iris1_dma_preflight")
-    for required in ("venus_iris1_encoder_dma_enable", "return -EACCES",
-                     "DMA and LOAD/START remain safety-locked"):
-        if required not in dma_preflight:
-            raise RuntimeError(f"Second encoder DMA gate is incomplete: {required}")
+    stage_preflight = function(encoder, "venc_iris1_stage_preflight")
+    for required in ("venus_iris1_encoder_stage",
+                     "VENUS_IRIS1_ENC_STAGE_FULL", "return -EACCES",
+                     "inst->enc_test_stage = stage"):
+        if required not in stage_preflight:
+            raise RuntimeError(f"Encoder stage gate is incomplete: {required}")
+    for required in ("VENUS_IRIS1_ENC_STAGE_PROTOCOL",
+                     "VENUS_IRIS1_ENC_STAGE_INTERNAL",
+                     "VENUS_IRIS1_ENC_STAGE_LOAD",
+                     "VENUS_IRIS1_ENC_STAGE_START",
+                     "VENUS_IRIS1_ENC_STAGE_CAPTURE",
+                     "VENUS_IRIS1_ENC_STAGE_FULL",
+                     "u8 enc_test_stage"):
+        if required not in core_header:
+            raise RuntimeError(f"Encoder checkpoint state is incomplete: {required}")
+
+    helper_start = function(helpers, "venus_helper_vb2_start_streaming")
+    internal = helper_start.find("venus_helper_intbufs_alloc(inst)")
+    internal_stop = helper_start.find("VENUS_IRIS1_ENC_STAGE_INTERNAL")
+    load = helper_start.find("hfi_session_load_res(inst)")
+    load_stop = helper_start.find("VENUS_IRIS1_ENC_STAGE_LOAD")
+    hw_start = helper_start.find("hfi_session_start(inst)")
+    start_stop = helper_start.find("VENUS_IRIS1_ENC_STAGE_START")
+    checkpoints = (internal, internal_stop, load, load_stop,
+                   hw_start, start_stop)
+    if min(checkpoints) < 0 or list(checkpoints) != sorted(checkpoints):
+        raise RuntimeError("Encoder internal/LOAD/START checkpoints are out of order")
+    for required in ("staged STOP ret=%d", "staged RELEASE_RESOURCES ret=%d",
+                     "staged internal cleanup ret=%d"):
+        if required not in helper_start:
+            raise RuntimeError(
+                f"Encoder staged rollback diagnostics are incomplete: {required}")
+
+    unload = function(hfi, "hfi_session_unload_res")
+    for required in ("IS_IRIS1(inst->core)", "INST_LOAD_RESOURCES",
+                     "inst->state != INST_STOP"):
+        if required not in unload:
+            raise RuntimeError(
+                f"IRIS1 LOAD-only rollback is not permitted safely: {required}")
+    load_rollback = helper_start.find("hfi_session_unload_res(inst)", load_stop)
+    free_after_unload = helper_start.find("venus_helper_intbufs_free(inst)",
+                                          load_rollback)
+    if min(load_rollback, free_after_unload) < 0 or load_rollback > free_after_unload:
+        raise RuntimeError(
+            "LOAD-only rollback frees internal DMA before releasing firmware resources")
+
+    device_run = function(helpers, "venus_helper_m2m_device_run")
+    for required in ("VENUS_IRIS1_ENC_STAGE_CAPTURE",
+                     "VENUS_IRIS1_ENC_STAGE_FULL"):
+        if required not in device_run:
+            raise RuntimeError(f"Encoder user-DMA checkpoint is missing: {required}")
     stop_hw = stop.find("venus_helper_vb2_stop_streaming(q)")
     stop_put = stop.find("venc_pm_put(inst, true)")
     if min(stop_hw, stop_put) < 0 or stop_hw > stop_put:
@@ -398,9 +522,19 @@ def validate_panel_sources(kernel):
     if "ctx->brightness" not in get_brightness or \
        "mipi_dsi_dcs_get_display_brightness_large" in get_brightness:
         raise RuntimeError("Brightness readback still adds a DSI transaction")
-    if "mode_flags" in update or "mode_flags" in get_brightness or \
-       "mode_flags" in worker:
-        raise RuntimeError("Runtime brightness path still changes DSI transfer mode")
+    if "mode_flags" in update or "mode_flags" in get_brightness:
+        raise RuntimeError("Backlight callbacks change DSI mode outside the worker")
+    for required in ("mode_flags = ctx->dsi->mode_flags",
+                     "ctx->dsi->mode_flags &= ~MIPI_DSI_MODE_LPM",
+                     "ctx->dsi->mode_flags = mode_flags"):
+        if required not in worker:
+            raise RuntimeError(f"Brightness worker does not preserve HS mode: {required}")
+    select_hs = worker.find("ctx->dsi->mode_flags &= ~MIPI_DSI_MODE_LPM")
+    transfer = worker.find("mipi_dsi_dcs_set_display_brightness_large")
+    restore = worker.find("ctx->dsi->mode_flags = mode_flags")
+    if min(select_hs, transfer, restore) < 0 or \
+       not select_hs < transfer < restore:
+        raise RuntimeError("Brightness worker does not bracket DCS transfer with HS mode")
 
     mark_unprepared = unprepare.find("ctx->prepared = false")
     cancel = unprepare.find("cancel_delayed_work_sync")
@@ -409,7 +543,7 @@ def validate_panel_sources(kernel):
     if min(ordered) < 0 or list(ordered) != sorted(ordered):
         raise RuntimeError("Brightness work is not cancelled before panel power-off")
 
-    print("PASS: AMS639RQ08 LP-mode brightness coalescing and teardown invariants")
+    print("PASS: AMS639RQ08 HS-mode brightness coalescing and teardown invariants")
 
 
 def main():
