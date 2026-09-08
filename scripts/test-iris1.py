@@ -59,6 +59,10 @@ def validate_protocol_sources(driver):
     if "case HFI_PROPERTY_PARAM_VENC_LOW_LATENCY_MODE:" not in legacy:
         raise RuntimeError("VENC low-latency property has no generic packetizer")
 
+    encoder_etb = function(cmds, "pkt_session_etb_encoder")
+    if "pkt->data = 0" not in encoder_etb:
+        raise RuntimeError("VPU5 encoder ETB leaves its reserved word uninitialized")
+
     if "#define HFI_BUFFER_TYPE_MAX\t\t\t12" not in helper or \
        "internal recon requirement" not in helper:
         raise RuntimeError("HFI 4xx buffer-requirement capacity is incomplete")
@@ -352,6 +356,19 @@ def validate_encoder_sources(driver):
         if required not in process_buf:
             raise RuntimeError(
                 f"Encoder FTB/ETB submit diagnostics are incomplete: {required}")
+    for required in ("queued %s tag=%u ret=%d",
+                     "ret = hfi_session_process_buf(inst, &fdata)"):
+        if required not in process_buf:
+            raise RuntimeError(
+                f"Encoder post-submit diagnostics are incomplete: {required}")
+
+    work_mode = function(helpers, "venus_helper_get_work_mode")
+    for required in ("IS_IRIS1(inst->core)", "ctr->rc_enable",
+                     "V4L2_MPEG_VIDEO_BITRATE_MODE_VBR",
+                     "mode = VIDC_WORK_MODE_1"):
+        if required not in work_mode:
+            raise RuntimeError(
+                f"SM8150 RC-dependent work-mode policy is incomplete: {required}")
 
     intbuf_free = function(helpers, "intbufs_unset_buffers")
     for required in ("RELEASE_BUFFERS begin", "RELEASE_BUFFERS done",
@@ -510,7 +527,7 @@ def validate_panel_sources(kernel):
 
     for required in ("struct delayed_work brightness_work",
                      "struct mutex brightness_lock",
-                     "AMS639RQ08_BRIGHTNESS_INTERVAL_MS\t100"):
+                     "AMS639RQ08_BRIGHTNESS_INTERVAL_MS\t250"):
         if required not in panel_source:
             raise RuntimeError(f"Raphael brightness coalescing is incomplete: {required}")
     for required in ("ctx->pending_brightness = brightness",
@@ -525,16 +542,16 @@ def validate_panel_sources(kernel):
     if "mode_flags" in update or "mode_flags" in get_brightness:
         raise RuntimeError("Backlight callbacks change DSI mode outside the worker")
     for required in ("mode_flags = ctx->dsi->mode_flags",
-                     "ctx->dsi->mode_flags &= ~MIPI_DSI_MODE_LPM",
+                     "ctx->dsi->mode_flags |= MIPI_DSI_MODE_LPM",
                      "ctx->dsi->mode_flags = mode_flags"):
         if required not in worker:
-            raise RuntimeError(f"Brightness worker does not preserve HS mode: {required}")
-    select_hs = worker.find("ctx->dsi->mode_flags &= ~MIPI_DSI_MODE_LPM")
+            raise RuntimeError(f"Brightness worker does not preserve LP mode: {required}")
+    select_lp = worker.find("ctx->dsi->mode_flags |= MIPI_DSI_MODE_LPM")
     transfer = worker.find("mipi_dsi_dcs_set_display_brightness_large")
     restore = worker.find("ctx->dsi->mode_flags = mode_flags")
-    if min(select_hs, transfer, restore) < 0 or \
-       not select_hs < transfer < restore:
-        raise RuntimeError("Brightness worker does not bracket DCS transfer with HS mode")
+    if min(select_lp, transfer, restore) < 0 or \
+       not select_lp < transfer < restore:
+        raise RuntimeError("Brightness worker does not bracket DCS transfer with LP mode")
 
     mark_unprepared = unprepare.find("ctx->prepared = false")
     cancel = unprepare.find("cancel_delayed_work_sync")
@@ -543,7 +560,7 @@ def validate_panel_sources(kernel):
     if min(ordered) < 0 or list(ordered) != sorted(ordered):
         raise RuntimeError("Brightness work is not cancelled before panel power-off")
 
-    print("PASS: AMS639RQ08 HS-mode brightness coalescing and teardown invariants")
+    print("PASS: AMS639RQ08 LP-mode brightness coalescing and teardown invariants")
 
 
 def main():

@@ -41,6 +41,7 @@ struct venus_core {
 struct venc_controls {
 	u32 bitrate_mode;
 	u32 multi_slice_mode;
+	u32 rc_enable;
 };
 struct hfi_video_work_route { u32 video_work_route; };
 struct hfi_video_work_mode { u32 video_work_mode; };
@@ -142,19 +143,30 @@ int main(void)
 	reset_capture();
 	assert(!venus_helper_set_work_route(&inst) && !property_calls);
 
-	/* H.264 encoder stays in mode 2 and does not request low latency. */
+	/* Downstream SM8150 RC_OFF uses mode 1 plus low latency. */
 	core.iris1 = true;
 	inst.session_type = VIDC_SESSION_TYPE_ENC;
 	inst.hfi_codec = HFI_VIDEO_CODEC_H264;
 	inst.out_width = 320;
 	inst.out_height = 240;
+	inst.controls.enc.bitrate_mode = V4L2_MPEG_VIDEO_BITRATE_MODE_VBR;
+	inst.controls.enc.rc_enable = 0;
+	reset_capture();
+	assert(!venus_helper_set_work_mode(&inst));
+	assert(property_calls == 2 && property_type[0] == HFI_PROPERTY_PARAM_WORK_MODE);
+	assert(property_value[0] == VIDC_WORK_MODE_1);
+	assert(property_type[1] == HFI_PROPERTY_PARAM_VENC_LOW_LATENCY_MODE);
+	assert(property_value[1] == 1);
+
+	/* VBR is the only supported public mode that selects mode 2. */
+	inst.controls.enc.rc_enable = 1;
 	reset_capture();
 	assert(!venus_helper_set_work_mode(&inst));
 	assert(property_calls == 1 && property_type[0] == HFI_PROPERTY_PARAM_WORK_MODE);
 	assert(property_value[0] == VIDC_WORK_MODE_2);
 
-	/* VPU5 VP8 mode 1 must be followed by the OEM low-latency property. */
-	inst.hfi_codec = HFI_VIDEO_CODEC_VP8;
+	/* CBR returns to mode 1 and must carry the low-latency property. */
+	inst.controls.enc.bitrate_mode = V4L2_MPEG_VIDEO_BITRATE_MODE_CBR;
 	reset_capture();
 	assert(!venus_helper_set_work_mode(&inst));
 	assert(property_calls == 2);
@@ -164,6 +176,7 @@ int main(void)
 	assert(property_value[1] == 1);
 
 	/* The low-latency follow-up is VPU5-specific and obeys first-error exit. */
+	inst.hfi_codec = HFI_VIDEO_CODEC_VP8;
 	core.iris1 = false;
 	reset_capture();
 	assert(!venus_helper_set_work_mode(&inst) && property_calls == 1);

@@ -12,3 +12,5 @@
 0012-drm-panel-ams639rq08-coalesce-brightness-updates.patch
 0013-drm-panel-ams639rq08-use-hs-for-runtime-brightness.patch
 0014-media-venus-stage-SM8150-encoder-bringup.patch
+0015-media-venus-match-SM8150-RC-OFF-work-mode.patch
+0016-drm-panel-ams639rq08-throttle-runtime-brightness.patch

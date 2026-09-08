@@ -1,0 +1,49 @@
+From 4c1df2ff60b750304a2c83c2f90bcb4f34d2bdb4 Mon Sep 17 00:00:00 2001
+From: snowf14k3 <60956553+snowf14k3@users.noreply.github.com>
+Date: Wed, 9 Sep 2026 02:25:00 +0800
+Subject: [PATCH 16/16] drm/panel: ams639rq08: throttle runtime brightness
+
+Test13 showed that 10 Hz high-speed brightness writes still produce DSI
+timeout/FIFO status 0x5, including under a direct sysfs stress test with
+no GNOME brightness animation involved.  The earlier low-power path was
+less failure-prone but still too frequent during a GUI drag.
+
+Return runtime brightness commands to the panel's normal low-power
+command mode and coalesce them to four updates per second.  Preserve and
+restore the complete mode flags around each transfer.
+
+Signed-off-by: snowf14k3 <60956553+snowf14k3@users.noreply.github.com>
+---
+ drivers/gpu/drm/panel/panel-samsung-ams639rq08.c | 10 +++++++---
+ 1 file changed, 7 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/gpu/drm/panel/panel-samsung-ams639rq08.c b/drivers/gpu/drm/panel/panel-samsung-ams639rq08.c
+--- a/drivers/gpu/drm/panel/panel-samsung-ams639rq08.c
++++ b/drivers/gpu/drm/panel/panel-samsung-ams639rq08.c
+@@ -28,7 +28,7 @@
+ #define MCS_PASSWD2		0xfc
+ #define MCS_UNKNOWN_FF		0xff
+ 
+-#define AMS639RQ08_BRIGHTNESS_INTERVAL_MS	100
++#define AMS639RQ08_BRIGHTNESS_INTERVAL_MS	250
+ 
+ struct ams639rq08 {
+ 	struct drm_panel panel;
+@@ -242,9 +242,13 @@ static void ams639rq08_brightness_work(struct work_struct *work)
+ 	brightness = ctx->pending_brightness;
+ 	ctx->brightness_pending = false;
+ 
+-	/* The panel requires runtime brightness commands in high-speed mode. */
++	/*
++	 * Runtime HS commands still overrun the SM8150 DSI command path while
++	 * video mode is active.  Use the panel's normal LP command mode and a
++	 * conservative coalescing interval, then restore the caller's flags.
++	 */
+ 	mode_flags = ctx->dsi->mode_flags;
+-	ctx->dsi->mode_flags &= ~MIPI_DSI_MODE_LPM;
++	ctx->dsi->mode_flags |= MIPI_DSI_MODE_LPM;
+ 	ret = mipi_dsi_dcs_set_display_brightness_large(ctx->dsi, brightness);
+ 	ctx->dsi->mode_flags = mode_flags;
+ 	ctx->last_brightness_update = jiffies;
+-- 
+2.44.0.windows.1

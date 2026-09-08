@@ -44,6 +44,54 @@
   缺少相应 V4L2 P010 映射。这是已定位的用户态问题，不应回退内核为 NV12。
 - 编码从未产出过一个有效 H.264 帧，所以当前不能宣称编码可用。
 
+### test13 实机新增事实
+
+- test13 正确启动为 `7.1.0-sm8150-venus-test13+`；H.264 硬解码输出
+  30/30 帧，退出十秒后 Venus 主设备和两个 video core 均回到 `suspended`。
+- test13 把运行期亮度 DCS 从 test12 的 LP 恢复为 HS 后，亮度问题没有修好，
+  反而让纯 sysfs 50 Hz 输入（驱动内部合并为最多 10 Hz）也稳定触发
+  `dsi_err_worker: status=5`。该状态是 DSI timeout（bit 0）与 FIFO 错误
+  （bit 2）的组合；随后出现 Adreno CCU translation fault 和 DPU
+  `hangcheck recover`，属于显示链路错误后的连锁故障。
+- 因此 test13 的 HS 假设已被实机否定。下一版至少应恢复 LP；test12 的
+  LP+10 Hz 在纯 sysfs 压力下通过、但 GNOME 拖动仍会报错，所以不能只回退
+  传输模式，还需要降低更新频率或把 DCS 提交同步到安全显示时段。该问题留到
+  test13 编码分阶段结果收齐后与编码修正合并，避免单独再编译一次内核。
+- test13 encoder stage 0 通过：128x96 H.264 会话完成初始 4/4 数量、属性、
+  两次 buffer requirements 查询和最终缓存；固件最终返回 INPUT actual=16 / min=3、
+  OUTPUT actual=4 / min=4。门禁按预期以 `-EACCES` 拒绝 STREAMON，没有分配或
+  登记内部 DMA，退出十秒后 runtime PM 回到 `suspended`。
+- test13 encoder stage 1 通过：scratch0 requirement 198400 字节按原厂语义
+  对齐为 200704 字节，DMA IOVA `0xdf980000` 可无损放入 HFI4 的 32-bit 地址字段；
+  SET_BUFFERS 成功入队，随后 RELEASE_BUFFERS 返回 0，staged cleanup 返回 0，
+  十秒后 runtime PM 为 `suspended`。第一类内部 DMA/登记/撤销边界已排除。
+- test13 encoder stage 2 通过：scratch0 与 scratch1 均成功登记和撤销；scratch1
+  requirement 233056 字节对齐为 233472 字节，IOVA `0xdf840000`；两次
+  RELEASE_BUFFERS 均返回 0，cleanup 返回 0，runtime PM 为 `suspended`。
+- test13 encoder stage 3 通过：新增 scratch2 requirement/登记长度均为
+  118784 字节，IOVA `0xdf720000`；三类 scratch 的 SET_BUFFERS 均成功入队，
+  三次 RELEASE_BUFFERS 均返回 0，cleanup 返回 0，runtime PM 为 `suspended`。
+- test13 encoder stage 4 通过：新增 persist0 requirement 64768 字节并对齐为
+  65536 字节，IOVA `0xdf3f0000`；三类 scratch 与 persist0 均成功登记和撤销，
+  四次 RELEASE_BUFFERS 及 cleanup 返回 0，runtime PM 为 `suspended`。
+- test13 encoder stage 5 通过：完整内部缓冲前缀安全；scratch0/1/2 与 persist0
+  均成功登记和撤销，persist1(type 0x5) 按固件最终表明确显示 `not requested` 并
+  合法跳过。四次 RELEASE_BUFFERS、staged cleanup 返回 0，runtime PM 为
+  `suspended`。静态内部 DMA 段可整体排除为 test12 复位边界。
+- test13 encoder stage 6 通过：完整内部缓冲后 LOAD_RESOURCES 成功，随后从
+  LOAD_RESOURCES_DONE 直接执行 staged RELEASE_RESOURCES，返回 0、状态 7；
+  四类内部缓冲均成功撤销，cleanup 返回 0，runtime PM 为 `suspended`。
+  LOAD 与其特殊回滚状态转换已排除为复位边界。
+- test13 encoder stage 7 通过：LOAD_RESOURCES 与 START 均完成，随后 staged
+  STOP 返回 0（状态 6）、RELEASE_RESOURCES 返回 0（状态 7）；四类内部缓冲
+  全部成功撤销，cleanup 返回 0，runtime PM 为 `suspended`。会话启动和停止闭环
+  已排除，test12 的致死边界进一步缩小到普通 CAPTURE/FTB 或 OUTPUT/ETB DMA。
+- test13 encoder stage 8 通过：START 后向固件提交 4 个 CAPTURE/FTB，tag 0--3，
+  每块 alloc=73728、filled=0、offset=0，IOVA 均在 32-bit 范围；未提交 ETB 的
+  会话按设计不产出码流，5 秒超时后 SIGKILL 返回 137，但设备未复位，四类内部
+  缓冲仍成功撤销且 runtime PM 回到 `suspended`。CAPTURE/FTB DMA 可排除，
+  test12 致死边界现已唯一缩小到首次 OUTPUT/ETB 或其后的固件硬件访问。
+
 ## 原厂启动顺序
 
 原厂 SM8150 普通 H.264 编码会话的有效顺序为：
@@ -68,7 +116,7 @@ test13 的目标是保持这个顺序，并把每个危险边界拆成可单独�
 |---|---|---|---|
 | HFI 版本 | VPU5 / HFI 4xx | 当前使用 HFI 4xx | 对齐 |
 | WORK_ROUTE | H.264 RC_OFF 使用 route 2 | 当前 route 2 | 对齐 |
-| WORK_MODE | 普通编码使用 mode 2 | 当前 mode 2 | 对齐 |
+| WORK_MODE | RC_OFF/CBR/CQ 使用 mode 1 并开启 low-latency；VBR/MBR 使用 mode 2 | test13 错误固定为 mode 2；test14 已按 `rc_enable/bitrate_mode` 修正 | 已修正，待实机 |
 | video core | MVS0；MVS1 属于 CVP | 当前选择 MVS0，不能改到 MVS1 | 对齐 |
 | 初始 IO 数量 | SESSION_INIT 后按 H.264 格式表发 4/4 | test13 仅在 requirements 缓存无效的初始阶段发 4/4 | 待实机 |
 | 最终 IO 数量 | actual 为客户端实际数，`count_min_host` 为固件 minimum | test12 原本正确；test13 一度误改 4/4，现已恢复为固件返回的 3/2 | 静态对齐 |
@@ -313,17 +361,49 @@ test13 仍在 allocator 内将 stage 0 的待分配数量强制为 0，作为防
 
 ## 静态验证状态
 
-- `0014` 已从 test12 精确源码到 test13 复核源码重新生成，包含 4 KiB 对齐、
-  IOVA 门禁和 FTB/ETB 提交日志；已在 `F:\linux\test12-kernel-src` 通过
-  `git apply --check --whitespace=error-all`。
-- 静态检查覆盖属性编号/结构长度、初始与最终 4/4 缓冲数量、属性顺序、内部
-  SET/RELEASE 日志、内部 4 KiB 长度、32-bit IOVA 门禁、0--9 阶段门禁、
-  NAL/stride/LTR 修正和面板 HS 修正；当前宿主验证全部通过。
-- Windows 本机没有 Bash，无法在本地运行 `bash -n` 和脚本自测；构建 CI 会在
-  编译前执行这两项并在失败时中止。
+- `0015`、`0016` 已在应用了 test13 全部改动的 `F:\linux\test13-verify` 上分别
+  通过正向与反向 `git apply --check --whitespace=error-all`；补丁重新应用后
+  `git diff --check` 通过。
+- 宿主测试覆盖 HFI ring、故障注入、工作路由/模式、Main10/P010、requirements、
+  分阶段门禁、ETB 保留字/返回日志和面板 LP/250 ms 合并；全部通过。
+- 已使用 Git for Windows 的 Bash 执行 `bash -n` 和测试脚本 `--self-test`，两项
+  均通过；CI 仍会在正式编译前重复执行。
+
+## test13 实机分阶段结果
+
+- stage 0：协议、属性和最终 requirements 通过；预期以 `-EACCES` 停止，PM 回到
+  `suspended`。
+- stage 1--5：scratch0/1/2、persist0 的 SET/RELEASE 均通过；persist1 未被固件
+  请求并正确跳过，PM 均回到 `suspended`。
+- stage 6：`LOAD_RESOURCES` 完成，随后 `RELEASE_RESOURCES` 和清理通过。
+- stage 7：`START` 完成，随后 `STOP`、`RELEASE_RESOURCES` 和清理通过。
+- stage 8：4 个 CAPTURE/FTB 缓冲全部成功入队，地址位于 32-bit IOVA 范围；没有
+  提交输入帧，超时退出后设备未重启且 PM 回到 `suspended`。
+- stage 9：内部缓冲、`LOAD_RESOURCES`、`START` 和 4 个 FTB 再次全部通过；第一笔
+  OUTPUT/ETB 为 `tag=0 dma=0xdf498000 alloc=32768 filled=18432 offset=0`。日志在该条
+  `queue ETB` 后立即停止，设备整机重启，没有 ETB_DONE、FTB_DONE 或正常清理。
+
+因此 test13 已把复位边界锁定到固件/硬件首次读取编码输入缓冲。下一轮不得重复
+stage 0--8；重点只核对 HFI4 ETB packet 字段、输入 NV12 的实际 plane/stride/scanline
+布局、DMA 映射方向和缓存同步，以及原厂 SM8150 在首次 ETB 前设置的输入缓冲属性。
+
+### Stage 9 后重新核对出的 WORK_MODE 偏差
+
+原审计把“普通 H.264 编码”为 mode 2 写得过于笼统，这是错误结论。原厂
+`msm_vidc_decide_work_mode_ar50()` 实际按 rate-control mode 决策：只有
+VBR/MBR 系列选 mode 2；RC_OFF、CBR 和 CQ 选 mode 1，且 encoder 的 mode 1
+必须紧接 `VENC_LOW_LATENCY_MODE=1`。test13 当前冒烟会话明确为
+`rc_enable=0`/RC_OFF，却被公共 helper 固定为 mode 2。
+
+这个偏差不会阻止 SESSION_INIT、requirements、内部 SET_BUFFERS、LOAD、START
+或只排 FTB，恰好要到首个 ETB 让编码硬件真正工作时才可能暴露，与 test13
+实机复位边界吻合。test14 因此先修正此项，不再重复 Stage 0--8；同时把 encoder
+ETB 保留末尾字显式清零，并在 HFI 命令队列返回后增加日志。字段布局本身仍与
+原厂一致，不能把“赋值语句书写顺序”误当成 wire layout 差异。
 
 ## 下一步
 
-1. 继续核对原厂首次 FTB/ETB 前后的内部缓冲、总线投票和错误处理细节。
-2. 完成整个补丁序列和构建产物内容验证。
-3. 构建一次 test13 后在实机从 stage 0 逐级测试，不再为每个边界重新编译。
+1. test14 先以 Stage 0 确认 `mode=1 rc_enable=0 low_latency=1`。
+2. 不重复 Stage 1--8；下一次完整编码只运行 128x96 单帧 Stage 9。
+3. 若仍复位，依据 `queued ETB ... ret=...` 的最后日志继续区分命令队列与硬件 DMA，
+   不再重查已通过阶段，也不宣称编码已经可用。
