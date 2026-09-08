@@ -1,0 +1,78 @@
+From de60e120440d031008c3e7e6e784cc61d442f0a7 Mon Sep 17 00:00:00 2001
+From: snowf14k3 <60956553+snowf14k3@users.noreply.github.com>
+Date: Tue, 8 Sep 2026 15:25:10 +0800
+Subject: [PATCH 10/10] media: venus: fix SM8150 encoder control defaults
+
+SM8150 defaults H.264 encoding to Baseline profile, but the shared
+Venus control table still enables 8x8 transform. The control setup
+callback rejects that invalid combination before the encoder device can
+be opened.
+
+Disable 8x8 transform by default for IRIS1, allow an explicit
+disabled value with non-High profiles, and log future SM8150 control
+default failures. Preserve the existing High/8x8 defaults for other
+Venus generations.
+
+Signed-off-by: snowf14k3 <60956553+snowf14k3@users.noreply.github.com>
+---
+ drivers/media/platform/qcom/venus/venc_ctrls.c | 15 ++++++++++++---
+ 1 file changed, 12 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/media/platform/qcom/venus/venc_ctrls.c b/drivers/media/platform/qcom/venus/venc_ctrls.c
+index 13affeb1457a..3a928bb0e316 100644
+--- a/drivers/media/platform/qcom/venus/venc_ctrls.c
++++ b/drivers/media/platform/qcom/venus/venc_ctrls.c
+@@ -332,7 +332,8 @@ static int venc_op_s_ctrl(struct v4l2_ctrl *ctrl)
+ 		ctr->intra_refresh_period = ctrl->val;
+ 		break;
+ 	case V4L2_CID_MPEG_VIDEO_H264_8X8_TRANSFORM:
+-		if (ctr->profile.h264 != V4L2_MPEG_VIDEO_H264_PROFILE_HIGH &&
++		if (ctrl->val &&
++		    ctr->profile.h264 != V4L2_MPEG_VIDEO_H264_PROFILE_HIGH &&
+ 		    ctr->profile.h264 != V4L2_MPEG_VIDEO_H264_PROFILE_CONSTRAINED_HIGH)
+ 			return -EINVAL;
+ 
+@@ -440,6 +441,7 @@ static const struct v4l2_ctrl_ops venc_ctrl_ops = {
+ 
+ int venc_ctrl_init(struct venus_inst *inst)
+ {
++	u32 h264_8x8_default = 1;
+ 	u32 h264_level_default = V4L2_MPEG_VIDEO_H264_LEVEL_1_0;
+ 	u32 h264_profile_default = V4L2_MPEG_VIDEO_H264_PROFILE_HIGH;
+ 	int ret;
+@@ -452,6 +454,7 @@ int venc_ctrl_init(struct venus_inst *inst)
+ 	/* Downstream SM8150 starts H.264 in Baseline with an automatic level. */
+ 	if (IS_IRIS1(inst->core)) {
+ 		h264_profile_default = V4L2_MPEG_VIDEO_H264_PROFILE_BASELINE;
++		h264_8x8_default = 0;
+ 		/* Upstream V4L2 has no UNKNOWN menu item; 5.1 is the safe cap. */
+ 		h264_level_default = V4L2_MPEG_VIDEO_H264_LEVEL_5_1;
+ 	}
+@@ -563,7 +566,8 @@ int venc_ctrl_init(struct venus_inst *inst)
+ 			  V4L2_CID_MPEG_VIDEO_H264_I_FRAME_MIN_QP, 1, 51, 1, 1);
+ 
+ 	v4l2_ctrl_new_std(&inst->ctrl_handler, &venc_ctrl_ops,
+-			  V4L2_CID_MPEG_VIDEO_H264_8X8_TRANSFORM, 0, 1, 1, 1);
++			  V4L2_CID_MPEG_VIDEO_H264_8X8_TRANSFORM, 0, 1, 1,
++			  h264_8x8_default);
+ 
+ 	v4l2_ctrl_new_std(&inst->ctrl_handler, &venc_ctrl_ops,
+ 			  V4L2_CID_MPEG_VIDEO_H264_P_FRAME_MIN_QP, 1, 51, 1, 1);
+@@ -750,8 +754,13 @@ int venc_ctrl_init(struct venus_inst *inst)
+ 		goto err;
+ 
+ 	ret = v4l2_ctrl_handler_setup(&inst->ctrl_handler);
+-	if (ret)
++	if (ret) {
++		if (IS_IRIS1(inst->core))
++			dev_err(inst->core->dev,
++				"venus-test11: encoder control defaults failed: %d\n",
++				ret);
+ 		goto err;
++	}
+ 
+ 	return 0;
+ err:
+-- 
+2.44.0.windows.1
+

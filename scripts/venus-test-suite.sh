@@ -8,7 +8,7 @@ frame_hashes() {
 }
 if [[ "${1:-}" == --plan ]]; then
 	printf '%s\n' \
-		'Preflight: test10 kernel, SM8150 Venus nodes, idle devices, tools, free space.' \
+		'Preflight: test11 kernel, SM8150 Venus nodes, idle devices, tools, free space.' \
 		'A: PM held on; H.264 320x240/720p/1080p plus HEVC 8-bit decode.' \
 		'HEVC Main10 is skipped by default because Debian FFmpeg lacks V4L2 P010 mapping.' \
 		'B: PM auto; observe suspended, decode, repeat for two cycles.' \
@@ -36,8 +36,8 @@ if [[ "${1:-}" == --self-test ]]; then
 fi
 [[ $# -eq 0 ]] || { echo 'Usage: sudo bash venus-test-suite.sh [--plan|--self-test]' >&2; exit 2; }
 [[ $EUID -eq 0 ]] || { echo '请使用 sudo bash venus-test-suite.sh。' >&2; exit 2; }
-[[ "$(uname -r)" == *sm8150-venus-test10* ]] || {
-	echo '当前不是 test10 内核，未开始测试，也未修改设备设置。' >&2; exit 2;
+[[ "$(uname -r)" == *sm8150-venus-test11* ]] || {
+	echo '当前不是 test11 内核，未开始测试，也未修改设备设置。' >&2; exit 2;
 }
 [[ "${VENUS_TEST_ENCODER:-0}" == 0 || "${VENUS_TEST_ENCODER:-0}" == 1 ]] || {
 	echo 'VENUS_TEST_ENCODER 只能是 0 或 1；未开始测试。' >&2; exit 2;
@@ -268,7 +268,7 @@ elif grep -q 'h264_v4l2m2m' "$run_root/encoders.txt"; then
 	set_knob "$encoder_protocol_gate" Y || {
 		record encoder-protocol FAIL 'cannot unlock protocol-only gate'; stop_batch;
 	}
-	logger -t venus-test10-host 'ENCODER_PROTOCOL_PREFLIGHT_BEGIN'
+	logger -t venus-test11-host 'ENCODER_PROTOCOL_PREFLIGHT_BEGIN'
 	sync
 	protocol_rc=0
 	run_ffmpeg encoder-protocol -f lavfi -i testsrc2=size=96x96:rate=1 \
@@ -289,7 +289,7 @@ elif grep -q 'h264_v4l2m2m' "$run_root/encoders.txt"; then
 		set_knob "$encoder_dma_gate" Y || {
 			record hw-encode FAIL 'cannot unlock encoder DMA gate'; stop_batch;
 		}
-		logger -t venus-test10-host 'ENCODER_DMA_BEGIN'
+		logger -t venus-test11-host 'ENCODER_DMA_BEGIN'
 		sync
 		if ! run_ffmpeg hw-encode -f lavfi -i testsrc2=size=320x240:rate=30 \
 			-frames:v 30 -pix_fmt nv12 -c:v h264_v4l2m2m -b:v 1000k "$run_root/encoded.h264"; then
@@ -305,7 +305,7 @@ elif grep -q 'h264_v4l2m2m' "$run_root/encoders.txt"; then
 			record hw-encode FAIL 'encoded frame count differs'; stop_batch;
 		}
 		record hw-encode PASS '30 hardware-encoded frames decoded successfully in software'
-		logger -t venus-test10-host 'ENCODE_PASS'
+		logger -t venus-test11-host 'ENCODE_PASS'
 	fi
 else
 	record encoder-protocol SKIP 'FFmpeg lacks h264_v4l2m2m encoder'

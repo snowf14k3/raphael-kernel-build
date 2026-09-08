@@ -339,6 +339,34 @@ def validate_encoder_sources(driver):
         if required not in controls:
             raise RuntimeError(f"SM8150 encoder defaults are incomplete: {required}")
 
+    transform_case = dynamic[dynamic.find(
+        "case V4L2_CID_MPEG_VIDEO_H264_8X8_TRANSFORM:"):]
+    transform_case = transform_case[:transform_case.find("case ", 5)]
+    if "if (ctrl->val &&" not in transform_case:
+        raise RuntimeError("Disabled H.264 8x8 transform is rejected for Baseline")
+
+    control_init = function(controls, "venc_ctrl_init")
+    for required in ("u32 h264_8x8_default = 1",
+                     "h264_8x8_default = 0",
+                     "h264_8x8_default);",
+                     "venus-test11: encoder control defaults failed"):
+        if required not in control_init:
+            raise RuntimeError(f"SM8150 8x8 control default fix is incomplete: {required}")
+
+    created_controls = set(re.findall(
+        r"v4l2_ctrl_new_std(?:_menu|_compound)?\s*\("
+        r"[^;]*?\b(V4L2_CID_[A-Z0-9_]+)\b[^;]*?\);",
+        control_init, re.DOTALL))
+    handled_controls = set(re.findall(
+        r"case\s+(V4L2_CID_[A-Z0-9_]+)\s*:", dynamic))
+    volatile_controls = set(re.findall(
+        r"case\s+(V4L2_CID_[A-Z0-9_]+)\s*:", volatile_ctrl))
+    missing_controls = created_controls - handled_controls - volatile_controls
+    if missing_controls:
+        raise RuntimeError(
+            "Encoder defaults call an unhandled s_ctrl: " +
+            ", ".join(sorted(missing_controls)))
+
     print("PASS: SM8150 syscache, encoder protocol, PM pin and safety-gate invariants")
 
 
