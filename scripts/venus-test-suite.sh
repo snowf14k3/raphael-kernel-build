@@ -41,7 +41,7 @@ fi
 [[ "${VENUS_TEST_ENCODER:-0}" == 0 || "${VENUS_TEST_ENCODER:-0}" == 1 ]] || {
 	echo 'VENUS_TEST_ENCODER 只能是 0 或 1；未开始测试。' >&2; exit 2;
 }
-for command in ffmpeg timeout tar awk diff cmp sha256sum fuser dmesg readlink sync; do
+for command in ffmpeg timeout tar awk diff cmp sha256sum fuser dmesg logger readlink sync; do
 	command -v "$command" >/dev/null || { echo "缺少命令：$command；未开始测试。" >&2; exit 2; }
 done
 dev=/sys/bus/platform/devices/aa00000.video-codec
@@ -235,6 +235,8 @@ record on-hevc10 SKIP 'kernel exposes Main10/P010; Debian FFmpeg 7.1 V4L2 lacks 
 if [[ "${VENUS_TEST_ENCODER:-0}" != 1 ]]; then
 	record hw-encode SKIP 'disabled by default after the test5 reboot; opt in with VENUS_TEST_ENCODER=1'
 elif grep -q 'h264_v4l2m2m' "$run_root/encoders.txt"; then
+	logger -t venus-test9-host 'ENCODE_BEGIN'
+	sync
 	if ! run_ffmpeg hw-encode -f lavfi -i testsrc2=size=320x240:rate=30 \
 		-frames:v 30 -pix_fmt nv12 -c:v h264_v4l2m2m -b:v 1000k "$run_root/encoded.h264"; then
 		record hw-encode FAIL 'encoder failed/timed out'; stop_batch;
@@ -249,6 +251,7 @@ elif grep -q 'h264_v4l2m2m' "$run_root/encoders.txt"; then
 		record hw-encode FAIL 'encoded frame count differs'; stop_batch;
 	}
 	record hw-encode PASS '30 hardware-encoded frames decoded successfully in software'
+	logger -t venus-test9-host 'ENCODE_PASS'
 else
 	record hw-encode SKIP 'FFmpeg lacks h264_v4l2m2m encoder'
 fi

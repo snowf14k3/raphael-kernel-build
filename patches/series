@@ -5,3 +5,4 @@
 0005-media-venus-fix-sm8150-hfi4-session-properties.patch
 0006-media-venus-fix-10bit-format-negotiation.patch
 0007-media-venus-complete-10bit-v4l2-negotiation.patch
+0008-media-venus-add-sm8150-system-cache-and-encoder-setup.patch

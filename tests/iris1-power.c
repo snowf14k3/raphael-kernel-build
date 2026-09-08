@@ -16,18 +16,21 @@ typedef uint32_t u32;
 #define POWER_OFF 0
 #define VIDC_CORE_ID_DEFAULT 0
 #define VIDC_CORE_ID_1 1
+#define VIDC_IRIS1_LLCC_NUM 2
 #define HFI_PROPERTY_CONFIG_VIDEOCORES_USAGE 42
 #define IS_IRIS1(c) ((c)->iris1)
 #define IS_V4(c) (true)
 #define IS_V6(c) (false)
 #define is_lite(c) (false)
 #define IS_ERR(p) ((intptr_t)(p) < 0)
+#define IS_ERR_OR_NULL(p) (!(p) || IS_ERR(p))
 #define PTR_ERR(p) ((int)(intptr_t)(p))
 #define __maybe_unused
 
 struct device { int id; };
 struct clk { int id; };
 struct reset_control { int id; };
+struct llcc_slice_desc { int id, refs; };
 struct dev_pm_opp { int unused; };
 struct freq_tbl { unsigned int load; unsigned long freq; };
 struct venus_resources {
@@ -45,6 +48,8 @@ struct venus_core {
 	struct reset_control *resets[4];
 	struct dev_pm_domain_list *pmdomains, *opp_pmdomain;
 	unsigned int iris1_pd_mask, iris1_clk_mask, iris1_hw_mask;
+	struct llcc_slice_desc *iris1_llcc[VIDC_IRIS1_LLCC_NUM];
+	unsigned int iris1_llcc_mask;
 	bool iris1_opp_on, iris1_irq_disabled;
 	unsigned long iris1_freq;
 	int lock, irq;
@@ -66,6 +71,7 @@ static int video_vote, cpu_vote;
 static struct device devices[] = { {0}, {1}, {2}, {3} };
 static struct clk clocks[] = { {0}, {1}, {2}, {3}, {4}, {5}, {6} };
 static struct reset_control resets[] = { {0}, {1}, {2}, {3} };
+static struct llcc_slice_desc llcc_slices[] = { {2, 0}, {3, 0} };
 static struct dev_pm_domain_list domains = {
 	.pd_devs = { &devices[0], &devices[1], &devices[2] },
 };
@@ -91,6 +97,7 @@ static void log_message(struct device *dev, const char *fmt, ...)
 }
 #define dev_err log_message
 #define dev_dbg log_message
+#define dev_warn log_message
 #define dev_info_once log_message
 static void mutex_lock(int *lock) { assert(!(*lock)++); }
 static void mutex_unlock(int *lock) { assert((*lock)-- == 1); }
@@ -236,6 +243,20 @@ static int hfi_core_resume(struct venus_core *core, bool force)
 }
 static void disable_irq(int irq) { (void)irq; irq_depth++; }
 static void enable_irq(int irq) { (void)irq; assert(irq_depth-- > 0); }
+static int llcc_slice_activate(struct llcc_slice_desc *desc)
+{
+	if (fault()) return -EIO;
+	assert(desc && !desc->refs);
+	desc->refs = 1;
+	return 0;
+}
+static int llcc_slice_deactivate(struct llcc_slice_desc *desc)
+{
+	assert(desc && desc->refs == 1);
+	desc->refs = 0;
+	return 0;
+}
+static void llcc_slice_putd(struct llcc_slice_desc *desc) { (void)desc; }
 
 /* ACTUAL_DRIVER_FUNCTIONS */
 
@@ -246,6 +267,9 @@ static void setup(struct venus_core *core)
 	memset(clk_refs, 0, sizeof(clk_refs));
 	memset(reset_asserted, 0, sizeof(reset_asserted));
 	memset(hwmode, 0, sizeof(hwmode));
+	memset(llcc_slices, 0, sizeof(llcc_slices));
+	llcc_slices[0].id = 2;
+	llcc_slices[1].id = 3;
 	calls = fail_at = fail_at2 = properties = irq_depth = 0;
 	video_vote = cpu_vote = 0;
 	opp_vote = 0;
@@ -265,6 +289,8 @@ static void setup(struct venus_core *core)
 		core->vcodec1_clks[i] = &clocks[5 + i];
 	}
 	for (int i = 0; i < 4; i++) core->resets[i] = &resets[i];
+	for (int i = 0; i < VIDC_IRIS1_LLCC_NUM; i++)
+		core->iris1_llcc[i] = &llcc_slices[i];
 	active_core = core;
 }
 static void assert_off(struct venus_core *core)
@@ -273,6 +299,8 @@ static void assert_off(struct venus_core *core)
 	assert(!core->iris1_hw_mask && !core->iris1_opp_on && !opp_vote);
 	for (int i = 0; i < 3; i++) assert(!pm_refs[i] && !hwmode[i]);
 	for (int i = 0; i < 7; i++) assert(!clk_refs[i]);
+	for (int i = 0; i < VIDC_IRIS1_LLCC_NUM; i++) assert(!llcc_slices[i].refs);
+	assert(!core->iris1_llcc_mask);
 }
 static void assert_on(struct venus_core *core)
 {
@@ -280,6 +308,8 @@ static void assert_on(struct venus_core *core)
 	assert(core->iris1_hw_mask == 6 && core->iris1_opp_on);
 	for (int i = 0; i < 3; i++) assert(pm_refs[i] == 1);
 	for (int i = 0; i < 7; i++) assert(clk_refs[i] == 1);
+	for (int i = 0; i < VIDC_IRIS1_LLCC_NUM; i++) assert(llcc_slices[i].refs == 1);
+	assert(core->iris1_llcc_mask == GENMASK(VIDC_IRIS1_LLCC_NUM - 1, 0));
 }
 int main(void)
 {
@@ -309,7 +339,7 @@ int main(void)
 		fail_at = 0;
 		if (!ret) assert_on(&core); /* OPP lookup has a table fallback */
 		else assert_off(&core);
-		core_put_iris1(&core);
+		assert(!iris1_power_off(&core));
 		assert_off(&core);
 		/* A fresh retry must work, including after a reset deassert failure. */
 		assert(!core_power_iris1(&core, POWER_ON));

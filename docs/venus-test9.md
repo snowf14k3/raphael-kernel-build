@@ -1,8 +1,9 @@
 # SM8150 / Raphael Venus test9
 
-test9 在 test8 的基础上补齐 HEVC Main10/P010 的内核侧 V4L2 接口。源码基线
-仍固定为 `58f3df07833f2382fe2fbc28f996c4c85817c1f6`，并按
-`patches/series` 依次应用七个补丁。
+test9 在 test8 的基础上同时补齐 HEVC Main10/P010 的内核侧 V4L2 接口，
+以及 SM8150 编码器缺失的原厂系统缓存和 HFI 参数。源码基线仍固定为
+`58f3df07833f2382fe2fbc28f996c4c85817c1f6`，并按 `patches/series`
+依次应用八个补丁。
 
 ## 已确认的基础
 
@@ -24,9 +25,18 @@ test9 在 test8 的基础上补齐 HEVC Main10/P010 的内核侧 V4L2 接口。�
   stride 按 256 字节对齐。
 - 解码器增加标准 `V4L2_CID_MPEG_VIDEO_HEVC_PROFILE` 控件，只公开 Main 和
   Main10，并沿用现有 HFI profile 映射读取固件报告值。
+- 按小米 Android 10 SM8150 原厂实现取得并激活 `VIDSC0`、`VIDSC1` 两块
+  LLCC 视频缓存，通过 `HFI_RESOURCE_SYSCACHE` 将 slice ID 和大小交给
+  Venus 固件；runtime suspend/resume 会按原厂顺序释放和重新激活缓存。
+- SM8150 H.264 编码默认改为 Baseline，并让固件根据分辨率和码率自动选择
+  level，避免原来的固定 Level 1 与较高码率组合不合法。
+- 为 HFI 4xx 补齐原厂 `HFI_PROPERTY_CONFIG_VENC_FRAME_QP` 封包。启用码率
+  控制时由固件选择初始 QP；关闭码率控制时将 I/P/B QP 应用于全部层。
 
 宿主机测试会直接编译补丁后的真实 helper，检查 320x240 与 1920x1080 的
-P010 buffer size、8/10-bit 分类、格式过滤以及 HEVC Main10 控件。
+P010 buffer size、8/10-bit 分类、格式过滤、HEVC Main10 控件，以及两块
+LLCC 的上电/掉电/失败回滚。另有静态协议检查核对 SYSCACHE 和 FRAME_QP
+封包字段与调用顺序。
 
 ## 已知用户态限制
 
@@ -36,6 +46,9 @@ Debian 13 当前 FFmpeg 7.1 的 V4L2 mem2mem 格式表没有 P010 映射。因�
 接口后仍需单独修复的 FFmpeg 用户态问题；test9 不把它伪装成内核通过。
 
 默认实机脚本继续安全验证 H.264 和 HEVC 8-bit，并将 Main10 标为 SKIP。
-硬编码也保持默认禁用，因为 test5/test8 已有整机复位记录。
+编码内核路径虽然已补齐，但在 test9 实机确认前仍保持默认禁用，因为
+test5/test8 已有整机复位记录；必须显式设置 `VENUS_TEST_ENCODER=1` 才会运行。
+本轮没有加入猜测性的 recon DMA 缓冲，也没有把普通编码输出缓冲错误地做成
+静态 `SET_BUFFERS`：原厂代码表明这两条都不是 SM8150 编码器的要求。
 
 构建后内核版本必须为 `7.1.0-sm8150-venus-test9+`。
