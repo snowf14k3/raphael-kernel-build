@@ -6,3 +6,4 @@
 0006-media-venus-fix-10bit-format-negotiation.patch
 0007-media-venus-complete-10bit-v4l2-negotiation.patch
 0008-media-venus-add-sm8150-system-cache-and-encoder-setup.patch
+0009-media-venus-harden-SM8150-encoder-lifecycle.patch

@@ -1,0 +1,829 @@
+From 212c41d1f7576dae9869fb9a043eb63b47a8cade Mon Sep 17 00:00:00 2001
+From: snowf14k3 <60956553+snowf14k3@users.noreply.github.com>
+Date: Tue, 8 Sep 2026 13:22:59 +0800
+Subject: [PATCH] media: venus: harden SM8150 encoder lifecycle
+
+Match VPU5 downstream encoder protocol and power lifetime more closely.
+Keep runtime power pinned across an active encoder stream. Consume one
+coherent firmware buffer-requirements snapshot, preserve automatic H.264
+level selection, and use the all-layer bitrate identifier.
+
+Reject incomplete resources and malformed HFI replies. Keep protocol
+setup and hardware DMA fail-closed behind independent opt-in gates.
+Roll back core ownership before runtime suspend on startup errors.
+
+Signed-off-by: snowf14k3 <60956553+snowf14k3@users.noreply.github.com>
+---
+ drivers/media/platform/qcom/venus/core.h      |   7 +
+ drivers/media/platform/qcom/venus/helpers.c   | 132 ++++++++-
+ drivers/media/platform/qcom/venus/helpers.h   |   1 +
+ drivers/media/platform/qcom/venus/hfi_cmds.c  |   9 +-
+ .../media/platform/qcom/venus/hfi_helper.h    |   8 +
+ drivers/media/platform/qcom/venus/hfi_msgs.c  |   2 +-
+ drivers/media/platform/qcom/venus/venc.c      | 255 +++++++++++++++---
+ .../media/platform/qcom/venus/venc_ctrls.c    |  13 +-
+ 8 files changed, 376 insertions(+), 51 deletions(-)
+
+diff --git a/drivers/media/platform/qcom/venus/core.h b/drivers/media/platform/qcom/venus/core.h
+index 46cec3ed0fd9..309cb46d879e 100644
+--- a/drivers/media/platform/qcom/venus/core.h
++++ b/drivers/media/platform/qcom/venus/core.h
+@@ -28,6 +28,7 @@
+ #define VIDC_RESETS_NUM_MAX		4
+ #define VIDC_MAX_HIER_CODING_LAYER 6
+ #define VIDC_IRIS1_LLCC_NUM		2
++#define VENUS_IRIS1_ENC_MIN_BUFFERS	4
+ 
+ #define VENUS_MAX_FPS			240
+ 
+@@ -463,11 +464,14 @@ enum venus_inst_modes {
+  * @ops:		HFI operations
+  * @session_type:	the type of the session (decoder or encoder)
+  * @hprop:	a union used as a holder by get property
++ * @bufreq_cache:	a snapshot of one buffer-requirements reply
++ * @bufreq_cache_valid: the snapshot may be used without another HFI query
+  * @core_acquired:	the Core has been acquired
+  * @bit_depth:		current bitstream bit-depth
+  * @pic_struct:		bitstream progressive vs interlaced
+  * @next_buf_last: a flag to mark next queued capture buffer as last
+  * @drain_active:	Drain sequence is in progress
++ * @enc_pm_active: encoder stream owns a runtime-PM reference
+  * @flags:	bitmask flags describing current instance mode
+  * @dpb_ids:	DPB buffer ID's
+  */
+@@ -534,11 +538,14 @@ struct venus_inst {
+ 	const struct hfi_inst_ops *ops;
+ 	u32 session_type;
+ 	union hfi_get_property hprop;
++	struct hfi_buffer_requirements bufreq_cache[HFI_BUFFER_TYPE_MAX];
++	bool bufreq_cache_valid;
+ 	unsigned int core_acquired: 1;
+ 	unsigned int bit_depth;
+ 	unsigned int pic_struct;
+ 	bool next_buf_last;
+ 	bool drain_active;
++	bool enc_pm_active;
+ 	enum venus_inst_modes flags;
+ 	struct ida dpb_ids;
+ };
+diff --git a/drivers/media/platform/qcom/venus/helpers.c b/drivers/media/platform/qcom/venus/helpers.c
+index b4c82d0dfd53..52992204c27e 100644
+--- a/drivers/media/platform/qcom/venus/helpers.c
++++ b/drivers/media/platform/qcom/venus/helpers.c
+@@ -672,6 +672,7 @@ int venus_helper_get_bufreq(struct venus_inst *inst, u32 type,
+ 	u32 ptype = HFI_PROPERTY_CONFIG_BUFFER_REQUIREMENTS;
+ 	enum hfi_version ver = inst->core->res->hfi_version;
+ 	union hfi_get_property hprop;
++	const struct hfi_buffer_requirements *bufreqs;
+ 	unsigned int i;
+ 	int ret;
+ 
+@@ -687,17 +688,24 @@ int venus_helper_get_bufreq(struct venus_inst *inst, u32 type,
+ 		return 0;
+ 	}
+ 
+-	ret = hfi_session_get_property(inst, ptype, &hprop);
+-	if (ret)
+-		return ret;
++	if (IS_IRIS1(inst->core) &&
++	    inst->session_type == VIDC_SESSION_TYPE_ENC &&
++	    inst->bufreq_cache_valid) {
++		bufreqs = inst->bufreq_cache;
++	} else {
++		ret = hfi_session_get_property(inst, ptype, &hprop);
++		if (ret)
++			return ret;
++		bufreqs = hprop.bufreq;
++	}
+ 
+ 	ret = -EINVAL;
+ 
+ 	for (i = 0; i < HFI_BUFFER_TYPE_MAX; i++) {
+-		if (hprop.bufreq[i].type != type)
++		if (bufreqs[i].type != type)
+ 			continue;
+ 
+-		memcpy(req, &hprop.bufreq[i], sizeof(*req));
++		memcpy(req, &bufreqs[i], sizeof(*req));
+ 		ret = 0;
+ 		break;
+ 	}
+@@ -706,6 +714,93 @@ int venus_helper_get_bufreq(struct venus_inst *inst, u32 type,
+ }
+ EXPORT_SYMBOL_GPL(venus_helper_get_bufreq);
+ 
++int venus_helper_cache_bufreqs(struct venus_inst *inst)
++{
++	const u32 ptype = HFI_PROPERTY_CONFIG_BUFFER_REQUIREMENTS;
++	enum hfi_version ver = inst->core->res->hfi_version;
++	union hfi_get_property hprop;
++	bool have_input = false, have_output = false;
++	unsigned long seen = 0;
++	unsigned int i;
++	int ret;
++
++	/* This cache is intentionally limited to the audited VPU5 encoder. */
++	if (!IS_IRIS1(inst->core) ||
++	    inst->session_type != VIDC_SESSION_TYPE_ENC)
++		return -EINVAL;
++	if (inst->num_input_bufs < VENUS_IRIS1_ENC_MIN_BUFFERS ||
++	    inst->num_input_bufs > VIDEO_MAX_FRAME ||
++	    inst->num_output_bufs < VENUS_IRIS1_ENC_MIN_BUFFERS ||
++	    inst->num_output_bufs > VIDEO_MAX_FRAME)
++		return -EINVAL;
++
++	inst->bufreq_cache_valid = false;
++	ret = hfi_session_get_property(inst, ptype, &hprop);
++	if (ret)
++		return ret;
++
++	for (i = 0; i < HFI_BUFFER_TYPE_MAX; i++) {
++		struct hfi_buffer_requirements *req = &hprop.bufreq[i];
++		u32 count_actual, count_min, count_min_host;
++
++		if (!req->type)
++			continue;
++
++		count_actual = req->count_actual;
++		count_min = hfi_bufreq_get_count_min(req, ver);
++		count_min_host = hfi_bufreq_get_count_min_host(req, ver);
++		if (req->type > HFI_BUFFER_EXTRADATA_INPUT(HFI_VERSION_4XX) ||
++		    (seen & BIT(req->type)) ||
++		    count_actual > VIDEO_MAX_FRAME ||
++		    count_min > VIDEO_MAX_FRAME ||
++		    count_min_host > VIDEO_MAX_FRAME ||
++		    (count_actual && count_min && count_actual < count_min) ||
++		    (req->alignment && !is_power_of_2(req->alignment))) {
++			dev_err(inst->core->dev,
++				"venus-test10: invalid encoder bufreq type=%#x actual=%u min=%u host=%u align=%u\n",
++				req->type, count_actual, count_min,
++				count_min_host, req->alignment);
++			return -EINVAL;
++		}
++		seen |= BIT(req->type);
++
++		if (req->type == HFI_BUFFER_INPUT) {
++			if (!req->size)
++				return -EINVAL;
++			/* Downstream keeps driver IO counts and imports size/alignment. */
++			req->count_actual = inst->num_input_bufs;
++			hfi_bufreq_set_count_min(req, ver,
++						 VENUS_IRIS1_ENC_MIN_BUFFERS);
++			hfi_bufreq_set_count_min_host(req, ver,
++						      VENUS_IRIS1_ENC_MIN_BUFFERS);
++			have_input = true;
++		} else if (req->type == HFI_BUFFER_OUTPUT) {
++			if (!req->size)
++				return -EINVAL;
++			req->count_actual = inst->num_output_bufs;
++			hfi_bufreq_set_count_min(req, ver,
++						 VENUS_IRIS1_ENC_MIN_BUFFERS);
++			hfi_bufreq_set_count_min_host(req, ver,
++						      VENUS_IRIS1_ENC_MIN_BUFFERS);
++			have_output = true;
++		}
++
++		dev_info(inst->core->dev,
++			 "venus-test10: firmware bufreq type=%#x size=%u actual=%u min=%u host=%u align=%u\n",
++			 req->type, req->size, count_actual,
++			 count_min, count_min_host, req->alignment);
++	}
++	if (!have_input || !have_output)
++		return -EINVAL;
++
++	memcpy(inst->bufreq_cache, hprop.bufreq,
++	       sizeof(inst->bufreq_cache));
++	inst->bufreq_cache_valid = true;
++
++	return 0;
++}
++EXPORT_SYMBOL_GPL(venus_helper_cache_bufreqs);
++
+ struct id_mapping {
+ 	u32 hfi_id;
+ 	u32 v4l2_id;
+@@ -1297,11 +1392,24 @@ int venus_helper_set_num_bufs(struct venus_inst *inst, unsigned int input_bufs,
+ 			      unsigned int output2_bufs)
+ {
+ 	u32 ptype = HFI_PROPERTY_PARAM_BUFFER_COUNT_ACTUAL;
+-	struct hfi_buffer_count_actual buf_count;
++	struct hfi_buffer_count_actual buf_count = {};
++	struct hfi_buffer_requirements bufreq;
++	enum hfi_version ver = inst->core->res->hfi_version;
+ 	int ret;
+ 
+ 	buf_count.type = HFI_BUFFER_INPUT;
+ 	buf_count.count_actual = input_bufs;
++	buf_count.count_min_host = input_bufs;
++	if (IS_IRIS1(inst->core) &&
++	    inst->session_type == VIDC_SESSION_TYPE_ENC) {
++		ret = venus_helper_get_bufreq(inst, HFI_BUFFER_INPUT, &bufreq);
++		if (ret)
++			return ret;
++		buf_count.count_min_host = hfi_bufreq_get_count_min(&bufreq, ver);
++		dev_info(inst->core->dev,
++			 "venus-test10: input buffers actual=%u host-min=%u\n",
++			 buf_count.count_actual, buf_count.count_min_host);
++	}
+ 
+ 	ret = hfi_session_set_property(inst, ptype, &buf_count);
+ 	if (ret)
+@@ -1309,6 +1417,17 @@ int venus_helper_set_num_bufs(struct venus_inst *inst, unsigned int input_bufs,
+ 
+ 	buf_count.type = HFI_BUFFER_OUTPUT;
+ 	buf_count.count_actual = output_bufs;
++	buf_count.count_min_host = output_bufs;
++	if (IS_IRIS1(inst->core) &&
++	    inst->session_type == VIDC_SESSION_TYPE_ENC) {
++		ret = venus_helper_get_bufreq(inst, HFI_BUFFER_OUTPUT, &bufreq);
++		if (ret)
++			return ret;
++		buf_count.count_min_host = hfi_bufreq_get_count_min(&bufreq, ver);
++		dev_info(inst->core->dev,
++			 "venus-test10: output buffers actual=%u host-min=%u\n",
++			 buf_count.count_actual, buf_count.count_min_host);
++	}
+ 
+ 	ret = hfi_session_set_property(inst, ptype, &buf_count);
+ 	if (ret)
+@@ -1317,6 +1436,7 @@ int venus_helper_set_num_bufs(struct venus_inst *inst, unsigned int input_bufs,
+ 	if (output2_bufs) {
+ 		buf_count.type = HFI_BUFFER_OUTPUT2;
+ 		buf_count.count_actual = output2_bufs;
++		buf_count.count_min_host = output2_bufs;
+ 
+ 		ret = hfi_session_set_property(inst, ptype, &buf_count);
+ 	}
+diff --git a/drivers/media/platform/qcom/venus/helpers.h b/drivers/media/platform/qcom/venus/helpers.h
+index 21436a6b7e19..62c5183e56ba 100644
+--- a/drivers/media/platform/qcom/venus/helpers.h
++++ b/drivers/media/platform/qcom/venus/helpers.h
+@@ -30,6 +30,7 @@ void venus_helper_m2m_device_run(void *priv);
+ void venus_helper_m2m_job_abort(void *priv);
+ int venus_helper_get_bufreq(struct venus_inst *inst, u32 type,
+ 			    struct hfi_buffer_requirements *req);
++int venus_helper_cache_bufreqs(struct venus_inst *inst);
+ u32 venus_helper_get_framesz_raw(u32 hfi_fmt, u32 width, u32 height);
+ u32 venus_helper_get_framesz(u32 v4l2_fmt, u32 width, u32 height);
+ int venus_helper_set_input_resolution(struct venus_inst *inst,
+diff --git a/drivers/media/platform/qcom/venus/hfi_cmds.c b/drivers/media/platform/qcom/venus/hfi_cmds.c
+index ea6c9d256e06..6a7eeb561185 100644
+--- a/drivers/media/platform/qcom/venus/hfi_cmds.c
++++ b/drivers/media/platform/qcom/venus/hfi_cmds.c
+@@ -8,6 +8,7 @@
+ #include <linux/hash.h>
+ 
+ #include "hfi_cmds.h"
++#include "core.h"
+ 
+ static enum hfi_version hfi_ver;
+ 
+@@ -481,7 +482,8 @@ static int pkt_session_set_property_1x(struct hfi_session_set_property_pkt *pkt,
+ 		break;
+ 	}
+ 	case HFI_PROPERTY_PARAM_BUFFER_COUNT_ACTUAL: {
+-		struct hfi_buffer_count_actual *in = pdata, *count = prop_data;
++		struct hfi_buffer_count_actual *in = pdata;
++		struct hfi_buffer_count_actual_1xx *count = prop_data;
+ 
+ 		count->count_actual = in->count_actual;
+ 		count->type = in->type;
+@@ -641,6 +643,7 @@ static int pkt_session_set_property_1x(struct hfi_session_set_property_pkt *pkt,
+ 	}
+ 	case HFI_PROPERTY_PARAM_PROFILE_LEVEL_CURRENT: {
+ 		struct hfi_profile_level *in = pdata, *pl = prop_data;
++		struct venus_inst *inst = cookie;
+ 
+ 		pl->level = in->level;
+ 		pl->profile = in->profile;
+@@ -648,7 +651,7 @@ static int pkt_session_set_property_1x(struct hfi_session_set_property_pkt *pkt,
+ 			/* Profile not supported, falling back to high */
+ 			pl->profile = HFI_H264_PROFILE_HIGH;
+ 
+-		if (!pl->level)
++		if (!pl->level && !IS_IRIS1(inst->core))
+ 			/* Level not supported, falling back to 1 */
+ 			pl->level = 1;
+ 
+@@ -1243,7 +1246,7 @@ pkt_session_set_property_4xx(struct hfi_session_set_property_pkt *pkt,
+ 
+ 		count->count_actual = in->count_actual;
+ 		count->type = in->type;
+-		count->count_min_host = in->count_actual;
++		count->count_min_host = in->count_min_host;
+ 		pkt->shdr.hdr.size += sizeof(u32) + sizeof(*count);
+ 		break;
+ 	}
+diff --git a/drivers/media/platform/qcom/venus/hfi_helper.h b/drivers/media/platform/qcom/venus/hfi_helper.h
+index 0a0e7302ed85..bd89a30ad28b 100644
+--- a/drivers/media/platform/qcom/venus/hfi_helper.h
++++ b/drivers/media/platform/qcom/venus/hfi_helper.h
+@@ -575,6 +575,8 @@ struct hfi_bitrate {
+ 	u32 layer_id;
+ };
+ 
++#define HFI_LAYER_ID_ALL	0xff
++
+ struct hfi_h264_8x8_transform {
+ 	u32 enable_type;
+ };
+@@ -1165,6 +1167,12 @@ struct hfi_batch_info {
+ struct hfi_buffer_count_actual {
+ 	u32 type;
+ 	u32 count_actual;
++	u32 count_min_host;
++};
++
++struct hfi_buffer_count_actual_1xx {
++	u32 type;
++	u32 count_actual;
+ };
+ 
+ struct hfi_buffer_count_actual_4xx {
+diff --git a/drivers/media/platform/qcom/venus/hfi_msgs.c b/drivers/media/platform/qcom/venus/hfi_msgs.c
+index 68d7fef068cf..67a345c3bb32 100644
+--- a/drivers/media/platform/qcom/venus/hfi_msgs.c
++++ b/drivers/media/platform/qcom/venus/hfi_msgs.c
+@@ -833,7 +833,7 @@ u32 hfi_process_msg_packet(struct venus_core *core, struct hfi_pkt_hdr *hdr)
+ 		return hdr->pkt_type;
+ 
+ 	if (hdr->size && hdr->size < handler->pkt_sz &&
+-	    hdr->size < handler->pkt_sz2) {
++	    (!handler->pkt_sz2 || hdr->size < handler->pkt_sz2)) {
+ 		dev_err(dev, "bad packet size (%d should be %d, pkt type:%x)\n",
+ 			hdr->size, handler->pkt_sz, hdr->pkt_type);
+ 
+diff --git a/drivers/media/platform/qcom/venus/venc.c b/drivers/media/platform/qcom/venus/venc.c
+index 09e4ea816e5b..4a7c3f064e89 100644
+--- a/drivers/media/platform/qcom/venus/venc.c
++++ b/drivers/media/platform/qcom/venus/venc.c
+@@ -24,6 +24,16 @@
+ 
+ #define NUM_B_FRAMES_MAX	4
+ 
++static bool venus_iris1_encoder_enable;
++module_param_named(iris1_encoder, venus_iris1_encoder_enable, bool, 0644);
++MODULE_PARM_DESC(iris1_encoder,
++		 "Allow SM8150 encoder protocol setup (default: off)");
++
++static bool venus_iris1_encoder_dma_enable;
++module_param_named(iris1_encoder_dma, venus_iris1_encoder_dma_enable, bool, 0644);
++MODULE_PARM_DESC(iris1_encoder_dma,
++		 "Allow experimental SM8150 encoder DMA and LOAD/START (default: off)");
++
+ /*
+  * Three resons to keep MPLANE formats (despite that the number of planes
+  * currently is one):
+@@ -659,7 +669,7 @@ static void venc_pm_touch(struct venus_inst *inst)
+ 	pm_runtime_mark_last_busy(inst->core->dev_enc);
+ }
+ 
+-static int venc_set_properties(struct venus_inst *inst)
++static int venc_set_properties(struct venus_inst *inst, bool set_work)
+ {
+ 	struct venc_controls *ctr = &inst->controls.enc;
+ 	struct hfi_intra_period intra_period;
+@@ -676,13 +686,15 @@ static int venc_set_properties(struct venus_inst *inst)
+ 	u32 profile, level;
+ 	int ret;
+ 
+-	ret = venus_helper_set_work_route(inst);
+-	if (ret)
+-		return ret;
++	if (set_work) {
++		ret = venus_helper_set_work_route(inst);
++		if (ret)
++			return ret;
+ 
+-	ret = venus_helper_set_work_mode(inst);
+-	if (ret)
+-		return ret;
++		ret = venus_helper_set_work_mode(inst);
++		if (ret)
++			return ret;
++	}
+ 
+ 	ptype = HFI_PROPERTY_CONFIG_FRAME_RATE;
+ 	frate.buffer_type = HFI_BUFFER_OUTPUT;
+@@ -693,15 +705,18 @@ static int venc_set_properties(struct venus_inst *inst)
+ 		return ret;
+ 
+ 	if (inst->fmt_cap->pixfmt == V4L2_PIX_FMT_H264) {
+-		struct hfi_h264_vui_timing_info info;
++		struct hfi_h264_vui_timing_info info = {};
+ 		struct hfi_h264_entropy_control entropy;
+ 		struct hfi_h264_db_control deblock;
+ 		struct hfi_h264_8x8_transform h264_transform;
+ 
+ 		ptype = HFI_PROPERTY_PARAM_VENC_H264_VUI_TIMING_INFO;
+-		info.enable = 1;
+-		info.fixed_framerate = 1;
+-		info.time_scale = NSEC_PER_SEC;
++		/* VPU5 downstream leaves VUI timing disabled by default. */
++		if (!IS_IRIS1(inst->core)) {
++			info.enable = 1;
++			info.fixed_framerate = 1;
++			info.time_scale = NSEC_PER_SEC;
++		}
+ 
+ 		ret = hfi_session_set_property(inst, ptype, &info);
+ 		if (ret)
+@@ -858,24 +873,27 @@ static int venc_set_properties(struct venus_inst *inst)
+ 
+ 		ptype = HFI_PROPERTY_CONFIG_VENC_TARGET_BITRATE;
+ 		brate.bitrate = bitrate;
+-		brate.layer_id = 0;
++		brate.layer_id = IS_IRIS1(inst->core) ? HFI_LAYER_ID_ALL : 0;
+ 
+ 		ret = hfi_session_set_property(inst, ptype, &brate);
+ 		if (ret)
+ 			return ret;
+ 
+-		if (!ctr->bitrate_peak)
+-			bitrate *= 2;
+-		else
+-			bitrate = ctr->bitrate_peak;
++		/* VPU5 downstream has no packet for CONFIG_VENC_MAX_BITRATE. */
++		if (!IS_IRIS1(inst->core)) {
++			if (!ctr->bitrate_peak)
++				bitrate *= 2;
++			else
++				bitrate = ctr->bitrate_peak;
+ 
+-		ptype = HFI_PROPERTY_CONFIG_VENC_MAX_BITRATE;
+-		brate.bitrate = bitrate;
+-		brate.layer_id = 0;
++			ptype = HFI_PROPERTY_CONFIG_VENC_MAX_BITRATE;
++			brate.bitrate = bitrate;
++			brate.layer_id = 0;
+ 
+-		ret = hfi_session_set_property(inst, ptype, &brate);
+-		if (ret)
+-			return ret;
++			ret = hfi_session_set_property(inst, ptype, &brate);
++			if (ret)
++				return ret;
++		}
+ 	}
+ 
+ 	if (inst->fmt_cap->pixfmt == V4L2_PIX_FMT_H264 ||
+@@ -905,7 +923,7 @@ static int venc_set_properties(struct venus_inst *inst)
+ 			quant.qp_b = ctr->h264_b_qp;
+ 		}
+ 		/* Downstream applies fixed QP to every enhancement layer on VPU5. */
+-		quant.layer_id = IS_IRIS1(inst->core) ? 0xff : 0;
++		quant.layer_id = IS_IRIS1(inst->core) ? HFI_LAYER_ID_ALL : 0;
+ 		ret = hfi_session_set_property(inst, ptype, &quant);
+ 		if (ret)
+ 			return ret;
+@@ -1038,6 +1056,10 @@ static int venc_init_session(struct venus_inst *inst)
+ {
+ 	int ret;
+ 
++	if (IS_IRIS1(inst->core) &&
++	    !READ_ONCE(venus_iris1_encoder_enable))
++		return -EOPNOTSUPP;
++
+ 	ret = venus_helper_session_init(inst);
+ 	if (ret == -EALREADY)
+ 		return 0;
+@@ -1064,9 +1086,12 @@ static int venc_init_session(struct venus_inst *inst)
+ 	if (ret)
+ 		goto deinit;
+ 
+-	ret = venc_set_properties(inst);
+-	if (ret)
+-		goto deinit;
++	/* VPU5 applies its encoder properties once, at final STREAMON. */
++	if (!IS_IRIS1(inst->core)) {
++		ret = venc_set_properties(inst, true);
++		if (ret)
++			goto deinit;
++	}
+ 
+ 	return 0;
+ deinit:
+@@ -1094,7 +1119,7 @@ static int venc_queue_setup(struct vb2_queue *q,
+ {
+ 	struct venus_inst *inst = vb2_get_drv_priv(q);
+ 	struct venus_core *core = inst->core;
+-	unsigned int num, min = 4;
++	unsigned int num, min = VENUS_IRIS1_ENC_MIN_BUFFERS;
+ 	int ret;
+ 
+ 	if (*num_planes) {
+@@ -1146,9 +1171,14 @@ static int venc_queue_setup(struct vb2_queue *q,
+ 	case V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE:
+ 		*num_planes = inst->fmt_out->num_planes;
+ 
+-		ret = venc_out_num_buffers(inst, &num);
+-		if (ret)
+-			break;
++		/* VPU5 obtains its coherent requirements table at STREAMON. */
++		if (IS_IRIS1(core)) {
++			num = min;
++		} else {
++			ret = venc_out_num_buffers(inst, &num);
++			if (ret)
++				break;
++		}
+ 
+ 		num = max(num, min);
+ 		*num_buffers = max(*num_buffers, num);
+@@ -1193,9 +1223,16 @@ static void venc_release_session(struct venus_inst *inst)
+ {
+ 	int ret;
+ 
+-	venc_pm_get(inst);
++	ret = venc_pm_get(inst);
++	if (ret) {
++		dev_warn(inst->core->dev,
++			 "venus-test10: skip SESSION_END while encoder power is unavailable: %d\n",
++			 ret);
++		goto release_core;
++	}
+ 
+ 	mutex_lock(&inst->lock);
++	inst->bufreq_cache_valid = false;
+ 
+ 	ret = hfi_session_deinit(inst);
+ 	if (ret || inst->session_error)
+@@ -1208,6 +1245,12 @@ static void venc_release_session(struct venus_inst *inst)
+ 	venus_pm_release_core(inst);
+ 
+ 	venc_pm_put(inst, false);
++	return;
++
++release_core:
++	inst->bufreq_cache_valid = false;
++	INIT_LIST_HEAD(&inst->registeredbufs);
++	venus_pm_release_core(inst);
+ }
+ 
+ static void venc_buf_cleanup(struct vb2_buffer *vb)
+@@ -1255,9 +1298,62 @@ static int venc_verify_conf(struct venus_inst *inst)
+ 	return 0;
+ }
+ 
++static int venc_iris1_preflight(struct venus_inst *inst)
++{
++	struct venus_core *core = inst->core;
++
++	if (!IS_IRIS1(core))
++		return 0;
++	if (!READ_ONCE(venus_iris1_encoder_enable)) {
++		dev_warn_ratelimited(core->dev,
++				     "venus-test10: SM8150 encoder is safety-locked\n");
++		return -EOPNOTSUPP;
++	}
++
++	/*
++	 * Do not start VPU5 DMA unless every resource from the downstream power
++	 * sequence is still owned.  Failing STREAMON is recoverable; allowing a
++	 * partially powered encoder to reach LOAD_RESOURCES is not.
++	 */
++	if (core->iris1_pd_mask != GENMASK(2, 0) ||
++	    core->iris1_clk_mask != GENMASK(2, 0) ||
++	    core->iris1_hw_mask != GENMASK(2, 1) ||
++	    core->iris1_llcc_mask != GENMASK(VIDC_IRIS1_LLCC_NUM - 1, 0) ||
++	    !core->iris1_opp_on || !inst->core_acquired) {
++		dev_err(core->dev,
++			"venus-test10: refusing encoder start: pd=%#x clk=%#x hw=%#x llcc=%#x opp=%u core=%u\n",
++			core->iris1_pd_mask, core->iris1_clk_mask,
++			core->iris1_hw_mask, core->iris1_llcc_mask,
++			core->iris1_opp_on, inst->core_acquired);
++		return -EIO;
++	}
++
++	if (!inst->fmt_out || inst->fmt_out->pixfmt != V4L2_PIX_FMT_NV12 ||
++	    !inst->input_buf_size || !inst->output_buf_size || !inst->fps) {
++		dev_err(core->dev,
++			"venus-test10: refusing invalid encoder configuration\n");
++		return -EINVAL;
++	}
++
++	return 0;
++}
++
++static int venc_iris1_dma_preflight(struct venus_inst *inst)
++{
++	if (!IS_IRIS1(inst->core))
++		return 0;
++	if (READ_ONCE(venus_iris1_encoder_dma_enable))
++		return 0;
++
++	dev_warn_ratelimited(inst->core->dev,
++			     "venus-test10: protocol preflight passed; encoder DMA and LOAD/START remain safety-locked\n");
++	return -EACCES;
++}
++
+ static int venc_start_streaming(struct vb2_queue *q, unsigned int count)
+ {
+ 	struct venus_inst *inst = vb2_get_drv_priv(q);
++	bool pm_ref = false;
+ 	int ret;
+ 
+ 	mutex_lock(&inst->lock);
+@@ -1274,12 +1370,13 @@ static int venc_start_streaming(struct vb2_queue *q, unsigned int count)
+ 
+ 	if (IS_IRIS1(inst->core))
+ 		dev_info(inst->core->dev,
+-			 "venus-test9: encoder start codec=%#x %ux%u input=%u output=%u buffers=%u/%u\n",
++			 "venus-test10: encoder start codec=%#x %ux%u input=%u output=%u buffers=%u/%u\n",
+ 			 inst->hfi_codec, inst->width, inst->height,
+ 			 inst->input_buf_size, inst->output_buf_size,
+ 			 inst->num_input_bufs, inst->num_output_bufs);
+ 
+ 	venus_helper_init_instance(inst);
++	inst->bufreq_cache_valid = false;
+ 
+ 	inst->sequence_cap = 0;
+ 	inst->sequence_out = 0;
+@@ -1287,20 +1384,44 @@ static int venc_start_streaming(struct vb2_queue *q, unsigned int count)
+ 	ret = venc_pm_get(inst);
+ 	if (ret)
+ 		goto error;
++	pm_ref = true;
++
++	/* Match downstream ordering: route and mode are chosen before the core. */
++	if (IS_IRIS1(inst->core)) {
++		ret = venus_helper_set_work_route(inst);
++		if (ret)
++			goto error;
++
++		ret = venus_helper_set_work_mode(inst);
++		if (ret)
++			goto error;
++	}
+ 
+ 	ret = venus_pm_acquire_core(inst);
+ 	if (ret)
+-		goto put_power;
++		goto error;
+ 
+-	ret = venc_pm_put(inst, true);
++	if (!IS_IRIS1(inst->core)) {
++		ret = venc_pm_put(inst, true);
++		pm_ref = false;
++		if (ret)
++			goto error;
++	}
++
++	ret = venc_iris1_preflight(inst);
+ 	if (ret)
+ 		goto error;
+ 
+-	ret = venc_set_properties(inst);
++	ret = venc_set_properties(inst, !IS_IRIS1(inst->core));
+ 	if (ret)
+ 		goto error;
+ 
+ 	if (IS_IRIS1(inst->core)) {
++		/* Match downstream: GET once after route/mode/core selection. */
++		ret = venus_helper_cache_bufreqs(inst);
++		if (ret)
++			goto error;
++
+ 		ret = venus_helper_set_bufsize(inst, inst->output_buf_size,
+ 					       HFI_BUFFER_OUTPUT);
+ 		if (ret)
+@@ -1316,19 +1437,32 @@ static int venc_start_streaming(struct vb2_queue *q, unsigned int count)
+ 	if (ret)
+ 		goto error;
+ 
++	ret = venc_iris1_dma_preflight(inst);
++	if (ret)
++		goto error;
++
+ 	ret = venus_helper_vb2_start_streaming(inst);
+ 	if (ret)
+ 		goto error;
+ 
+ 	inst->enc_state = VENUS_ENC_STATE_ENCODING;
++	if (IS_IRIS1(inst->core)) {
++		inst->enc_pm_active = true;
++		pm_ref = false;
++		dev_info(inst->core->dev,
++			 "venus-test10: encoder runtime power pinned until STREAMOFF\n");
++	}
+ 
+ 	mutex_unlock(&inst->lock);
+ 
+ 	return 0;
+ 
+-put_power:
+-	venc_pm_put(inst, false);
+ error:
++	if (IS_IRIS1(inst->core) && inst->core_acquired)
++		venus_pm_release_core(inst);
++	inst->bufreq_cache_valid = false;
++	if (pm_ref)
++		venc_pm_put(inst, false);
+ 	venus_helper_buffers_done(inst, q->type, VB2_BUF_STATE_QUEUED);
+ 	if (q->type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE)
+ 		inst->streamon_out = 0;
+@@ -1338,6 +1472,36 @@ static int venc_start_streaming(struct vb2_queue *q, unsigned int count)
+ 	return ret;
+ }
+ 
++static void venc_stop_streaming(struct vb2_queue *q)
++{
++	struct venus_inst *inst = vb2_get_drv_priv(q);
++	bool put_pm = false;
++	int ret;
++
++	/* Only the first queue to stop owns the stream-long reference. */
++	mutex_lock(&inst->lock);
++	inst->bufreq_cache_valid = false;
++	if (IS_IRIS1(inst->core) && inst->enc_pm_active &&
++	    inst->streamon_out && inst->streamon_cap) {
++		inst->enc_pm_active = false;
++		put_pm = true;
++	}
++	mutex_unlock(&inst->lock);
++
++	/* STOP/UNLOAD/SESSION_END must complete while VPU5 is still powered. */
++	venus_helper_vb2_stop_streaming(q);
++
++	if (!put_pm)
++		return;
++
++	venc_pm_touch(inst);
++	ret = venc_pm_put(inst, true);
++	if (ret)
++		dev_warn(inst->core->dev,
++			 "venus-test10: failed to release encoder PM reference: %d\n",
++			 ret);
++}
++
+ static void venc_vb2_buf_queue(struct vb2_buffer *vb)
+ {
+ 	struct venus_inst *inst = vb2_get_drv_priv(vb->vb2_queue);
+@@ -1366,7 +1530,7 @@ static const struct vb2_ops venc_vb2_ops = {
+ 	.buf_cleanup = venc_buf_cleanup,
+ 	.buf_prepare = venus_helper_vb2_buf_prepare,
+ 	.start_streaming = venc_start_streaming,
+-	.stop_streaming = venus_helper_vb2_stop_streaming,
++	.stop_streaming = venc_stop_streaming,
+ 	.buf_queue = venc_vb2_buf_queue,
+ };
+ 
+@@ -1559,11 +1723,22 @@ static int venc_open(struct file *file)
+ static int venc_close(struct file *file)
+ {
+ 	struct venus_inst *inst = to_inst(file);
++	int pm_ret;
+ 
+-	venc_pm_get(inst);
++	pm_ret = venc_pm_get(inst);
++	if (pm_ret)
++		dev_warn(inst->core->dev,
++			 "venus-test10: encoder close could not resume device: %d\n",
++			 pm_ret);
+ 	venus_close_common(inst, file);
++	/* vb2 release normally runs venc_stop_streaming() synchronously. */
++	if (WARN_ON_ONCE(inst->enc_pm_active)) {
++		inst->enc_pm_active = false;
++		venc_pm_put(inst, false);
++	}
+ 	inst->enc_state = VENUS_ENC_STATE_DEINIT;
+-	venc_pm_put(inst, false);
++	if (!pm_ret)
++		venc_pm_put(inst, false);
+ 
+ 	kfree(inst);
+ 	return 0;
+diff --git a/drivers/media/platform/qcom/venus/venc_ctrls.c b/drivers/media/platform/qcom/venus/venc_ctrls.c
+index 49b642fb7163..13affeb1457a 100644
+--- a/drivers/media/platform/qcom/venus/venc_ctrls.c
++++ b/drivers/media/platform/qcom/venus/venc_ctrls.c
+@@ -101,7 +101,9 @@ static int venc_op_s_ctrl(struct v4l2_ctrl *ctrl)
+ 		break;
+ 	case V4L2_CID_MPEG_VIDEO_BITRATE:
+ 		ctr->bitrate = ctrl->val;
+-		ret = dynamic_bitrate_update(inst, ctr->bitrate, 0);
++		ret = dynamic_bitrate_update(inst, ctr->bitrate,
++					     IS_IRIS1(inst->core) ?
++					     HFI_LAYER_ID_ALL : 0);
+ 		if (ret)
+ 			return ret;
+ 		break;
+@@ -411,6 +413,15 @@ static int venc_op_g_volatile_ctrl(struct v4l2_ctrl *ctrl)
+ 
+ 	switch (ctrl->id) {
+ 	case V4L2_CID_MIN_BUFFERS_FOR_OUTPUT:
++		/*
++		 * Do not query VPU5 during control enumeration.  Its complete
++		 * requirements table is fetched once after the final STREAMON,
++		 * after route, work mode and core selection have been committed.
++		 */
++		if (IS_IRIS1(inst->core)) {
++			ctrl->val = VENUS_IRIS1_ENC_MIN_BUFFERS;
++			break;
++		}
+ 		ret = venus_helper_get_bufreq(inst, HFI_BUFFER_INPUT, &bufreq);
+ 		if (!ret)
+ 			ctrl->val = hfi_bufreq_get_count_min(&bufreq, ver);
+-- 
+2.44.0.windows.1
+

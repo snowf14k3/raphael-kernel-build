@@ -3,7 +3,7 @@
 这个仓库只做一件事：编译包含 SM8150 Venus 适配及运行修正的
 Redmi K20 Pro（Raphael）Linux 测试内核。
 
-当前版本是 **test9 HEVC Main10/P010 与编码器资源修正版，待实机验证**。以小米 Android 10
+当前版本是 **test10 SM8150 编码生命周期加固版，待实机验证**。以小米 Android 10
 SM8150 实现为依据，补齐固件启动前的电源域、时钟与 MMCX 性能投票、
 MVS0/CVP 控制权切换及失败回退，并修复 VPU5 的 HFI 4xx 属性封包。
 编码、解码都使用 MVS0；不把 CVP 当作第二个视频核心。
@@ -12,16 +12,22 @@ test8 让 CAPTURE 格式枚举及时跟随所选 codec，使 HEVC/VP9 能在会�
 暴露 P010，并修正 10-bit source-change 的格式计算顺序。test9 继续补齐原厂
 SM8150 的 P010 256 字节 stride 约束、按流位深过滤实际 S/TRY_FMT，以及标准
 HEVC Main/Main10 profile 控件；同时接入原厂 VIDSC0/VIDSC1 LLCC 系统缓存，
-补齐 HFI 4xx FRAME_QP，并校正 H.264 Baseline/自动 level 默认参数。
+补齐 HFI 4xx FRAME_QP，并校正 H.264 Baseline/自动 level 默认参数。test10
+进一步修正 all-layer 码率、VUI 和 level 封包，并让编码会话在 STREAMON 到完整
+STREAMOFF 期间持续持有电源。编码属性和 buffer requirements 按原厂顺序只
+设置/读取一次，HFI4 分开发送 VB2 actual 与原厂 host-min=4，并跳过 VPU5 不支持
+的 MAX_BITRATE 属性。进入硬件前还有资源完整性检查及默认关闭的协议、DMA
+两级安全锁，避免桌面或 RDP 误触发尚未实机确认的编码路径。
 
 构建前会编译并运行实际补丁函数的宿主机故障注入和边界测试，再进行
 完整 arm64 内核编译。自动检查不代表实机硬件编解码已经通过。
-本轮修正范围见 [test9 说明](docs/venus-test9.md)；原厂、postmarketOS
+本轮修正范围见 [test10 说明](docs/venus-test10.md)；原厂、postmarketOS
 对照依据保留在 [test4 说明](docs/venus-test4.md)。
 
 源码仍来自 `snowf14k3/linux` 的 `raphael-7.1` 分支，构建时会应用本仓库
-`patches/series` 中的八个补丁（原厂时序、队列校验、诊断、VPU5 会话配置、
-HFI 4xx 会话属性、两轮 10-bit 格式协商，以及 SM8150 系统缓存/编码参数）。
+`patches/series` 中的九个补丁（原厂时序、队列校验、诊断、VPU5 会话配置、
+HFI 4xx 会话属性、两轮 10-bit 格式协商、SM8150 系统缓存/编码参数，以及
+编码会话生命周期加固）。
 补丁基于源码提交 `58f3df07833f2382fe2fbc28f996c4c85817c1f6`；
 分支如果移动，构建会停止，避免补丁和基线悄悄错配。
 因此源码提交号不变不代表补丁未生效；请同时核对内核版本、构建仓库提交
@@ -44,9 +50,10 @@ HFI 4xx 会话属性、两轮 10-bit 格式协商，以及 SM8150 系统缓存/�
 - `sm8150-xiaomi-raphael.dtb`：包含 Venus 节点的设备树。
 - `kernel.config`：本次实际使用的内核配置。
 - `build-info.txt`：内核版本、源码提交、构建仓库提交及补丁清单 SHA256。
-- `patches.sha256`：八个补丁各自的 SHA256。
-- `venus-test-suite.sh`：安装并启动 test9 后，一次运行的实机测试脚本；
-  硬编码默认禁用，避免再次意外重启。
+- `patches.sha256`：九个补丁各自的 SHA256。
+- `venus-test-suite.sh`：安装并启动 test10 后，一次运行的实机测试脚本；
+  硬编码受协议和 DMA 两级内核锁保护，默认不会运行；单独设置
+  `VENUS_TEST_ENCODER=1` 也只做不提交 DMA 的协议预检。
 - `TESTING.md`：测试范围、运行方式、限制与日志说明。
 - `SHA256SUMS`：文件完整性校验值。
 
