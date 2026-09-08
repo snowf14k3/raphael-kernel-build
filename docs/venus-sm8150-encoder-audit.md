@@ -13,8 +13,8 @@
   `cepheus-q-oss`，提交
   `192eca8550f95c2eec58a474793d1d93fc1b3b67`。
 - 本地只读原厂参考目录：`F:\linux\vendor-sm8150-reference`。
-- test12 精确源码：`F:\linux\test12-kernel-src`。
-- test13 工作与复核源码：`F:\linux\test13-verify`。
+- test12/test13 的一次性展开与复核目录已按用户要求清理；可重放的规范来源是
+  本仓库 `patches/series`、对应补丁和本记录，不再引用已删除目录。
 
 原厂参考虽然以 `cepheus` 命名，但采用 SM8150/VPU5 Venus 实现。本记录只把
 它作为协议、资源和启动顺序的依据，不直接搬运 Android 专属框架代码。
@@ -115,12 +115,13 @@ test13 的目标是保持这个顺序，并把每个危险边界拆成可单独�
 | 项目 | 原厂 SM8150 | 当前结论 | 状态 |
 |---|---|---|---|
 | HFI 版本 | VPU5 / HFI 4xx | 当前使用 HFI 4xx | 对齐 |
-| WORK_ROUTE | H.264 RC_OFF 使用 route 2 | 当前 route 2 | 对齐 |
-| WORK_MODE | RC_OFF/CBR/CQ 使用 mode 1 并开启 low-latency；VBR/MBR 使用 mode 2 | test13 错误固定为 mode 2；test14 已按 `rc_enable/bitrate_mode` 修正 | 已修正，待实机 |
+| WORK_ROUTE | 普通 H.264 VBR 使用 route 2 | test14 实机为 route 2 | 对齐 |
+| WORK_MODE | VBR/MBR 使用 mode 2；RC_OFF/CBR/CQ 使用 mode 1 并开启 low-latency | test14 Stage 0 实测 FFmpeg 把会话配置为 VBR：`rc_enable=1 bitrate_mode=0 low_latency=0`，因此 mode 2 正确 | 已由实机确认 |
 | video core | MVS0；MVS1 属于 CVP | 当前选择 MVS0，不能改到 MVS1 | 对齐 |
 | 初始 IO 数量 | SESSION_INIT 后按 H.264 格式表发 4/4 | test13 仅在 requirements 缓存无效的初始阶段发 4/4 | 待实机 |
 | 最终 IO 数量 | actual 为客户端实际数，`count_min_host` 为固件 minimum | test12 原本正确；test13 一度误改 4/4，现已恢复为固件返回的 3/2 | 静态对齐 |
-| RC 默认值 | RC_OFF | test13 对 IRIS1 默认关闭 frame RC | 待实机 |
+| RC 默认值 | 原厂 bitrate mode 默认 RC_OFF；vendor 的 FRAME_RC_ENABLE 另映射到时间戳 RC 属性 | test13 将 IRIS1 的 frame-RC control 默认改为 0；本次 FFmpeg 在 STREAMON 前把 frame RC 设为 1，同时当前标准 bitrate mode 为 VBR，实际 HFI RC 因而是 VBR | 默认与本次实际会话必须分开记录 |
+| 时间戳 RC | FRAME_RC_ENABLE 原样发送为 `VENC_DISABLE_RC_TIMESTAMP` | test15 对 IRIS1 补发同一 `0x2005027` enable 属性；本次 FFmpeg 预期值为 1 | 静态对齐，待实机 |
 | 固定 QP | I/P/B 和范围默认 127 | test13 使用 127；HFI4 封包结果与原厂一致 | 静态对齐 |
 | bitrate savings | 默认启用，属性 `0x2005038` | test13 已补封包与发送 | 待实机 |
 | rotation | 原厂即使不旋转也发 NONE/NONE，属性 `0x3007001` | test13 已补 | 待实机 |
@@ -145,7 +146,7 @@ test13 的目标是保持这个顺序，并把每个危险边界拆成可单独�
 | LOAD 前总线投票 | `scale_clocks_and_bus` 在 LOAD/START 前执行 | 当前在相同位置调用 `venus_pm_load_scale`；已排队首帧的 payload 使其同时执行 OPP 与 interconnect vote | 静态对齐 |
 | LLCC | VIDSC0、VIDSC1 两块 slice | test9 起发现并交给固件 | 已通过启动 |
 | 时钟策略 | v1 最高 480 MHz；量产 v2 最高 533 MHz | 当前 240/338/365/444/533 MHz 与原厂 `sm8150-v2` 表完全一致 | 已排除 |
-| IOMMU SID | 原厂非安全路径 `0x1300` | 当前上游 DT 为 `0x2300`；同 SID 下解码 DMA 正常 | 暂不改 |
+| IOMMU SID | 原厂通用 DTS 是 `0x1300`，但量产 `sm8150-v2.dtsi` 覆盖为 `0x2300` | 当前上游 DT 同为 `0x2300`，且本机使用量产 v2 时钟/固件配置、解码 DMA 正常 | 与量产 v2 对齐 |
 | HFI DMA 地址宽度 | 原厂映射后拒绝任何不能无损转为 32-bit 的 IOVA | test13 已在内部 DMA 和普通帧 DMA 进入 HFI 前增加上 32 位检查 | 已补安全门禁 |
 | 内部 DMA 分配长度 | 原厂统一向上对齐 4 KiB，并把对齐值作为 SET_BUFFERS 的 `buffer_size` | test12 只上报固件原始 size；test13 已仅对 IRIS1 encoder 改为原厂 4 KiB 语义 | 已修正，待实机 |
 
@@ -183,10 +184,11 @@ persist1 因需求不存在可合法不分配；但当前 helper 对任意查询
 ### 5. 原厂 internal config 没有遗漏当前冒烟用例所需属性
 
 原厂 `msm_vidc_set_internal_config()` 只在 CBR、低延迟或非 single-slice 等条件下
-附加 VBV、低延迟和 multi-slice 属性。当前 128x96 H.264 冒烟用例为 RC_OFF、
-single-slice，因此这些条件均不成立；它们不是 test12 卡死前缺失的必需命令。
-原厂 `FRAME_RC_ENABLE=0` 对应关闭固件时间戳 RC，test13 的 IRIS1 默认设置与此
-一致。
+附加 VBV、低延迟和 multi-slice 属性。test14 Stage 0 已证明当前 FFmpeg 冒烟
+实际为 VBR、single-slice，而不是此前误判的 RC_OFF；这些附加条件仍不成立。
+原厂 `FRAME_RC_ENABLE` 映射到独立的时间戳 RC 属性，而当前公共 Venus 又用
+`rc_enable` 参与选择 RC mode，两者语义不能直接画等号。test15 保持 VBR mode
+选择不变，并另行补发原厂 `VENC_DISABLE_RC_TIMESTAMP` 属性。
 
 ### 6. 初始数量和最终固件 minimum 必须分两个阶段
 
@@ -248,7 +250,7 @@ codec 的保守公式，因此多分配了一倍。FTB 的 `alloc_len` 仍是实
 ### 12. 当前仍比原厂主动发送更多默认编码属性
 
 原厂驱动只在用户态实际设置某项 control 时立即发送对应 HFI 属性；当前上游 Venus
-在 STREAMON 时把保存的标准 control 值集中发送。对 128x96 H.264 RC_OFF
+在 STREAMON 时把保存的标准 control 值集中发送。对 128x96 H.264 VBR
 冒烟用例，额外默认项主要是关闭的 VUI/AUD、CAVLC、deblock、transform、IDR、
 intra period、joined header、自动 QP/范围和 profile/level。所有这些封包均能在
 test12 进入两次 buffer requirements 查询，说明不存在本地 packetizer 拒绝；
@@ -361,7 +363,7 @@ test13 仍在 allocator 内将 stage 0 的待分配数量强制为 0，作为防
 
 ## 静态验证状态
 
-- `0015`、`0016` 已在应用了 test13 全部改动的 `F:\linux\test13-verify` 上分别
+- `0015`--`0017` 已在应用了 test13 全部改动的 `F:\linux\test13-verify` 上分别
   通过正向与反向 `git apply --check --whitespace=error-all`；补丁重新应用后
   `git diff --check` 通过。
 - 宿主测试覆盖 HFI ring、故障注入、工作路由/模式、Main10/P010、requirements、
@@ -387,23 +389,51 @@ test13 仍在 allocator 内将 stage 0 的待分配数量强制为 0，作为防
 stage 0--8；重点只核对 HFI4 ETB packet 字段、输入 NV12 的实际 plane/stride/scanline
 布局、DMA 映射方向和缓存同步，以及原厂 SM8150 在首次 ETB 前设置的输入缓冲属性。
 
-### Stage 9 后重新核对出的 WORK_MODE 偏差
+### Test14 Stage 0 推翻了 WORK_MODE 根因假设
 
-原审计把“普通 H.264 编码”为 mode 2 写得过于笼统，这是错误结论。原厂
-`msm_vidc_decide_work_mode_ar50()` 实际按 rate-control mode 决策：只有
-VBR/MBR 系列选 mode 2；RC_OFF、CBR 和 CQ 选 mode 1，且 encoder 的 mode 1
-必须紧接 `VENC_LOW_LATENCY_MODE=1`。test13 当前冒烟会话明确为
-`rc_enable=0`/RC_OFF，却被公共 helper 固定为 mode 2。
+原厂 `msm_vidc_decide_work_mode_ar50()` 确实按 rate-control mode 决策：VBR/MBR
+系列选 mode 2；RC_OFF、CBR 和 CQ 选 mode 1，且 encoder 的 mode 1 紧接
+`VENC_LOW_LATENCY_MODE=1`。但是 test14 Stage 0 的实机日志已经证明，本次 FFmpeg
+命令在 STREAMON 前把会话设成了 `rc_enable=1 bitrate_mode=0`，也就是 VBR；内核
+最终得到 `mode=2 low_latency=0`。这与原厂 VBR 路径完全一致。
 
-这个偏差不会阻止 SESSION_INIT、requirements、内部 SET_BUFFERS、LOAD、START
-或只排 FTB，恰好要到首个 ETB 让编码硬件真正工作时才可能暴露，与 test13
-实机复位边界吻合。test14 因此先修正此项，不再重复 Stage 0--8；同时把 encoder
-ETB 保留末尾字显式清零，并在 HFI 命令队列返回后增加日志。字段布局本身仍与
-原厂一致，不能把“赋值语句书写顺序”误当成 wire layout 差异。
+因此“test13 首个 ETB 复位是因为把 RC_OFF 错发为 mode 2”的假设已被排除，不能
+再拿它作为运行 Stage 9 的依据。test14 对工作模式的条件化实现本身可保留，因为
+它使不同 RC mode 与原厂一致；ETB 尾部保留字清零也可作为确定性加固保留，但尚无
+证据表明两者修复了复位。下一轮继续只对比首个 ETB 前的 VBR 属性语义、输入 DMA
+可见性和 IRIS1 硬件取数前置条件；在出现新的可区分改动前，不运行 test14 Stage 9。
+
+### Test15：原厂独立发送 DISABLE_RC_TIMESTAMP
+
+继续逐项检查小米 Android 10 原厂 `msm_venc_s_ctrl()` 后发现一个直接落在首个
+ETB 边界上的遗漏。原厂对 `V4L2_CID_MPEG_VIDEO_FRAME_RC_ENABLE` 的处理不是只
+选择 VBR/CBR/OFF：它还把控件值原样写入 `HAL_PARAM_VENC_DISABLE_RC_TIMESTAMP`；
+HFI packetizer 再将其封装为
+`HFI_PROPERTY_PARAM_VENC_DISABLE_RC_TIMESTAMP`（`0x2005027`）和一个
+`hfi_enable`。
+
+当前 Venus 的 `hfi_helper.h` 已定义完全相同的属性 ID，`hfi_cmds.c` 也已有正确的
+通用 enable 封包，因此协议定义本身没有缺失；真正的偏差是
+`venc_set_properties()` 从未发送该属性。Test14 Stage 0 又确认本次 FFmpeg 会话的
+`FRAME_RC_ENABLE` 实际为 1，所以原厂会发送 `DISABLE_RC_TIMESTAMP=1`，当前却
+什么都不发。
+
+这条属性与 rate-control mode 是两条独立命令：VBR 仍保持 WORK_MODE_2；新增属性
+只让固件不要依据每个输入帧的时间戳执行 RC。时间戳第一次随 ETB 被固件消费，
+与 Test13“首个 ETB 成功入队后立即整机复位”的边界严格吻合。Test15 因而仅对
+IRIS1 补发该属性，值取 `ctr->rc_enable`，并打印
+`venus-test15: encoder rc timestamp disable=...`。其他 Venus 版本不变。
+
+这仍是待实机验证的根因候选，不把相关性表述成已经修复。Test15 应先在 Stage 0
+确认值为 1、VBR mode 2 保持不变且 PM 回到 `suspended`；通过后才运行一次带远程
+实时日志的 Stage 9。
 
 ## 下一步
 
-1. test14 先以 Stage 0 确认 `mode=1 rc_enable=0 low_latency=1`。
-2. 不重复 Stage 1--8；下一次完整编码只运行 128x96 单帧 Stage 9。
-3. 若仍复位，依据 `queued ETB ... ret=...` 的最后日志继续区分命令队列与硬件 DMA，
-   不再重查已通过阶段，也不宣称编码已经可用。
+1. test15 Stage 0 必须同时确认 VBR `mode=2` 与
+   `encoder rc timestamp disable=1`，并确认 PM 回到 `suspended`。
+2. test13 Stage 1--8 的内部 DMA、LOAD/START 和 FTB 结论继续有效，不再重复。
+3. Stage 0 通过后，在远程实时内核日志和复位取证标记都开启时，只运行一次
+   test15 Stage 9；它是验证新增时间戳 RC 属性的必要硬件测试。
+4. Stage 9 必须产出非空 H.264，并经软件解码验证后才算编码通过；否则按新增日志
+   继续定位，不能宣称可用。

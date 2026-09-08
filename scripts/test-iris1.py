@@ -188,13 +188,15 @@ def validate_encoder_sources(driver):
 
     legacy_packetizer = function(commands, "pkt_session_set_property_1x")
     # VPU5 falls through the 4xx/3xx packetizers to these common cases.
-    for property_name in ("HFI_PROPERTY_PARAM_VENC_BITRATE_SAVINGS",
+    for property_name in ("HFI_PROPERTY_PARAM_VENC_DISABLE_RC_TIMESTAMP",
+                          "HFI_PROPERTY_PARAM_VENC_BITRATE_SAVINGS",
                           "HFI_PROPERTY_PARAM_VPE_ROTATION",
                           "HFI_PROPERTY_PARAM_NAL_STREAM_FORMAT_SELECT"):
         if f"case {property_name}:" not in legacy_packetizer:
             raise RuntimeError(
                 f"VPU5 property has no common packetizer: {property_name}")
     property_ids = {
+        "HFI_PROPERTY_PARAM_VENC_DISABLE_RC_TIMESTAMP": "0x2005027",
         "HFI_PROPERTY_PARAM_VENC_BITRATE_SAVINGS": "0x2005038",
         "HFI_PROPERTY_PARAM_VPE_ROTATION": "0x3007001",
     }
@@ -218,6 +220,9 @@ def validate_encoder_sources(driver):
     properties = function(encoder, "venc_set_properties")
     for required in ("!ctr->rc_enable", "HFI_PROPERTY_CONFIG_VENC_FRAME_QP",
                      "IS_IRIS1(inst->core) ? HFI_LAYER_ID_ALL : 0",
+                     "HFI_PROPERTY_PARAM_VENC_DISABLE_RC_TIMESTAMP",
+                     "en.enable = ctr->rc_enable",
+                     "venus-test15: encoder rc timestamp disable=%u",
                      "HFI_PROPERTY_PARAM_VENC_BITRATE_SAVINGS",
                      "HFI_PROPERTY_PARAM_NAL_STREAM_FORMAT_SELECT",
                      "HFI_NAL_FORMAT_STARTCODES",
@@ -227,6 +232,15 @@ def validate_encoder_sources(driver):
                      "VPU5 downstream leaves VUI timing disabled"):
         if required not in properties:
             raise RuntimeError(f"SM8150 encoder property setup is incomplete: {required}")
+
+    rate_control = properties.find("HFI_PROPERTY_PARAM_VENC_RATE_CONTROL")
+    timestamp_control = properties.find(
+        "HFI_PROPERTY_PARAM_VENC_DISABLE_RC_TIMESTAMP")
+    bitrate_savings = properties.find("HFI_PROPERTY_PARAM_VENC_BITRATE_SAVINGS")
+    if min(rate_control, timestamp_control, bitrate_savings) < 0 or not \
+       rate_control < timestamp_control < bitrate_savings:
+        raise RuntimeError(
+            "VPU5 timestamp RC must follow rate control before bitrate savings")
 
     max_bitrate_guard = properties.find("if (!IS_IRIS1(inst->core))")
     max_bitrate = properties.find("HFI_PROPERTY_CONFIG_VENC_MAX_BITRATE")

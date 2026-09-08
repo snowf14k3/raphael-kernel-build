@@ -1,0 +1,46 @@
+From: Codex <codex@openai.com>
+Date: Wed, 9 Sep 2026 03:00:00 +0000
+Subject: [PATCH] media: venus: match SM8150 frame RC timestamp policy
+
+Xiaomi's SM8150 VPU5 driver maps FRAME_RC_ENABLE to a second firmware
+property, VENC_DISABLE_RC_TIMESTAMP, independently of the selected rate
+control mode.  The upstream Venus encoder already carries the HFI property
+ID and packetizer but never sends it.
+
+Mirror that VPU5 ABI for IRIS1.  This matters at the first ETB, where the
+firmware starts consuming input timestamps, and leaves other Venus versions
+unchanged.
+---
+ drivers/media/platform/qcom/venus/venc.c | 17 +++++++++++++++++
+ 1 file changed, 17 insertions(+)
+
+diff --git a/drivers/media/platform/qcom/venus/venc.c b/drivers/media/platform/qcom/venus/venc.c
+--- a/drivers/media/platform/qcom/venus/venc.c
++++ b/drivers/media/platform/qcom/venus/venc.c
+@@ -855,6 +855,23 @@ static int venc_set_properties(struct venus_inst *inst, bool enc_psc)
+ 	ret = hfi_session_set_property(inst, ptype, &rate_control);
+ 	if (ret)
+ 		return ret;
+ 
++	/*
++	 * Downstream keeps timestamp based rate control as a separate VPU5
++	 * property.  FRAME_RC_ENABLE maps directly to "disable RC timestamp";
++	 * without it firmware first observes the mismatch when consuming ETB.
++	 */
++	if (IS_IRIS1(inst->core)) {
++		en.enable = ctr->rc_enable;
++		ptype = HFI_PROPERTY_PARAM_VENC_DISABLE_RC_TIMESTAMP;
++		ret = hfi_session_set_property(inst, ptype, &en);
++		if (ret)
++			return ret;
++
++		dev_info(inst->core->dev,
++			 "venus-test15: encoder rc timestamp disable=%u\n",
++			 en.enable);
++	}
++
+ 	/* Downstream forces this on for every non-VBR rate-control mode. */
+ 	if (IS_IRIS1(inst->core) &&
+ 	    rate_control != HFI_RATE_CONTROL_VBR_VFR &&
+-- 
+2.51.0

@@ -14,3 +14,4 @@
 0014-media-venus-stage-SM8150-encoder-bringup.patch
 0015-media-venus-match-SM8150-RC-OFF-work-mode.patch
 0016-drm-panel-ams639rq08-throttle-runtime-brightness.patch
+0017-media-venus-match-SM8150-frame-RC-timestamps.patch

@@ -8,7 +8,7 @@ frame_hashes() {
 }
 if [[ "${1:-}" == --plan ]]; then
 	printf '%s\n' \
-		'Preflight: test14 kernel, SM8150 Venus nodes, idle devices, tools, free space.' \
+		'Preflight: test15 kernel, SM8150 Venus nodes, idle devices, tools, free space.' \
 		'A: PM held on; H.264 320x240/720p/1080p plus HEVC 8-bit decode.' \
 		'HEVC Main10 is skipped by default because Debian FFmpeg lacks V4L2 P010 mapping.' \
 		'B: PM auto; observe suspended, decode, repeat for two cycles.' \
@@ -36,14 +36,14 @@ if [[ "${1:-}" == --self-test ]]; then
 fi
 [[ $# -eq 0 ]] || { echo 'Usage: sudo bash venus-test-suite.sh [--plan|--self-test]' >&2; exit 2; }
 [[ $EUID -eq 0 ]] || { echo '请使用 sudo bash venus-test-suite.sh。' >&2; exit 2; }
-[[ "$(uname -r)" == *sm8150-venus-test14* ]] || {
-	echo '当前不是 test14 内核，未开始测试，也未修改设备设置。' >&2; exit 2;
+[[ "$(uname -r)" == *sm8150-venus-test15* ]] || {
+	echo '当前不是 test15 内核，未开始测试，也未修改设备设置。' >&2; exit 2;
 }
 [[ "${VENUS_TEST_ENCODER:-0}" == 0 || "${VENUS_TEST_ENCODER:-0}" == 1 ]] || {
 	echo 'VENUS_TEST_ENCODER 只能是 0 或 1；未开始测试。' >&2; exit 2;
 }
 if [[ "${VENUS_TEST_ENCODER_DMA:-0}" != 0 ]]; then
-	echo 'test14 自动脚本禁止开启编码 DMA；未开始测试。' >&2; exit 2;
+	echo 'test15 自动脚本禁止开启编码 DMA；未开始测试。' >&2; exit 2;
 fi
 for command in ffmpeg timeout tar awk diff cmp sha256sum fuser dmesg logger readlink sync; do
 	command -v "$command" >/dev/null || { echo "缺少命令：$command；未开始测试。" >&2; exit 2; }
@@ -252,7 +252,7 @@ done
 record on-hevc10 SKIP 'kernel exposes Main10/P010; Debian FFmpeg 7.1 V4L2 lacks P010 mapping'
 if [[ "${VENUS_TEST_ENCODER:-0}" != 1 ]]; then
 	record encoder-protocol SKIP 'encoder gate kept off and checkpoint kept at protocol-only'
-	record hw-encode SKIP 'test14 suite never advances an encoder hardware checkpoint'
+	record hw-encode SKIP 'test15 suite never advances an encoder hardware checkpoint'
 elif grep -q 'h264_v4l2m2m' "$run_root/encoders.txt"; then
 	[[ -w "$encoder_protocol_gate" && -w "$encoder_stage_gate" ]] || {
 		record encoder-protocol FAIL 'kernel encoder gates are unavailable'; stop_batch;
@@ -265,7 +265,7 @@ elif grep -q 'h264_v4l2m2m' "$run_root/encoders.txt"; then
 	set_knob "$encoder_protocol_gate" Y || {
 		record encoder-protocol FAIL 'cannot unlock protocol-only gate'; stop_batch;
 	}
-	logger -t venus-test14-host 'ENCODER_PROTOCOL_PREFLIGHT_BEGIN'
+	logger -t venus-test15-host 'ENCODER_PROTOCOL_PREFLIGHT_BEGIN'
 	sync
 	protocol_rc=0
 	run_ffmpeg encoder-protocol -f lavfi -i testsrc2=size=128x96:rate=1 \
@@ -275,11 +275,13 @@ elif grep -q 'h264_v4l2m2m' "$run_root/encoders.txt"; then
 	if (( protocol_rc == 0 || protocol_rc == 124 || protocol_rc == 137 )) || \
 		! grep -q 'protocol preflight passed; set iris1_encoder_stage=1' \
 		"$run_root/encoder-protocol.dmesg.log" || \
-		! grep -q 'venus-test14: encoder work mode=1 rc_enable=0 .* low_latency=1' \
+		! grep -q 'venus-test14: encoder work mode=2 rc_enable=1 bitrate_mode=0 low_latency=0' \
+		"$run_root/encoder-protocol.dmesg.log" || \
+		! grep -q 'venus-test15: encoder rc timestamp disable=1' \
 		"$run_root/encoder-protocol.dmesg.log"; then
 		record encoder-protocol FAIL 'expected a prompt safety-lock rejection; see logs'; stop_batch;
 	fi
-	record encoder-protocol PASS 'RC_OFF mode1/low-latency confirmed; DMA, LOAD/START and user buffers stayed locked'
+	record encoder-protocol PASS 'VBR mode2 and disable-RC-timestamp confirmed; DMA and hardware remained locked'
 	snapshot encoder-protocol
 
 	record hw-encode SKIP 'test13 reset at the first ETB; full stage 9 remains manual only'
