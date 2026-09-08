@@ -437,3 +437,92 @@ IRIS1 补发该属性，值取 `ctr->rc_enable`，并打印
    test15 Stage 9；它是验证新增时间戳 RC 属性的必要硬件测试。
 4. Stage 9 必须产出非空 H.264，并经软件解码验证后才算编码通过；否则按新增日志
    继续定位，不能宣称可用。
+
+## Test15 编译期间继续比对记录
+
+本节只记录 Test13 已锁定的“第一个 encoder ETB 入队后整机复位”边界，不重复
+Stage 0--8。比较对象固定为当前 Test15 完整补丁树与小米 Android 10 SM8150
+原厂树；后续排查先查本节，避免重复检查。
+
+### 已核对并排除
+
+1. **HFI4 ETB/FTB 包布局**：原厂与当前 encoder ETB 的 session、view、timestamp、
+   flags、mark、offset、alloc/filled length、tag、packet/extradata address 字段顺序和
+   宽度一致；FTB 同样一致。Test14 将 ETB 最后一个 VPU5 保留字置零属于确定性
+   加固，但不是已证实根因。
+2. **首帧 tag 与 timestamp 单位**：tag 0 在原厂合法；两边都把 V4L2 纳秒时间戳
+   转成 HFI 微秒。没有 tag 起始值或高低 32 位错位。
+3. **输入颜色格式**：两边给线性 NV12 使用的 HFI 值均为 `0x2`。原厂只给 P010
+   或 NV12_512 发送 plane constraints；当前 IRIS1 对线性 NV12 跳过该属性，与
+   原厂一致。
+4. **工作路由、工作模式和核心选择**：本次 FFmpeg 实际是 VBR，原厂应为
+   route 2、WORK_MODE_2、单 video core；当前实机日志也是 route 2/mode 2，并把
+   MVS0 作为 codec core。MVS1 是 CVP，不应当当作第二 codec core。
+5. **启动顺序**：两边的关键顺序均为属性/内部配置、route/mode/core、最终
+   requirements、内部缓冲、时钟和带宽、LOAD_RESOURCES、START，最后才提交
+   FTB/ETB。原厂 `msm_vidc_set_internal_config()` 对当前普通 VBR、非低延迟、
+   单 slice 用例没有额外动作。
+6. **静态内部 DMA 与 recon**：scratch0/1/2、persist0 的分配、SET_BUFFERS 和
+   RELEASE_BUFFERS 已由 Stage 1--5 逐项通过；persist1 未被固件请求；recon type 9
+   只建立统计索引，不是漏分配的静态 DMA。
+7. **电源与时钟的时点**：当前 IRIS1 在固件启动前已经拉起 MVSC、MVS0、CVP 的
+   power domain 和 clock，并完成硬件控制交接；原厂的寄存器恢复、IRQ 和 hardware
+   power-collapse 交接也发生在固件启动/恢复阶段，不是首个 ETB 才发生。Stage 7/8
+   已经过相同电源状态，因此暂不把“首帧漏开电源”作为候选。
+8. **总线投票时点**：原厂与当前都在 LOAD_RESOURCES 前按负载投票，当前还会在
+   第一个输入提交时再次 scale。533 MHz 与 SM8150 v2 原厂表一致，不是误用其他
+   SoC 的超频值。
+9. **VB2 cache 同步基本语义**：原厂把 dma-buf 以 `DMA_BIDIRECTIONAL` 映射，并在
+   encoder input qbuf 时显式 clean/invalidate 有效载荷；当前 VB2 OUTPUT 队列自动
+   使用 `DMA_TO_DEVICE`，`vb2_dma_contig` 的 `prepare()` 会在 qbuf 后、硬件取数前
+   执行 `dma_sync_sgtable_for_device()`。实现方式不同，但当前并非完全没有输入缓存
+   清理；单凭这项不能解释复位。
+10. **DMA 设备和非安全 IOMMU SID**：当前 encoder 和已稳定工作的 decoder 都使用
+    Venus 父设备及 `vb2_dma_contig`，不是 encoder 子节点误挂到另一个普通 Linux
+    device。原厂普通非安全 `venus_ns` 使用 `iommus = <&apps_smmu 0x2300 0x60>`，
+    `buffer-types = <0xfff>`，也就是同一 context bank 覆盖 input、output 和内部缓冲，
+    并没有给非安全 pixel/bitstream 分开 SID。当前 DTS 已包含完全相同的
+    `0x2300/0x60`；另外的 0x2301/0x2303/0x2304 对应原厂三个 secure context，
+    不是本次普通 VBR 首帧所缺的映射。因此“首个 ETB 缺非安全 pixel SID”排除。
+
+### 已确认的真实差异
+
+1. **RC timestamp 属性**：原厂在 FRAME_RC_ENABLE 控件处理中独立发送
+   `HFI_PROPERTY_PARAM_VENC_DISABLE_RC_TIMESTAMP`；Test14 证明本次值为 1，而
+   Test14 以前当前完全没发。Test15 已补齐，这是与首个 ETB 消费 timestamp 高度
+   相关、且当前最优先的实机候选。
+2. **线性 NV12 input size 策略**：128x96 时当前 VB2 plane/ETB `alloc_len=32768`，
+   原厂公式为 24576；两边 `filled_len=18432`。本地较新的上游提交甚至将多余 padding
+   进一步减到 20480，说明当前确有额外 over-allocation。大 buffer 通常合法，所以
+   这是实际差异但不是确定根因。
+3. **编码码流 output size 策略**：当前小分辨率公式得到 73728，并把该值通过
+   `0x20100c` 发给固件且用于 FTB；固件最终 requirement 是 36864，原厂在 S_FMT 后
+   倾向采用固件 requirement。若 Test15 仍复位，Test16 应优先尝试在 IRIS1 encoder
+   使用最终 firmware bufreq，而不是继续猜测无关属性。
+4. **原厂专有 bitrate-type 属性**：原厂还有 `VENC_BITRATE_TYPE`（`0x2005031`，
+   `hfi_enable`，默认 enabled），当前没有。但原厂只在 userspace 显式设置对应私有
+   control 时发送，尚无证据 Android 普通 VBR 会话一定发送；暂不盲补。
+5. **DMA 方向实现**：原厂把 dma-buf 统一以 `DMA_BIDIRECTIONAL` 映射，再显式对
+   encoder input 有效区间做 clean/invalidate；当前按 VB2 队列语义把 input 映射为
+   `DMA_TO_DEVICE` 并由 VB2 自动同步。两种做法都保证设备读前可见，暂时只能算实现
+   差异。若 Test15 失败，可用只改变 mapping/sync 方式的诊断补丁单独验证，但优先级
+   低于已确认的 size 策略差异。
+
+### 已纠正的误判
+
+1. VPU5 QP-range 包虽然有 10 个 reserved word，但原厂与当前 packetizer 都只填写
+   有效字段，而且两边调用者都使用未整体清零的栈 packet；因此它不是两棵树之间的
+   差异。后续可以统一清零加固，但不能当作当前根因。
+2. 原厂把属性 `0x20100c` 命名为 `BUFFER_SIZE_MINIMUM`，当前上游命名为
+   `BUFFER_SIZE_ACTUAL`；两边 wire ID 和 `{buffer_type, buffer_size}` payload 完全
+   相同。真正差异只是发送的 size 数值，不是属性编号或封包格式。
+
+### Test15 结果后的固定决策
+
+- 若 Test15 Stage 9 通过：RC timestamp 是关键缺项，先验证长序列和输出码流，再
+  移除 staged 门禁。
+- 若仍在首个 ETB 后复位：不要重跑 Stage 0--8；下一步只在以下两项之间做可区分的
+  Test16：先将 IRIS1 encoder input/output alloc_len 收敛到原厂/firmware
+  requirements，并逐项打印实际 IOMMU domain、SG DMA 地址和长度；如果仍失败，
+  再单独试验原厂的双向 DMA mapping 与显式 partial cache sync，不能把两类变化混在
+  同一次编译里。
