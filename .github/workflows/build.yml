@@ -18,7 +18,7 @@ jobs:
 
     steps:
       - name: Checkout build files
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install build dependencies
         run: |
@@ -35,14 +35,28 @@ jobs:
         run: bash scripts/build.sh
 
       - name: Upload test kernel
-        uses: actions/upload-artifact@v4
+        id: upload-kernel
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
         with:
           name: raphael-venus-test-kernel
           path: artifacts/*
           if-no-files-found: error
           retention-days: 14
+          overwrite: true
+
+      - name: Retry test kernel upload
+        if: steps.upload-kernel.outcome == 'failure'
+        uses: actions/upload-artifact@v7
+        with:
+          name: raphael-venus-test-kernel
+          path: artifacts/*
+          if-no-files-found: error
+          retention-days: 14
+          overwrite: true
 
       - name: Write summary
+        if: always()
         run: |
           echo '## Raphael Venus test kernel' >> "$GITHUB_STEP_SUMMARY"
           echo '' >> "$GITHUB_STEP_SUMMARY"
