@@ -519,6 +519,10 @@ Stage 0--8。比较对象固定为当前 Test15 完整补丁树与小米 Android
 
 ### Test15 结果后的固定决策
 
+- Test15 Stage 0 实机已通过：日志确认
+  `encoder rc timestamp disable=1`、VBR `work mode=2`，随后按 staged 门禁预期以
+  `-EACCES` 返回；10 秒后 runtime PM 为 `suspended`。这证明新增属性已实际封包并
+  被当前启动路径发送，同时没有破坏既有 VBR 模式或释放流程。
 - 若 Test15 Stage 9 通过：RC timestamp 是关键缺项，先验证长序列和输出码流，再
   移除 staged 门禁。
 - 若仍在首个 ETB 后复位：不要重跑 Stage 0--8；下一步只在以下两项之间做可区分的
