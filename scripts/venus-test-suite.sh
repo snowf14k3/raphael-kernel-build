@@ -8,13 +8,13 @@ frame_hashes() {
 }
 if [[ "${1:-}" == --plan ]]; then
 	printf '%s\n' \
-		'Preflight: test11 kernel, SM8150 Venus nodes, idle devices, tools, free space.' \
+		'Preflight: test12 kernel, SM8150 Venus nodes, idle devices, tools, free space.' \
 		'A: PM held on; H.264 320x240/720p/1080p plus HEVC 8-bit decode.' \
 		'HEVC Main10 is skipped by default because Debian FFmpeg lacks V4L2 P010 mapping.' \
 		'B: PM auto; observe suspended, decode, repeat for two cycles.' \
 		'Compare decode frame hashes with software and check exact frame counts.' \
 		'Encoder protocol preflight stays locked unless VENUS_TEST_ENCODER=1 is set.' \
-		'Encoder DMA/LOAD/START needs the second explicit VENUS_TEST_ENCODER_DMA=1 gate.' \
+		'Encoder DMA/LOAD/START is never enabled by this test suite.' \
 		'Restore original PM/debug settings; save local logs and report.tar.gz.' \
 		'Stop issuing codec jobs after a timeout or functional failure.'
 	exit 0
@@ -36,17 +36,14 @@ if [[ "${1:-}" == --self-test ]]; then
 fi
 [[ $# -eq 0 ]] || { echo 'Usage: sudo bash venus-test-suite.sh [--plan|--self-test]' >&2; exit 2; }
 [[ $EUID -eq 0 ]] || { echo '请使用 sudo bash venus-test-suite.sh。' >&2; exit 2; }
-[[ "$(uname -r)" == *sm8150-venus-test11* ]] || {
-	echo '当前不是 test11 内核，未开始测试，也未修改设备设置。' >&2; exit 2;
+[[ "$(uname -r)" == *sm8150-venus-test12* ]] || {
+	echo '当前不是 test12 内核，未开始测试，也未修改设备设置。' >&2; exit 2;
 }
 [[ "${VENUS_TEST_ENCODER:-0}" == 0 || "${VENUS_TEST_ENCODER:-0}" == 1 ]] || {
 	echo 'VENUS_TEST_ENCODER 只能是 0 或 1；未开始测试。' >&2; exit 2;
 }
-[[ "${VENUS_TEST_ENCODER_DMA:-0}" == 0 || "${VENUS_TEST_ENCODER_DMA:-0}" == 1 ]] || {
-	echo 'VENUS_TEST_ENCODER_DMA 只能是 0 或 1；未开始测试。' >&2; exit 2;
-}
-if [[ "${VENUS_TEST_ENCODER_DMA:-0}" == 1 && "${VENUS_TEST_ENCODER:-0}" != 1 ]]; then
-	echo '开启编码 DMA 前必须同时设置 VENUS_TEST_ENCODER=1；未开始测试。' >&2; exit 2;
+if [[ "${VENUS_TEST_ENCODER_DMA:-0}" != 0 ]]; then
+	echo 'test12 自动脚本禁止开启编码 DMA；未开始测试。' >&2; exit 2;
 fi
 for command in ffmpeg timeout tar awk diff cmp sha256sum fuser dmesg logger readlink sync; do
 	command -v "$command" >/dev/null || { echo "缺少命令：$command；未开始测试。" >&2; exit 2; }
@@ -255,7 +252,7 @@ done
 record on-hevc10 SKIP 'kernel exposes Main10/P010; Debian FFmpeg 7.1 V4L2 lacks P010 mapping'
 if [[ "${VENUS_TEST_ENCODER:-0}" != 1 ]]; then
 	record encoder-protocol SKIP 'both encoder safety locks kept off'
-	record hw-encode SKIP 'requires both explicit encoder gates'
+	record hw-encode SKIP 'test12 suite never enables the encoder DMA gate'
 elif grep -q 'h264_v4l2m2m' "$run_root/encoders.txt"; then
 	[[ -w "$encoder_protocol_gate" && -w "$encoder_dma_gate" ]] || {
 		record encoder-protocol FAIL 'kernel encoder safety locks are unavailable'; stop_batch;
@@ -268,7 +265,7 @@ elif grep -q 'h264_v4l2m2m' "$run_root/encoders.txt"; then
 	set_knob "$encoder_protocol_gate" Y || {
 		record encoder-protocol FAIL 'cannot unlock protocol-only gate'; stop_batch;
 	}
-	logger -t venus-test11-host 'ENCODER_PROTOCOL_PREFLIGHT_BEGIN'
+	logger -t venus-test12-host 'ENCODER_PROTOCOL_PREFLIGHT_BEGIN'
 	sync
 	protocol_rc=0
 	run_ffmpeg encoder-protocol -f lavfi -i testsrc2=size=96x96:rate=1 \
@@ -283,30 +280,7 @@ elif grep -q 'h264_v4l2m2m' "$run_root/encoders.txt"; then
 	record encoder-protocol PASS 'HFI setup completed; DMA, internal buffers and LOAD/START stayed locked'
 	snapshot encoder-protocol
 
-	if [[ "${VENUS_TEST_ENCODER_DMA:-0}" != 1 ]]; then
-		record hw-encode SKIP 'DMA safety lock kept off; no hardware buffers or jobs submitted'
-	else
-		set_knob "$encoder_dma_gate" Y || {
-			record hw-encode FAIL 'cannot unlock encoder DMA gate'; stop_batch;
-		}
-		logger -t venus-test11-host 'ENCODER_DMA_BEGIN'
-		sync
-		if ! run_ffmpeg hw-encode -f lavfi -i testsrc2=size=320x240:rate=30 \
-			-frames:v 30 -pix_fmt nv12 -c:v h264_v4l2m2m -b:v 1000k "$run_root/encoded.h264"; then
-			record hw-encode FAIL 'encoder failed/timed out'; stop_batch;
-		fi
-		if ! grep -q "driver 'qcom-venus'" "$run_root/hw-encode.ffmpeg.log" || \
-			! run_ffmpeg encoded-check -xerror -c:v h264 -threads 2 -i "$run_root/encoded.h264" \
-			-pix_fmt yuv420p -f framemd5 "$run_root/encoded-check.framemd5"; then
-			record hw-encode FAIL 'hardware use or software decode validation failed'; stop_batch;
-		fi
-		frame_hashes "$run_root/encoded-check.framemd5" > "$run_root/encoded-check.hashes"
-		[[ "$(wc -l < "$run_root/encoded-check.hashes")" -eq 30 ]] || {
-			record hw-encode FAIL 'encoded frame count differs'; stop_batch;
-		}
-		record hw-encode PASS '30 hardware-encoded frames decoded successfully in software'
-		logger -t venus-test11-host 'ENCODE_PASS'
-	fi
+	record hw-encode SKIP 'test11 hard-locked during DMA; test12 suite keeps the DMA gate off'
 else
 	record encoder-protocol SKIP 'FFmpeg lacks h264_v4l2m2m encoder'
 	record hw-encode SKIP 'FFmpeg lacks h264_v4l2m2m encoder'

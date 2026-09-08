@@ -3,7 +3,7 @@
 这个仓库只做一件事：编译包含 SM8150 Venus 适配及运行修正的
 Redmi K20 Pro（Raphael）Linux 测试内核。
 
-当前版本是 **test11 SM8150 编码控件及生命周期加固版，待实机验证**。以小米 Android 10
+当前版本是 **test12 SM8150 编码缓冲区时序与 Raphael 亮度修正版，待实机验证**。以小米 Android 10
 SM8150 实现为依据，补齐固件启动前的电源域、时钟与 MMCX 性能投票、
 MVS0/CVP 控制权切换及失败回退，并修复 VPU5 的 HFI 4xx 属性封包。
 编码、解码都使用 MVS0；不把 CVP 当作第二个视频核心。
@@ -19,7 +19,13 @@ STREAMOFF 期间持续持有电源。编码属性和 buffer requirements 按原�
 的 MAX_BITRATE 属性。进入硬件前还有资源完整性检查及默认关闭的协议、DMA
 两级安全锁，避免桌面或 RDP 误触发尚未实机确认的编码路径。test11 根据实机
 函数图定位并修复 Baseline Profile 与默认 8×8 Transform 冲突导致编码节点
-`open()` 返回 `-EINVAL` 的问题，同时保留 DMA 默认关闭的保护。
+`open()` 返回 `-EINVAL` 的问题。test12 根据实机 DMA 硬锁结果，保留固件原始
+buffer minima，并在修改缓冲区计数和大小后重新查询最终需求，避免按过期快照
+分配内部 DMA 缓冲区。编码 DMA 仍默认锁定，自动脚本不再提供打开入口。
+
+同一版本还修复 Raphael 面板的高频亮度更新：亮度 DCS 命令保持 LP 模式，
+合并为最多 10 Hz，并在关屏前同步取消待处理任务。该修正针对实机复现的
+`dsi_err_worker: status=5`；Mesa 26.1.2 已另外解决音量弹窗触发的 GPU IOVA fault。
 
 实机已确认 HEVC Main10 在内核中协商为 P010 并返回首帧；Debian FFmpeg 7.1
 因缺少 V4L2 P010 映射仍会拒绝该帧。这个用户态兼容问题不通过伪报 NV12 在
@@ -27,11 +33,11 @@ STREAMOFF 期间持续持有电源。编码属性和 buffer requirements 按原�
 
 构建前会编译并运行实际补丁函数的宿主机故障注入和边界测试，再进行
 完整 arm64 内核编译。自动检查不代表实机硬件编解码已经通过。
-本轮修正范围见 [test11 说明](docs/venus-test11.md)；原厂、postmarketOS
+本轮修正范围见 [test12 说明](docs/venus-test12.md)；原厂、postmarketOS
 对照依据保留在 [test4 说明](docs/venus-test4.md)。
 
 源码仍来自 `snowf14k3/linux` 的 `raphael-7.1` 分支，构建时会应用本仓库
-`patches/series` 中的十个补丁（原厂时序、队列校验、诊断、VPU5 会话配置、
+`patches/series` 中的十二个补丁（原厂时序、队列校验、诊断、VPU5 会话配置、
 HFI 4xx 会话属性、两轮 10-bit 格式协商、SM8150 系统缓存/编码参数，以及
 编码会话生命周期加固）。
 补丁基于源码提交 `58f3df07833f2382fe2fbc28f996c4c85817c1f6`；
@@ -56,10 +62,10 @@ HFI 4xx 会话属性、两轮 10-bit 格式协商、SM8150 系统缓存/编码�
 - `sm8150-xiaomi-raphael.dtb`：包含 Venus 节点的设备树。
 - `kernel.config`：本次实际使用的内核配置。
 - `build-info.txt`：内核版本、源码提交、构建仓库提交及补丁清单 SHA256。
-- `patches.sha256`：十个补丁各自的 SHA256。
-- `venus-test-suite.sh`：安装并启动 test11 后，一次运行的实机测试脚本；
+- `patches.sha256`：十二个补丁各自的 SHA256。
+- `venus-test-suite.sh`：安装并启动 test12 后，一次运行的实机测试脚本；
   硬编码受协议和 DMA 两级内核锁保护，默认不会运行；单独设置
-  `VENUS_TEST_ENCODER=1` 也只做不提交 DMA 的协议预检。
+  `VENUS_TEST_ENCODER=1` 也只做不提交 DMA 的协议预检，并拒绝 DMA 解锁变量。
 - `TESTING.md`：测试范围、运行方式、限制与日志说明。
 - `SHA256SUMS`：文件完整性校验值。
 

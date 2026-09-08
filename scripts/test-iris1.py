@@ -232,7 +232,7 @@ def validate_encoder_sources(driver):
        "bufreq_cache_valid" not in core_header:
         raise RuntimeError("VPU5 buffer-requirements snapshot is missing")
     if "#define VENUS_IRIS1_ENC_MIN_BUFFERS\t4" not in core_header:
-        raise RuntimeError("VPU5 encoder host buffer minimum differs from downstream")
+        raise RuntimeError("VPU5 encoder V4L2 queue minimum is incomplete")
     cache_bufreqs = function(helpers, "venus_helper_cache_bufreqs")
     if cache_bufreqs.count("hfi_session_get_property(inst, ptype, &hprop)") != 1:
         raise RuntimeError("VPU5 requirements snapshot must issue exactly one HFI GET")
@@ -242,12 +242,15 @@ def validate_encoder_sources(driver):
                      "count_min_host > VIDEO_MAX_FRAME",
                      "!is_power_of_2(req->alignment)",
                      "count_actual < count_min",
-                     "req->count_actual = inst->num_input_bufs",
-                     "req->count_actual = inst->num_output_bufs",
-                     "hfi_bufreq_set_count_min_host",
                      "inst->bufreq_cache_valid = true"):
         if required not in cache_bufreqs:
             raise RuntimeError(f"VPU5 requirements validation is incomplete: {required}")
+    for forbidden in ("req->count_actual =",
+                      "hfi_bufreq_set_count_min(req",
+                      "hfi_bufreq_set_count_min_host(req"):
+        if forbidden in cache_bufreqs:
+            raise RuntimeError(
+                f"Firmware buffer requirements are mutated in the cache: {forbidden}")
 
     get_bufreq = function(helpers, "venus_helper_get_bufreq")
     for required in ("IS_IRIS1(inst->core)",
@@ -298,15 +301,18 @@ def validate_encoder_sources(driver):
     start_preflight = start.find("venc_iris1_preflight(inst)")
     start_properties = start.find("venc_set_properties(inst, !IS_IRIS1(inst->core))")
     start_requirements = start.find("venus_helper_cache_bufreqs(inst)")
-    start_bufsize = start.find("venus_helper_set_bufsize")
-    start_verify = start.find("venc_verify_conf(inst)")
     start_counts = start.find("venus_helper_set_num_bufs")
+    start_bufsize = start.find("venus_helper_set_bufsize")
+    final_requirements = start.find("venus_helper_cache_bufreqs(inst)",
+                                    start_requirements + 1)
+    start_verify = start.find("venc_verify_conf(inst)")
     start_dma_gate = start.find("venc_iris1_dma_preflight(inst)")
     start_hw = start.find("venus_helper_vb2_start_streaming(inst)")
     start_pin = start.find("inst->enc_pm_active = true")
     ordered = (start_get, start_route, start_mode, start_core, start_preflight,
-               start_properties, start_requirements, start_bufsize,
-               start_verify, start_counts, start_dma_gate, start_hw, start_pin)
+               start_properties, start_requirements, start_counts,
+               start_bufsize, final_requirements, start_verify,
+               start_dma_gate, start_hw, start_pin)
     if min(ordered) < 0 or list(ordered) != sorted(ordered):
         raise RuntimeError("IRIS1 encoder setup/DMA/PM ordering differs from audited sequence")
     release_core = start.find("venus_pm_release_core(inst)", start.find("error:"))
@@ -370,6 +376,42 @@ def validate_encoder_sources(driver):
     print("PASS: SM8150 syscache, encoder protocol, PM pin and safety-gate invariants")
 
 
+def validate_panel_sources(kernel):
+    panel_source = (kernel / "drivers/gpu/drm/panel/"
+                    "panel-samsung-ams639rq08.c").read_text(encoding="utf-8")
+    update = function(panel_source, "ams639rq08_bl_update_status")
+    get_brightness = function(panel_source, "ams639rq08_bl_get_brightness")
+    worker = function(panel_source, "ams639rq08_brightness_work")
+    unprepare = function(panel_source, "ams639rq08_unprepare")
+
+    for required in ("struct delayed_work brightness_work",
+                     "struct mutex brightness_lock",
+                     "AMS639RQ08_BRIGHTNESS_INTERVAL_MS\t100"):
+        if required not in panel_source:
+            raise RuntimeError(f"Raphael brightness coalescing is incomplete: {required}")
+    for required in ("ctx->pending_brightness = brightness",
+                     "mod_delayed_work(system_wq, &ctx->brightness_work, delay)"):
+        if required not in update:
+            raise RuntimeError(f"Brightness update is not coalesced: {required}")
+    if "mipi_dsi_dcs_set_display_brightness_large" not in worker:
+        raise RuntimeError("Brightness worker does not send the final DCS value")
+    if "ctx->brightness" not in get_brightness or \
+       "mipi_dsi_dcs_get_display_brightness_large" in get_brightness:
+        raise RuntimeError("Brightness readback still adds a DSI transaction")
+    if "mode_flags" in update or "mode_flags" in get_brightness or \
+       "mode_flags" in worker:
+        raise RuntimeError("Runtime brightness path still changes DSI transfer mode")
+
+    mark_unprepared = unprepare.find("ctx->prepared = false")
+    cancel = unprepare.find("cancel_delayed_work_sync")
+    panel_off = unprepare.find("ams639rq08_off(ctx)")
+    ordered = (mark_unprepared, cancel, panel_off)
+    if min(ordered) < 0 or list(ordered) != sorted(ordered):
+        raise RuntimeError("Brightness work is not cancelled before panel power-off")
+
+    print("PASS: AMS639RQ08 LP-mode brightness coalescing and teardown invariants")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("kernel", type=Path)
@@ -380,6 +422,7 @@ def main():
     validate_protocol_sources(driver)
     validate_format_sources(driver)
     validate_encoder_sources(driver)
+    validate_panel_sources(args.kernel)
     power_sources = {
         "pm_helpers.c": [
             "core_clks_enable", "core_clks_disable", "core_clks_set_rate",

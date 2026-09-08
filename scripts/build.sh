@@ -52,7 +52,7 @@ scripts/kconfig/merge_config.sh -m .config \
 	"${config_fragment}" \
 	arch/arm64/configs/sm8150.config
 
-scripts/config --set-str LOCALVERSION "-sm8150-venus-test11"
+scripts/config --set-str LOCALVERSION "-sm8150-venus-test12"
 scripts/config --disable LOCALVERSION_AUTO
 scripts/config --module VIDEO_QCOM_VENUS
 scripts/config --enable SM_GCC_8150
@@ -103,7 +103,7 @@ install -m 0644 "${dtb}" \
 install -m 0644 .config "${artifact_dir}/kernel.config"
 install -m 0644 "${patch_manifest}" "${artifact_dir}/patches.sha256"
 install -m 0644 "${build_root}/scripts/venus-test-suite.sh" "${artifact_dir}/venus-test-suite.sh"
-install -m 0644 "${build_root}/docs/venus-test11.md" "${artifact_dir}/TESTING.md"
+install -m 0644 "${build_root}/docs/venus-test12.md" "${artifact_dir}/TESTING.md"
 
 kernel_release="$(make -s ARCH=arm64 LLVM=1 kernelrelease)"
 commit="$(git rev-parse HEAD)"

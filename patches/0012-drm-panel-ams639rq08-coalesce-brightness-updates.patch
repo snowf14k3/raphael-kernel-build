@@ -1,0 +1,227 @@
+From 0cc5a0e1629665bd3a7892655298afe56c83f1d9 Mon Sep 17 00:00:00 2001
+From: snowf14k3 <60956553+snowf14k3@users.noreply.github.com>
+Date: Tue, 8 Sep 2026 16:54:24 +0800
+Subject: [PATCH 12/12] drm/panel: ams639rq08: coalesce brightness updates
+
+Send runtime brightness commands in the panel's low-power DSI mode and
+coalesce updates to at most ten per second. Cache the applied brightness
+instead of issuing an extra DCS read and cancel pending work while the
+panel is unprepared.
+
+Signed-off-by: snowf14k3 <60956553+snowf14k3@users.noreply.github.com>
+---
+ .../gpu/drm/panel/panel-samsung-ams639rq08.c  | 107 ++++++++++++++----
+ 1 file changed, 86 insertions(+), 21 deletions(-)
+
+diff --git a/drivers/gpu/drm/panel/panel-samsung-ams639rq08.c b/drivers/gpu/drm/panel/panel-samsung-ams639rq08.c
+index f8ebbd4a530b..a3f0223aeb5c 100644
+--- a/drivers/gpu/drm/panel/panel-samsung-ams639rq08.c
++++ b/drivers/gpu/drm/panel/panel-samsung-ams639rq08.c
+@@ -6,9 +6,12 @@
+ #include <linux/backlight.h>
+ #include <linux/delay.h>
+ #include <linux/gpio/consumer.h>
++#include <linux/jiffies.h>
+ #include <linux/module.h>
++#include <linux/mutex.h>
+ #include <linux/of.h>
+ #include <linux/regulator/consumer.h>
++#include <linux/workqueue.h>
+ 
+ #include <video/mipi_display.h>
+ 
+@@ -25,11 +28,21 @@
+ #define MCS_PASSWD2		0xfc
+ #define MCS_UNKNOWN_FF		0xff
+ 
++#define AMS639RQ08_BRIGHTNESS_INTERVAL_MS	100
++
+ struct ams639rq08 {
+ 	struct drm_panel panel;
+ 	struct mipi_dsi_device *dsi;
+ 	struct gpio_desc *reset_gpio;
+ 	struct regulator_bulk_data *supplies;
++	struct delayed_work brightness_work;
++	/* Serializes panel state and DSI brightness transfers. */
++	struct mutex brightness_lock;
++	unsigned long last_brightness_update;
++	u16 brightness;
++	u16 pending_brightness;
++	bool brightness_pending;
++	bool prepared;
+ };
+ 
+ static const struct regulator_bulk_data ams639rq08_supplies[] = {
+@@ -138,6 +150,7 @@ static void ams639rq08_off(struct ams639rq08 *ctx)
+ static int ams639rq08_prepare(struct drm_panel *panel)
+ {
+ 	struct ams639rq08 *ctx = to_ams639rq08(panel);
++	u16 brightness;
+ 	int ret;
+ 
+ 	ret = regulator_bulk_enable(ARRAY_SIZE(ams639rq08_supplies),
+@@ -155,6 +168,15 @@ static int ams639rq08_prepare(struct drm_panel *panel)
+ 		return ret;
+ 	}
+ 
++	brightness = backlight_get_brightness(panel->backlight);
++	mutex_lock(&ctx->brightness_lock);
++	ctx->prepared = true;
++	ctx->pending_brightness = brightness;
++	ctx->brightness_pending = true;
++	ctx->last_brightness_update = 0;
++	mod_delayed_work(system_wq, &ctx->brightness_work, 0);
++	mutex_unlock(&ctx->brightness_lock);
++
+ 	return 0;
+ }
+ 
+@@ -162,6 +184,11 @@ static int ams639rq08_unprepare(struct drm_panel *panel)
+ {
+ 	struct ams639rq08 *ctx = to_ams639rq08(panel);
+ 
++	mutex_lock(&ctx->brightness_lock);
++	ctx->prepared = false;
++	mutex_unlock(&ctx->brightness_lock);
++	cancel_delayed_work_sync(&ctx->brightness_work);
++
+ 	ams639rq08_off(ctx);
+ 
+ 	gpiod_set_value_cansleep(ctx->reset_gpio, 1);
+@@ -198,36 +225,65 @@ static const struct drm_panel_funcs ams639rq08_panel_funcs = {
+ 	.get_modes = ams639rq08_get_modes,
+ };
+ 
+-static int ams639rq08_bl_update_status(struct backlight_device *bl)
++static void ams639rq08_brightness_work(struct work_struct *work)
+ {
+-	struct mipi_dsi_device *dsi = bl_get_data(bl);
+-	u16 brightness = backlight_get_brightness(bl);
++	struct ams639rq08 *ctx =
++		container_of(to_delayed_work(work), struct ams639rq08,
++			     brightness_work);
++	u16 brightness;
+ 	int ret;
+ 
+-	dsi->mode_flags &= ~MIPI_DSI_MODE_LPM;
++	mutex_lock(&ctx->brightness_lock);
++	if (!ctx->prepared || !ctx->brightness_pending)
++		goto unlock;
+ 
+-	ret = mipi_dsi_dcs_set_display_brightness_large(dsi, brightness);
+-	if (ret < 0)
+-		return ret;
++	brightness = ctx->pending_brightness;
++	ctx->brightness_pending = false;
++
++	/* Runtime DCS commands for this panel are sent in low-power mode. */
++	ret = mipi_dsi_dcs_set_display_brightness_large(ctx->dsi, brightness);
++	ctx->last_brightness_update = jiffies;
++	if (ret < 0) {
++		ctx->brightness_pending = true;
++		dev_warn_ratelimited(&ctx->dsi->dev,
++				     "failed to update brightness: %d\n", ret);
++	} else {
++		ctx->brightness = brightness;
++	}
+ 
+-	dsi->mode_flags |= MIPI_DSI_MODE_LPM;
++unlock:
++	mutex_unlock(&ctx->brightness_lock);
++}
++
++static int ams639rq08_bl_update_status(struct backlight_device *bl)
++{
++	struct ams639rq08 *ctx = bl_get_data(bl);
++	unsigned long next_update, delay = 0;
++	u16 brightness = backlight_get_brightness(bl);
++
++	mutex_lock(&ctx->brightness_lock);
++	ctx->pending_brightness = brightness;
++	ctx->brightness_pending = true;
++	if (ctx->prepared) {
++		next_update = ctx->last_brightness_update +
++			msecs_to_jiffies(AMS639RQ08_BRIGHTNESS_INTERVAL_MS);
++		if (time_before(jiffies, next_update))
++			delay = next_update - jiffies;
++		mod_delayed_work(system_wq, &ctx->brightness_work, delay);
++	}
++	mutex_unlock(&ctx->brightness_lock);
+ 
+ 	return 0;
+ }
+ 
+ static int ams639rq08_bl_get_brightness(struct backlight_device *bl)
+ {
+-	struct mipi_dsi_device *dsi = bl_get_data(bl);
++	struct ams639rq08 *ctx = bl_get_data(bl);
+ 	u16 brightness;
+-	int ret;
+-
+-	dsi->mode_flags &= ~MIPI_DSI_MODE_LPM;
+-
+-	ret = mipi_dsi_dcs_get_display_brightness_large(dsi, &brightness);
+-	if (ret < 0)
+-		return ret;
+ 
+-	dsi->mode_flags |= MIPI_DSI_MODE_LPM;
++	mutex_lock(&ctx->brightness_lock);
++	brightness = ctx->brightness;
++	mutex_unlock(&ctx->brightness_lock);
+ 
+ 	return brightness;
+ }
+@@ -237,9 +293,9 @@ static const struct backlight_ops ams639rq08_bl_ops = {
+ 	.get_brightness = ams639rq08_bl_get_brightness,
+ };
+ 
+-static struct backlight_device *
+-ams639rq08_create_backlight(struct mipi_dsi_device *dsi)
++static struct backlight_device *ams639rq08_create_backlight(struct ams639rq08 *ctx)
+ {
++	struct mipi_dsi_device *dsi = ctx->dsi;
+ 	struct device *dev = &dsi->dev;
+ 	const struct backlight_properties props = {
+ 		.type = BACKLIGHT_RAW,
+@@ -247,7 +303,7 @@ ams639rq08_create_backlight(struct mipi_dsi_device *dsi)
+ 		.max_brightness = 2047,
+ 	};
+ 
+-	return devm_backlight_device_register(dev, dev_name(dev), dev, dsi,
++	return devm_backlight_device_register(dev, dev_name(dev), dev, ctx,
+ 						&ams639rq08_bl_ops, &props);
+ }
+ 
+@@ -276,6 +332,10 @@ static int ams639rq08_probe(struct mipi_dsi_device *dsi)
+ 					"Failed to get reset-gpios\n");
+ 
+ 	ctx->dsi = dsi;
++	mutex_init(&ctx->brightness_lock);
++	INIT_DELAYED_WORK(&ctx->brightness_work, ams639rq08_brightness_work);
++	ctx->brightness = 1023;
++	ctx->pending_brightness = 1023;
+ 	mipi_dsi_set_drvdata(dsi, ctx);
+ 
+ 	dsi->lanes = 4;
+@@ -285,7 +345,7 @@ static int ams639rq08_probe(struct mipi_dsi_device *dsi)
+ 
+ 	ctx->panel.prepare_prev_first = true;
+ 
+-	ctx->panel.backlight = ams639rq08_create_backlight(dsi);
++	ctx->panel.backlight = ams639rq08_create_backlight(ctx);
+ 	if (IS_ERR(ctx->panel.backlight))
+ 		return dev_err_probe(dev, PTR_ERR(ctx->panel.backlight),
+ 					"Failed to create backlight\n");
+@@ -305,6 +365,10 @@ static void ams639rq08_remove(struct mipi_dsi_device *dsi)
+ {
+ 	struct ams639rq08 *ctx = mipi_dsi_get_drvdata(dsi);
+ 
++	mutex_lock(&ctx->brightness_lock);
++	ctx->prepared = false;
++	mutex_unlock(&ctx->brightness_lock);
++	cancel_delayed_work_sync(&ctx->brightness_work);
+ 	drm_panel_remove(&ctx->panel);
+ }
+ 
+-- 
+2.44.0.windows.1

@@ -8,3 +8,5 @@
 0008-media-venus-add-sm8150-system-cache-and-encoder-setup.patch
 0009-media-venus-harden-SM8150-encoder-lifecycle.patch
 0010-media-venus-fix-SM8150-encoder-control-defaults.patch
+0011-media-venus-refresh-SM8150-encoder-buffer-requiremen.patch
+0012-drm-panel-ams639rq08-coalesce-brightness-updates.patch
