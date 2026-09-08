@@ -8,8 +8,9 @@ frame_hashes() {
 }
 if [[ "${1:-}" == --plan ]]; then
 	printf '%s\n' \
-		'Preflight: test8 kernel, SM8150 Venus nodes, idle devices, tools, free space.' \
-		'A: PM held on; H.264 320x240/720p/1080p plus HEVC 8/10-bit decode.' \
+		'Preflight: test9 kernel, SM8150 Venus nodes, idle devices, tools, free space.' \
+		'A: PM held on; H.264 320x240/720p/1080p plus HEVC 8-bit decode.' \
+		'HEVC Main10 is skipped by default because Debian FFmpeg lacks V4L2 P010 mapping.' \
 		'B: PM auto; observe suspended, decode, repeat for two cycles.' \
 		'Compare decode frame hashes with software and check exact frame counts.' \
 		'Hardware encode stays disabled unless VENUS_TEST_ENCODER=1 is explicitly set.' \
@@ -34,8 +35,8 @@ if [[ "${1:-}" == --self-test ]]; then
 fi
 [[ $# -eq 0 ]] || { echo 'Usage: sudo bash venus-test-suite.sh [--plan|--self-test]' >&2; exit 2; }
 [[ $EUID -eq 0 ]] || { echo '请使用 sudo bash venus-test-suite.sh。' >&2; exit 2; }
-[[ "$(uname -r)" == *sm8150-venus-test8* ]] || {
-	echo '当前不是 test8 内核，未开始测试，也未修改设备设置。' >&2; exit 2;
+[[ "$(uname -r)" == *sm8150-venus-test9* ]] || {
+	echo '当前不是 test9 内核，未开始测试，也未修改设备设置。' >&2; exit 2;
 }
 [[ "${VENUS_TEST_ENCODER:-0}" == 0 || "${VENUS_TEST_ENCODER:-0}" == 1 ]] || {
 	echo 'VENUS_TEST_ENCODER 只能是 0 或 1；未开始测试。' >&2; exit 2;
@@ -223,13 +224,14 @@ for spec in '720p 1280x720' '1080p 1920x1080'; do
 	decode_case "on-$label" "$label" 30 || stop_batch
 done
 decode_case on-reopen small 90 || stop_batch
-for spec in 'hevc8 yuv420p' 'hevc10 yuv420p10le'; do
+for spec in 'hevc8 yuv420p'; do
 	read -r label pixel_format <<< "$spec"
 	prepare_hevc_sample "$label" "$pixel_format" 30 || {
 		record prepare FAIL "$label software generation failed"; exit 1;
 	}
 	decode_codec_case "on-$label" "$label.mkv" 30 hevc_v4l2m2m "$pixel_format" || stop_batch
 done
+record on-hevc10 SKIP 'kernel exposes Main10/P010; Debian FFmpeg 7.1 V4L2 lacks P010 mapping'
 if [[ "${VENUS_TEST_ENCODER:-0}" != 1 ]]; then
 	record hw-encode SKIP 'disabled by default after the test5 reboot; opt in with VENUS_TEST_ENCODER=1'
 elif grep -q 'h264_v4l2m2m' "$run_root/encoders.txt"; then

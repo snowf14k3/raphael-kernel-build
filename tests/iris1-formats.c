@@ -8,6 +8,8 @@
 typedef uint32_t u32;
 
 #define EXPORT_SYMBOL_GPL(symbol)
+#define ALIGN(x, a) (((x) + (a) - 1) & ~((a) - 1))
+#define SZ_4K 4096U
 #define VIDC_SESSION_TYPE_DEC 1
 #define VIDC_SESSION_TYPE_ENC 2
 
@@ -120,7 +122,15 @@ int main(void)
 	assert(!venus_helper_check_format(&inst, V4L2_PIX_FMT_P010));
 	inst.hfi_codec = venus_helper_get_codec(V4L2_PIX_FMT_HEVC);
 	assert(venus_helper_check_format(&inst, V4L2_PIX_FMT_P010));
+	assert(vdec_fmt_is_8bit(V4L2_PIX_FMT_NV12));
+	assert(vdec_fmt_is_8bit(V4L2_PIX_FMT_QC08C));
+	assert(!vdec_fmt_is_8bit(V4L2_PIX_FMT_P010));
+	assert(vdec_fmt_is_10bit(V4L2_PIX_FMT_P010));
+	assert(vdec_fmt_is_10bit(V4L2_PIX_FMT_QC10C));
+	assert(!vdec_fmt_is_10bit(V4L2_PIX_FMT_NV12));
+	assert(get_framesize_raw_p010(320, 240) == 294912);
+	assert(get_framesize_raw_p010(1920, 1080) == 6266880);
 
-	puts("PASS: selected HEVC codec exposes P010 capture format");
+	puts("PASS: HEVC exposes P010 with depth helpers and 256-byte stride");
 	return 0;
 }

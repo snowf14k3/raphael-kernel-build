@@ -72,10 +72,16 @@ def validate_protocol_sources(driver):
 
 def validate_format_sources(driver):
     decoder = (driver / "vdec.c").read_text(encoding="utf-8")
+    controls = (driver / "vdec_ctrls.c").read_text(encoding="utf-8")
+    helpers = (driver / "helpers.c").read_text(encoding="utf-8")
     hfi = (driver / "hfi.c").read_text(encoding="utf-8")
     s_fmt = function(decoder, "vdec_s_fmt")
     source_change = function(decoder, "vdec_event_change")
     session_init = function(hfi, "hfi_session_init")
+    p010_size = function(helpers, "get_framesize_raw_p010")
+    try_fmt = function(decoder, "vdec_try_fmt_common")
+    find_fmt = function(decoder, "find_format")
+    enum_fmt = function(decoder, "find_format_by_index")
 
     codec_sync = "inst->hfi_codec = venus_helper_get_codec(fmt->pixfmt);"
     if codec_sync not in s_fmt:
@@ -89,7 +95,25 @@ def validate_format_sources(driver):
     if min(depth, select, normalize) < 0 or not depth < select < normalize:
         raise RuntimeError("10-bit capture format must be selected before normalization")
 
-    print("PASS: codec selection and 10-bit source-change ordering invariants")
+    if "ALIGN(width * 2, 256)" not in p010_size or \
+       "ALIGN(stride, 256)" not in try_fmt:
+        raise RuntimeError("linear P010 does not use the required 256-byte stride")
+    for required in ("pixmp->pixelformat = V4L2_PIX_FMT_P010",
+                     "pixmp->pixelformat == V4L2_PIX_FMT_QC10C",
+                     "stride = stride * 4 / 3",
+                     "pixmp->height = ALIGN(pixmp->height, 16)"):
+        if required not in try_fmt:
+            raise RuntimeError(f"10-bit fallback/format geometry is incomplete: {required}")
+    if "vdec_fmt_is_8bit" not in find_fmt or "vdec_fmt_is_10bit" not in find_fmt:
+        raise RuntimeError("capture TRY/S_FMT does not enforce stream bit depth")
+    if "inst->bit_depth" in enum_fmt:
+        raise RuntimeError("ENUM_FMT must stay stable across stream bit-depth changes")
+    for required in ("V4L2_CID_MPEG_VIDEO_HEVC_PROFILE",
+                     "V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN_10"):
+        if required not in controls:
+            raise RuntimeError(f"decoder HEVC profile control is incomplete: {required}")
+
+    print("PASS: codec, Main10/P010 negotiation and 256-byte stride invariants")
 
 
 def main():
@@ -127,8 +151,9 @@ def main():
         "helpers.c": [
             "venus_helper_get_codec", "venus_helper_check_codec",
             "to_hfi_raw_fmt", "find_fmt_from_caps",
-            "venus_helper_check_format",
+            "venus_helper_check_format", "get_framesize_raw_p010",
         ],
+        "vdec.c": ["vdec_fmt_is_8bit", "vdec_fmt_is_10bit"],
     }
     for name, sources in [("power", power_sources), ("hfi", hfi_sources),
                           ("queues", queue_sources),
