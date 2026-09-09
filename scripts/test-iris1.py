@@ -568,6 +568,27 @@ def validate_encoder_sources(driver):
         if not match or match.group(1).lower() != expected_id.lower():
             raise RuntimeError(
                 f"VPU5 property ID differs from downstream: {property_name}")
+    entropy_case = legacy_packetizer[legacy_packetizer.find(
+        "case HFI_PROPERTY_PARAM_VENC_H264_ENTROPY_CONTROL:"):
+        legacy_packetizer.find("case HFI_PROPERTY_PARAM_VENC_RATE_CONTROL:")]
+    if "hfi->cabac_model = in->cabac_model" not in entropy_case or \
+       "if (hfi->entropy_mode" in entropy_case:
+        raise RuntimeError("CAVLC packet leaves the CABAC-model word uninitialized")
+
+    set_property = function(venus, "venus_session_set_property")
+    set_buffers = function(venus, "venus_session_set_buffers")
+    unset_buffers = function(venus, "venus_session_unset_buffers")
+    etb = function(venus, "venus_session_etb")
+    ftb = function(venus, "venus_session_ftb")
+    for body, required in (
+            (set_property, "u8 packet[IFACEQ_VAR_LARGE_PKT_SIZE] = {}"),
+            (set_buffers, "u8 packet[IFACEQ_VAR_LARGE_PKT_SIZE] = {}"),
+            (unset_buffers, "u8 packet[IFACEQ_VAR_LARGE_PKT_SIZE] = {}"),
+            (etb, "pkt = {}"),
+            (ftb, "pkt = {}")):
+        if required not in body:
+            raise RuntimeError(
+                f"Encoder-adjacent HFI packet storage is not zeroed: {required}")
     profile_case = legacy_packetizer.find("case HFI_PROPERTY_PARAM_PROFILE_LEVEL_CURRENT:")
     next_case = legacy_packetizer.find("case ", profile_case + 5)
     profile_body = legacy_packetizer[profile_case:next_case]
@@ -580,29 +601,31 @@ def validate_encoder_sources(driver):
         if required not in profile_level:
             raise RuntimeError(f"SM8150 automatic H.264 level is incomplete: {required}")
     properties = function(encoder, "venc_set_properties")
-    for required in ("!ctr->rc_enable", "HFI_PROPERTY_CONFIG_VENC_FRAME_QP",
+    for required in ("venc_iris1_default_frame_qp(inst)",
+                     "venc_iris1_default_qp_range(inst)",
+                     "venc_iris1_default_profile_level(inst)",
+                     "HFI_PROPERTY_CONFIG_VENC_FRAME_QP",
                      "IS_IRIS1(inst->core) ? HFI_LAYER_ID_ALL : 0",
                      "HFI_PROPERTY_PARAM_VENC_DISABLE_RC_TIMESTAMP",
                      "en.enable = ctr->rc_enable",
                      "venus-sm8150: encoder rc timestamp disable=%u",
-                     "HFI_PROPERTY_PARAM_VENC_BITRATE_SAVINGS",
-                     "HFI_PROPERTY_PARAM_NAL_STREAM_FORMAT_SELECT",
-                     "HFI_NAL_FORMAT_STARTCODES",
+                     "rate_control != HFI_RATE_CONTROL_OFF",
                      "!IS_IRIS1(inst->core) || ctr->ltr_count",
                      "ltr_mode.ltr_mode = HFI_LTR_MODE_MANUAL",
                      "ltr_mode.trust_mode = 1",
-                     "VPU5 downstream leaves VUI timing disabled"):
+                     "VPU5 sends VUI timing only through its explicit private control"):
         if required not in properties:
             raise RuntimeError(f"SM8150 encoder property setup is incomplete: {required}")
 
     rate_control = properties.find("HFI_PROPERTY_PARAM_VENC_RATE_CONTROL")
     timestamp_control = properties.find(
         "HFI_PROPERTY_PARAM_VENC_DISABLE_RC_TIMESTAMP")
-    bitrate_savings = properties.find("HFI_PROPERTY_PARAM_VENC_BITRATE_SAVINGS")
-    if min(rate_control, timestamp_control, bitrate_savings) < 0 or not \
-       rate_control < timestamp_control < bitrate_savings:
+    target_bitrate = properties.find("HFI_PROPERTY_CONFIG_VENC_TARGET_BITRATE",
+                                     timestamp_control)
+    if min(rate_control, timestamp_control, target_bitrate) < 0 or not \
+       rate_control < timestamp_control < target_bitrate:
         raise RuntimeError(
-            "VPU5 timestamp RC must follow rate control before bitrate savings")
+            "VPU5 timestamp RC must follow rate control before target bitrate")
 
     max_bitrate_guard = properties.find("if (!IS_IRIS1(inst->core))")
     max_bitrate = properties.find("HFI_PROPERTY_CONFIG_VENC_MAX_BITRATE")
@@ -629,13 +652,15 @@ def validate_encoder_sources(driver):
     if "if (!IS_IRIS1(inst->core))" not in init_session or \
        "venc_set_properties(inst, true)" not in init_session:
         raise RuntimeError("VPU5 properties are still duplicated during queue setup")
-    initial_counts = init_session.find("VENUS_IRIS1_ENC_MIN_BUFFERS")
     input_resolution = init_session.find("venus_helper_set_input_resolution")
     stride_guard = init_session.find("if (!IS_IRIS1(inst->core))")
     stride_property = init_session.find("venus_helper_set_stride")
-    if min(initial_counts, input_resolution, stride_guard, stride_property) < 0 or \
-       initial_counts > input_resolution or stride_guard > stride_property:
-        raise RuntimeError("VPU5 initial 4/4 counts or linear-NV12 stride omission is incomplete")
+    if min(input_resolution, stride_guard, stride_property) < 0 or \
+       stride_guard > stride_property:
+        raise RuntimeError("VPU5 linear-NV12 stride omission is incomplete")
+    if "VENUS_IRIS1_ENC_MIN_BUFFERS" in init_session or \
+       "venus_helper_set_num_bufs" in init_session:
+        raise RuntimeError("VPU5 still sends speculative buffer counts at SESSION_INIT")
 
     if "bufreq_cache[HFI_BUFFER_TYPE_MAX]" not in core_header or \
        "bufreq_cache_valid" not in core_header:
@@ -677,6 +702,7 @@ def validate_encoder_sources(driver):
                      "sizes[0] = iris1_req.size",
                      "hfi_bufreq_get_count_min(&iris1_req, ver)",
                      "hfi_bufreq_get_count_min_host(&iris1_req, ver)",
+                     "venc_iris1_set_buffer_count(inst, type, *num_buffers",
                      "firmware-defined"):
         if required not in queue_setup:
             raise RuntimeError(
@@ -717,18 +743,22 @@ def validate_encoder_sources(driver):
             raise RuntimeError(f"HFI4 host buffer count is incomplete: {required}")
     if set_num_bufs.count("hfi_bufreq_get_count_min(&bufreq, ver)") != 3:
         raise RuntimeError(
-            "IRIS1 final count_min_host must use all firmware minima")
-    if set_num_bufs.count("iris1_encoder && inst->bufreq_cache_valid") != 2:
-        raise RuntimeError(
-            "IRIS1 initial 4/4 must not consult the unavailable requirements cache")
+            "IRIS1 decoder count_min_host must use all firmware minima")
+    if "iris1_encoder" in set_num_bufs or "bufreq_cache_valid" in set_num_bufs:
+        raise RuntimeError("Generic buffer-count helper still owns VPU5 encoder timing")
     for required in ("iris1_decoder", "HFI_BUFFER_OUTPUT2"):
         if required not in set_num_bufs:
             raise RuntimeError(
                 f"IRIS1 decoder host-min contract is incomplete: {required}")
-    for required in ('source=%s', '"firmware" : "initial"'):
-        if required not in set_num_bufs:
+
+    set_encoder_count = function(encoder, "venc_iris1_set_buffer_count")
+    for required in ("HFI_PROPERTY_PARAM_BUFFER_COUNT_ACTUAL",
+                     "hfi_bufreq_get_count_min(req",
+                     "inst->bufreq_cache_valid = false",
+                     "encoder queue count type=%#x"):
+        if required not in set_encoder_count:
             raise RuntimeError(
-                f"IRIS1 buffer-count phase diagnostics are incomplete: {required}")
+                f"VPU5 per-REQBUFS encoder count is incomplete: {required}")
 
     intbufs = function(helpers, "intbufs_set_buffer")
     for required in ("i < bufreq.count_actual",
@@ -780,7 +810,8 @@ def validate_encoder_sources(driver):
 
     work_mode = function(helpers, "venus_helper_get_work_mode")
     for required in ("IS_IRIS1(inst->core)", "ctr->rc_enable",
-                     "V4L2_MPEG_VIDEO_BITRATE_MODE_VBR",
+                     "V4L2_MPEG_VIDEO_BITRATE_MODE_CBR",
+                     "inst->hfi_codec == HFI_VIDEO_CODEC_VP8",
                      "mode = VIDC_WORK_MODE_1"):
         if required not in work_mode:
             raise RuntimeError(
@@ -808,20 +839,23 @@ def validate_encoder_sources(driver):
     start_core = start.find("venus_pm_acquire_core(inst)")
     start_preflight = start.find("venc_iris1_preflight(inst)")
     start_requirements = start.find("venus_helper_cache_bufreqs(inst)")
-    start_counts = start.find("venus_helper_set_num_bufs")
-    final_requirements = start.find("venus_helper_cache_bufreqs(inst)",
-                                    start_requirements + 1)
     output_size = start.find("venus_helper_set_bufsize(inst, inst->output_buf_size")
     output_type = start.find("HFI_BUFFER_OUTPUT", output_size)
     start_verify = start.find("venc_verify_conf(inst)")
     start_hw = start.find("venus_helper_vb2_start_streaming(inst)")
     start_pin = start.find("inst->enc_pm_active = true")
     ordered = (start_get, start_rotation, start_properties, start_route,
-               start_mode, start_core, start_preflight, start_requirements, start_counts,
-               final_requirements, output_size, output_type, start_verify,
+               start_mode, start_core, start_preflight, start_requirements,
+               output_size, output_type, start_verify,
                start_hw, start_pin)
     if min(ordered) < 0 or list(ordered) != sorted(ordered):
         raise RuntimeError("IRIS1 encoder setup/DMA/PM ordering differs from audited sequence")
+    if start.count("venus_helper_cache_bufreqs(inst)") != 1:
+        raise RuntimeError("VPU5 STREAMON must query final requirements exactly once")
+    generic_counts = start.find("venus_helper_set_num_bufs")
+    generic_else = start.rfind("} else {", 0, generic_counts)
+    if generic_counts < 0 or generic_else < 0 or generic_else < output_size:
+        raise RuntimeError("Generic dual-queue count programming is not isolated from VPU5")
     if "0x20100c" not in start and "BUFFER_SIZE_MINIMUM" not in start:
         raise RuntimeError(
             "Encoder output-size property is not tied to the audited vendor wire contract")

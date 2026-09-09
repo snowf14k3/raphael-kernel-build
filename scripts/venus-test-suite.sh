@@ -8,12 +8,12 @@ frame_hashes() {
 }
 if [[ "${1:-}" == --plan ]]; then
 	printf '%s\n' \
-		'Preflight: test17 kernel, SM8150 Venus nodes, idle devices, tools, free space.' \
+		'Preflight: test18 kernel, SM8150 Venus nodes, idle devices, tools, free space.' \
 		'A: PM held on; H.264, HEVC Main8, VP8, VP9 Profile0 and MPEG2 decode.' \
 		'B: HEVC Main10 and VP9 Profile2 P010 paths are compared to software hashes.' \
 		'C: PM auto; observe suspended, decode, repeat for two cycles.' \
 		'Compare decode frame hashes with software and check exact frame counts.' \
-		'Encoder stays disabled unless VENUS_TEST_ENCODER=1 is set explicitly.' \
+		'Use VENUS_TEST_SCOPE=encoder plus VENUS_TEST_ENCODER=1 to skip decoder cases.' \
 		'When enabled, one H.264 frame is tested first, then H.264/HEVC/VP8 short streams.' \
 		'Restore original PM/debug settings; save local logs and report.tar.gz.' \
 		'Stop immediately after a codec failure to avoid a firmware event/log storm.'
@@ -36,8 +36,12 @@ if [[ "${1:-}" == --self-test ]]; then
 fi
 [[ $# -eq 0 ]] || { echo 'Usage: sudo bash venus-test-suite.sh [--plan|--self-test]' >&2; exit 2; }
 [[ $EUID -eq 0 ]] || { echo '请使用 sudo bash venus-test-suite.sh。' >&2; exit 2; }
-[[ "$(uname -r)" == *sm8150-venus-test17* ]] || {
-	echo '当前不是 test17 内核，未开始测试，也未修改设备设置。' >&2; exit 2;
+[[ "$(uname -r)" == *sm8150-venus-test18* ]] || {
+	echo '当前不是 test18 内核，未开始测试，也未修改设备设置。' >&2; exit 2;
+}
+scope="${VENUS_TEST_SCOPE:-decoder}"
+[[ "$scope" == decoder || "$scope" == encoder || "$scope" == all ]] || {
+	echo 'VENUS_TEST_SCOPE 只能是 decoder、encoder 或 all；未开始测试。' >&2; exit 2;
 }
 [[ "${VENUS_TEST_ENCODER:-0}" == 0 || "${VENUS_TEST_ENCODER:-0}" == 1 ]] || {
 	echo 'VENUS_TEST_ENCODER 只能是 0 或 1；未开始测试。' >&2; exit 2;
@@ -259,6 +263,7 @@ stop_batch() {
 	record remaining SKIP 'stopped after failure; no module reload or reboot attempted'
 	exit 1
 }
+if [[ "$scope" != encoder ]]; then
 prepare_sample small 320x240 90 || { record prepare FAIL 'software sample generation failed'; exit 1; }
 power_changed=1
 set_knob "$control" on || { record power-on FAIL 'cannot hold runtime power'; exit 1; }
@@ -318,7 +323,11 @@ if grep -q 'libvpx-vp9 ' "$run_root/encoders.txt" && grep -q 'vp9_v4l2m2m' "$run
 else
 	record on-vp9p2 SKIP 'FFmpeg lacks libvpx-vp9 encoder or vp9_v4l2m2m decoder'
 fi
-if [[ "${VENUS_TEST_ENCODER:-0}" != 1 ]]; then
+
+fi
+if [[ "$scope" == decoder ]]; then
+	record hw-encode SKIP 'decoder-only scope; encoder gate kept off'
+elif [[ "${VENUS_TEST_ENCODER:-0}" != 1 ]]; then
 	record hw-encode SKIP 'encoder gate kept off; set VENUS_TEST_ENCODER=1 explicitly'
 elif grep -q 'h264_v4l2m2m' "$run_root/encoders.txt"; then
 	[[ -w "$encoder_protocol_gate" ]] || {
@@ -328,7 +337,7 @@ elif grep -q 'h264_v4l2m2m' "$run_root/encoders.txt"; then
 	set_knob "$encoder_protocol_gate" Y || {
 		record hw-encode FAIL 'cannot unlock encoder gate'; stop_batch;
 	}
-	logger -t venus-test17-host 'ENCODER_FULL_BEGIN'
+	logger -t venus-test18-host 'ENCODER_FULL_BEGIN'
 	sync
 	encode_codec_case encode-h264-one h264_v4l2m2m h264 h264 h264 1 128x96 || stop_batch
 	encode_codec_case encode-h264 h264_v4l2m2m h264 h264 h264 30 320x240 || stop_batch
@@ -347,7 +356,10 @@ else
 	record hw-encode SKIP 'FFmpeg lacks h264_v4l2m2m encoder'
 fi
 snapshot encoded
-set_knob "$control" auto || { record power-auto FAIL 'cannot enable runtime PM'; exit 1; }
+if (( power_changed )); then
+	set_knob "$control" auto || { record power-auto FAIL 'cannot enable runtime PM'; exit 1; }
+fi
+if [[ "$scope" != encoder ]]; then
 for cycle in 1 2; do
 	suspended=0
 	for attempt in {1..20}; do
@@ -363,4 +375,15 @@ for cycle in 1 2; do
 	snapshot "suspended-$cycle"
 	decode_case "resume-$cycle" small 90 || stop_batch
 done
+else
+	suspended=0
+	for attempt in {1..20}; do
+		current_status="$(timeout -k 2s 2s cat "$status")"
+		[[ "$current_status" != error ]] || { record encoder-pm FAIL 'runtime PM error'; stop_batch; }
+		if [[ "$current_status" == suspended ]]; then suspended=1; break; fi
+		sleep 0.5
+	done
+	(( suspended )) || { record encoder-pm FAIL 'did not suspend within 10 seconds'; stop_batch; }
+	record encoder-pm PASS 'encoder closed and runtime_status=suspended'
+fi
 record suite PASS 'all executed checks passed; SKIP entries are not passes'

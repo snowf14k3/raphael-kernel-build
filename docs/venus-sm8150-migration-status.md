@@ -1,6 +1,6 @@
 # SM8150 Venus 全量迁移主报告
 
-> 本文是 `Test17 + 0001--0031` 候选树的权威总账。旧的 `venus-sm8150-full-migration-audit.md`
+> 本文是 `Test18 + 0001--0032` 候选树的权威总账。旧的 `venus-sm8150-full-migration-audit.md`
 > 和 `venus-sm8150-encoder-audit.md` 保留历史过程，但不得用其中的阶段性判断覆盖本文。
 > “已实现”只表示代码已进入候选补丁；没有实机证据时一律写成“待实机”，不宣称修复。
 > 0027 已删除 Stage0--9，补回原厂 output-size minimum，并固定原厂 raw layout 与 DMA
@@ -13,7 +13,7 @@
 下，尽可能完整地支持 SM8150 固件实际提供的编解码能力。当前优先阻断项是：
 
 1. HEVC Main10/P010 已到达首个 capture completion，但 FFmpeg/mpv 判定为 invalid frame；
-2. Test16 encoder 在四个单向 CAPTURE FTB 和首个双向 raw NV12 ETB 后整机硬复位，尚无 EBD/FBD；0031 已补齐原厂要求的 CAPTURE 双向 DMA，待 Test17；
+2. Test17 encoder 已证明两个队列都为双向 DMA，仍在首 ETB 后、EBD/FBD 前复位；0032 已成组修正 property 初始化/发送模型与 count 时序，待 Test18；
 3. 0019 已移植 SM8150 动态 DDR/LLCC 模型，但尚未用实机 ICC/长序列/多实例验证；
 4. Test16 VP8 在 source-change 后因 split-output count 契约偏差收到
    `HFI_ERR_SESSION_BAD_POINTER`；0030 已按原厂语义修正，待 Test17。
@@ -24,7 +24,7 @@
 | 角色 | 路径/提交 | 本报告用途 |
 |---|---|---|
 | Linux 固定基线 | `F:\linux\linux-raphael`，`58f3df07833f2382fe2fbc28f996c4c85817c1f6` | 主线 V4L2/VB2/PM 架构基线 |
-| 当前候选源码 | `F:\linux\test15-analysis`，基线 + `patches/series` 0001--0031 | 本报告逐行反查对象 |
+| 当前候选源码 | `F:\linux\test15-analysis`，基线 + `patches/series` 0001--0032 | 本报告逐行反查对象 |
 | 构建与证据库 | `F:\linux\raphael-kernel-build`，基准提交 `3403ed0d17c1d9c4b9834539eab789343b9b4693` 后工作区 | 补丁、生成器、测试和报告 |
 | 小米原厂 | `F:\linux\vendor-sm8150-reference`，`192eca8550f95c2eec58a474793d1d93fc1b3b67` | SM8150/VPU5/HFI4 主参考 |
 | 原厂源码树 | `drivers/media/platform/msm/vidc`，tree `1e66319e3b0a9e1ad7f59d624b4d58f5c0c67fc4` | 42 文件完整覆盖 |
@@ -868,3 +868,26 @@ bandwidth 尚未实机验证，完整 metadata、VP8/VP9/MPEG2 实测、HEVC/VP8
 生命周期仍未完成。
 在这些准入项通过前，不能宣称 Venus 已完整适配；后续迁移必须按本总账更新状态，而非
 再次从零比较或凭节点枚举下结论。
+
+## 16. Test17 结果与 0032 覆盖更新（2026-09-10）
+
+Test17 已推翻第 15 节中“bidirectional DMA 是最后已知差异”的阶段性判断：source 和
+capture 两个队列均为双向映射，地址均在原厂 non-secure IOVA 窗口内，仍在首个 ETB 后、
+任何 EBD/FBD 前整机复位。DMA direction、FTB 顺序、internal types、route=2、mode=2、
+533 MHz 与 runtime power pin 不再重复修改。
+
+完整复核记录固定在 `venus-sm8150-encoder-full-path-audit-test17.md`。0032 一次性修正：
+
+- CAVLC `cabac_model` 未初始化和 encoder 邻接 HFI packet/payload 栈垃圾；
+- 默认 VUI/entropy/deblock/8x8/IDR/QP/profile/AUD/header/base-priority 的无条件重放；
+- SESSION_INIT 的伪 4/4 count、STREAMON 的双 count 与二次 requirements query；
+- RC_OFF/normal H.264/HEVC、VP8、CBR low-latency 的 VPU5 work-mode 策略。
+
+原厂 resume 中的 `__set_subcaches()` 经完整状态调用图确认是 no-op：普通 suspend 不清
+`sys_cache_res_set`。因此不加入重复 HFI syscache resource。单独 CDSP queue、secure CB、
+TME/HEIC/CVP、vendor non-fatal fault attr 与 per-map upstream hint 也已分类为私有/框架差异，
+不是 Test18 H.264 首帧前置修改。
+
+0001--0032 的重放 tree 为 `065f0998c8b669e8c69db87d3947145834e95b9e`；0032 严格
+checkpatch 0/0/0，宿主数值、HFI packet、PM、生命周期和 source invariant 全部通过。
+ARM64 构建与第一 EBD/FBD 仍待实机，不能提前宣称编码已修复。

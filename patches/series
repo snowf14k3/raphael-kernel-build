@@ -29,3 +29,4 @@
 0029-media-venus-make-buffer-requirement-getters-const.patch
 0030-media-venus-match-SM8150-split-output-buffer-counts.patch
 0031-media-venus-map-SM8150-encoder-capture-bidirectional.patch
+0032-media-venus-align-SM8150-encoder-command-sequence.patch

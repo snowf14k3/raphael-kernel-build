@@ -143,7 +143,7 @@ int main(void)
 	reset_capture();
 	assert(!venus_helper_set_work_route(&inst) && !property_calls);
 
-	/* Downstream SM8150 RC_OFF selects mode 1. */
+	/* VPU5 keeps normal H.264/HEVC in mode 2, including RC_OFF. */
 	core.iris1 = true;
 	inst.session_type = VIDC_SESSION_TYPE_ENC;
 	inst.hfi_codec = HFI_VIDEO_CODEC_H264;
@@ -154,16 +154,16 @@ int main(void)
 	reset_capture();
 	assert(!venus_helper_set_work_mode(&inst));
 	assert(property_calls == 1 && property_type[0] == HFI_PROPERTY_PARAM_WORK_MODE);
-	assert(property_value[0] == VIDC_WORK_MODE_1);
+	assert(property_value[0] == VIDC_WORK_MODE_2);
 
-	/* VBR is the only supported public mode that selects mode 2. */
+	/* VBR also remains in normal mode 2. */
 	inst.controls.enc.rc_enable = 1;
 	reset_capture();
 	assert(!venus_helper_set_work_mode(&inst));
 	assert(property_calls == 1 && property_type[0] == HFI_PROPERTY_PARAM_WORK_MODE);
 	assert(property_value[0] == VIDC_WORK_MODE_2);
 
-	/* CBR returns to mode 1; internal config sends low latency separately. */
+	/* CBR's internal low-latency configuration selects mode 1. */
 	inst.controls.enc.bitrate_mode = V4L2_MPEG_VIDEO_BITRATE_MODE_CBR;
 	reset_capture();
 	assert(!venus_helper_set_work_mode(&inst));
@@ -177,6 +177,10 @@ int main(void)
 	reset_capture();
 	assert(!venus_helper_set_work_mode(&inst) && property_calls == 1);
 	core.iris1 = true;
+	reset_capture();
+	assert(!venus_helper_set_work_mode(&inst) && property_calls == 1);
+	assert(property_value[0] == VIDC_WORK_MODE_1);
+
 	reset_capture();
 	property_error = -5;
 	fail_call = 1;
