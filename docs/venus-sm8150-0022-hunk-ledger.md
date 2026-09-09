@@ -62,3 +62,12 @@
 - 全部现有 IRIS1 宿主测试通过；`checkpatch.pl --strict --no-tree` 为
   0 errors、0 warnings、0 checks；`git diff --check` 通过。
 - 本组只修正“启动前控制与 HFI payload”；不声称解决 Stage9 首 ETB 后硬复位。
+
+## Test19 correction
+
+Hunk 011's original “preserve layer/enable” conclusion was incomplete. The
+caller assigned layer but never assigned either QP-range enable member. Packet
+hardening in 0032 made both zero, and Test19 reset on property `0x2005009`.
+Patch 0034 supersedes only that part of hunk 011 by restoring the public V4L2
+I/P/B enable mask to 7. Packed per-frame QP values and all-layer ID remain as
+implemented by 0022.

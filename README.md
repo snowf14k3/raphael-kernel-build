@@ -3,7 +3,7 @@
 这个仓库只做一件事：编译包含 SM8150 Venus 适配及运行修正的
 Redmi K20 Pro（Raphael）Linux 测试内核。
 
-当前实机冻结点是 **Test18**，下一构建标识为 **Test19**，目前包含候选补丁 0001--0033。
+当前实机冻结点是 **Test19**，下一构建标识为 **Test20**，目前包含候选补丁 0001--0034。
 Test16 已实机通过 H.264 小分辨率/720p/1080p/reopen 和 HEVC Main8；VP8 在
 source-change 后被固件以 `HFI_ERR_SESSION_BAD_POINTER (0x1003)` 拒绝，旧脚本因此
 没有执行后续 codec。Test15 的历史编码验证为：
@@ -66,6 +66,13 @@ MMAP 和 internal buffers，以处理 Test17 独立的首 ETB 后复位边界。
 `docs/venus-test18-start-reset-analysis.md` 与
 `docs/venus-sm8150-0033-hunk-ledger.md`。
 
+Test19 在更早的 HFI4 `QP_RANGE_V2` 属性 `0x2005009` 后立即关机，尚未执行最终 count、
+LOAD 或 START。复核发现 0022 把上下游原本固定为 7 的 I/P/B enable mask 改成从调用者
+复制，但调用者从未赋值；0032 清零后它稳定变成 0。0034 恢复两个 enable mask 为 7，
+并逐项复核同一 H.264 启动序列的其余 payload 字段。详细证据见
+`docs/venus-test19-property-reset-analysis.md` 与
+`docs/venus-sm8150-0034-hunk-ledger.md`。
+
 同一补丁系列还限制 Raphael 面板的高频亮度更新：test14 恢复 LP 命令并将请求
 合并为最多 4 Hz，直接 sysfs 压力测试已不再闪屏。GNOME 亮度/音量弹窗仍可触发
 GPU IOVA fault，卸载 Venus 后同样复现，已确认是独立的 Adreno/合成器问题。
@@ -98,7 +105,7 @@ hunk ledger 接续覆盖；
 早期原厂、postmarketOS 对照依据保留在 [test4 说明](docs/venus-test4.md)。
 
 源码仍来自 `snowf14k3/linux` 的 `raphael-7.1` 分支，构建时会应用本仓库
-`patches/series` 中的三十三个补丁（原厂时序、队列校验、诊断、VPU5 会话配置、
+`patches/series` 中的三十四个补丁（原厂时序、队列校验、诊断、VPU5 会话配置、
 HFI 4xx 会话属性、两轮 10-bit 格式协商、SM8150 系统缓存/编码参数，以及
 编码会话生命周期加固）。
 补丁基于源码提交 `58f3df07833f2382fe2fbc28f996c4c85817c1f6`；
@@ -123,8 +130,8 @@ HFI 4xx 会话属性、两轮 10-bit 格式协商、SM8150 系统缓存/编码�
 - `sm8150-xiaomi-raphael.dtb`：包含 Venus 节点的设备树。
 - `kernel.config`：本次实际使用的内核配置。
 - `build-info.txt`：内核版本、源码提交、构建仓库提交及补丁清单 SHA256。
-- `patches.sha256`：三十三个补丁各自的 SHA256。
-- `venus-test-suite.sh`：安装并启动 test19 后，一次运行的实机测试脚本；任一 codec
+- `patches.sha256`：三十四个补丁各自的 SHA256。
+- `venus-test-suite.sh`：安装并启动 test20 后，一次运行的实机测试脚本；任一 codec
   失败立即停止，避免固件事件/日志风暴；硬编码由
   唯一总 gate 默认关闭；显式设置 `VENUS_TEST_ENCODER=1` 后先测 1 帧 H.264，再测
   30 帧 H.264/HEVC/VP8，每项要求非空且可软件解码，失败即停止剩余 codec job。

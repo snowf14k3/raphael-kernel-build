@@ -98,12 +98,16 @@ def validate_protocol_sources(driver):
         raise RuntimeError("HFI4 packed QP-range property is missing")
     qp_range_body = packetizer[qp_range:qp_range_end]
     for required in ("min_qp > 0xffffff", "range->min_qp.qp_packed = min_qp",
-                     "in->min_qp.layer_id", "in->min_qp.enable"):
+                     "in->min_qp.layer_id", "range->min_qp.enable = 7",
+                     "range->max_qp.enable = 7"):
         if required not in qp_range_body:
             raise RuntimeError(
                 f"HFI4 packed QP-range packet is incomplete: {required}")
     if "(min_qp & 0xFF) << 8" in qp_range_body:
         raise RuntimeError("HFI4 packetizer still replicates one QP across I/P/B")
+    if "in->min_qp.enable" in qp_range_body or \
+       "in->max_qp.enable" in qp_range_body:
+        raise RuntimeError("HFI4 packetizer copies unset QP-range enable bits")
 
     encoder_etb = function(cmds, "pkt_session_etb_encoder")
     if "pkt->data = 0" not in encoder_etb:

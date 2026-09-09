@@ -54,7 +54,7 @@ scripts/kconfig/merge_config.sh -m .config \
 	"${config_fragment}" \
 	arch/arm64/configs/sm8150.config
 
-scripts/config --set-str LOCALVERSION "-sm8150-venus-test19"
+scripts/config --set-str LOCALVERSION "-sm8150-venus-test20"
 scripts/config --disable LOCALVERSION_AUTO
 scripts/config --module VIDEO_QCOM_VENUS
 scripts/config --enable SM_GCC_8150
@@ -105,7 +105,7 @@ install -m 0644 "${dtb}" \
 install -m 0644 .config "${artifact_dir}/kernel.config"
 install -m 0644 "${patch_manifest}" "${artifact_dir}/patches.sha256"
 install -m 0644 "${build_root}/scripts/venus-test-suite.sh" "${artifact_dir}/venus-test-suite.sh"
-install -m 0644 "${build_root}/docs/venus-test19.md" "${artifact_dir}/TESTING.md"
+install -m 0644 "${build_root}/docs/venus-test20.md" "${artifact_dir}/TESTING.md"
 install -m 0644 "${build_root}/docs/venus-sm8150-encoder-audit.md" \
 	"${artifact_dir}/ENCODER-AUDIT.md"
 install -m 0644 "${build_root}/docs/venus-sm8150-full-migration-audit.md" \
@@ -142,8 +142,12 @@ install -m 0644 "${build_root}/docs/venus-sm8150-0032-hunk-ledger.md" \
 	"${artifact_dir}/0032-HUNK-LEDGER.md"
 install -m 0644 "${build_root}/docs/venus-sm8150-0033-hunk-ledger.md" \
 	"${artifact_dir}/0033-HUNK-LEDGER.md"
+install -m 0644 "${build_root}/docs/venus-sm8150-0034-hunk-ledger.md" \
+	"${artifact_dir}/0034-HUNK-LEDGER.md"
 install -m 0644 "${build_root}/docs/venus-test18-start-reset-analysis.md" \
 	"${artifact_dir}/TEST18-START-RESET.md"
+install -m 0644 "${build_root}/docs/venus-test19-property-reset-analysis.md" \
+	"${artifact_dir}/TEST19-PROPERTY-RESET.md"
 install -m 0644 "${build_root}/docs/venus-sm8150-encoder-full-path-audit-test17.md" \
 	"${artifact_dir}/TEST17-FULL-ENCODER-AUDIT.md"
 install -m 0644 "${build_root}/docs/venus-test16-encoder-reset-analysis.md" \
@@ -199,7 +203,9 @@ sha256sum \
 	0031-HUNK-LEDGER.md \
 	0032-HUNK-LEDGER.md \
 	0033-HUNK-LEDGER.md \
+	0034-HUNK-LEDGER.md \
 	TEST18-START-RESET.md \
+	TEST19-PROPERTY-RESET.md \
 	TEST17-FULL-ENCODER-AUDIT.md \
 	TEST16-ENCODER-RESET.md \
 	FULL-DIFFERENCE-MATRIX.md \
