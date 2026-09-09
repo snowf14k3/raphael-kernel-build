@@ -81,6 +81,12 @@ route/mode/core、内部 buffer、时钟和带宽均对齐；剩余直接差异�
 non-coherent/streaming allocation 和同步，并在分配时强制检查 `bidi=1 nc=1 up=1`。
 完整排除矩阵见 `docs/venus-test20-etb-reset-analysis.md` 和 0035 ledger。
 
+为避免终端检索结果随对话压缩丢失，`scripts/capture-venus-encoder-audit.ps1`
+会固定 current index tree、Xiaomi commit、Test20 外部日志、49 份完整相关源文件和
+15 组 current/vendor 双向检索。原始包保存在本机
+`.audit/test20-full-chain/`，由 `.git/info/exclude` 排除，避免把原厂整文件推到公开仓库；
+`REVIEW.md` 和 `SHA256SUMS` 分别保存逐批结论与每个证据文件的哈希。
+
 同一补丁系列还限制 Raphael 面板的高频亮度更新：test14 恢复 LP 命令并将请求
 合并为最多 4 Hz，直接 sysfs 压力测试已不再闪屏。GNOME 亮度/音量弹窗仍可触发
 GPU IOVA fault，卸载 Venus 后同样复现，已确认是独立的 Adreno/合成器问题。
