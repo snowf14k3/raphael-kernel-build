@@ -1,6 +1,6 @@
 # SM8150 Venus 全量迁移主报告
 
-> 本文是 `Test16 + 0001--0028` 候选树的权威总账。旧的 `venus-sm8150-full-migration-audit.md`
+> 本文是 `Test16 + 0001--0029` 候选树的权威总账。旧的 `venus-sm8150-full-migration-audit.md`
 > 和 `venus-sm8150-encoder-audit.md` 保留历史过程，但不得用其中的阶段性判断覆盖本文。
 > “已实现”只表示代码已进入候选补丁；没有实机证据时一律写成“待实机”，不宣称修复。
 > 0027 已删除 Stage0--9，补回原厂 output-size minimum，并固定原厂 raw layout 与 DMA
@@ -22,7 +22,7 @@
 | 角色 | 路径/提交 | 本报告用途 |
 |---|---|---|
 | Linux 固定基线 | `F:\linux\linux-raphael`，`58f3df07833f2382fe2fbc28f996c4c85817c1f6` | 主线 V4L2/VB2/PM 架构基线 |
-| 当前候选源码 | `F:\linux\test15-analysis`，基线 + `patches/series` 0001--0028 | 本报告逐行反查对象 |
+| 当前候选源码 | `F:\linux\test15-analysis`，基线 + `patches/series` 0001--0029 | 本报告逐行反查对象 |
 | 构建与证据库 | `F:\linux\raphael-kernel-build`，基准提交 `3403ed0d17c1d9c4b9834539eab789343b9b4693` 后工作区 | 补丁、生成器、测试和报告 |
 | 小米原厂 | `F:\linux\vendor-sm8150-reference`，`192eca8550f95c2eec58a474793d1d93fc1b3b67` | SM8150/VPU5/HFI4 主参考 |
 | 原厂源码树 | `drivers/media/platform/msm/vidc`，tree `1e66319e3b0a9e1ad7f59d624b4d58f5c0c67fc4` | 42 文件完整覆盖 |

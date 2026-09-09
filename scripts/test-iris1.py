@@ -328,6 +328,14 @@ def validate_encoder_sources(driver):
     hfi4_caps = (driver / "hfi_platform_v4.c").read_text(encoding="utf-8")
 
     for required in (
+            "hfi_bufreq_get_hold_count(const struct hfi_buffer_requirements *req",
+            "hfi_bufreq_get_count_min(const struct hfi_buffer_requirements *req",
+            "hfi_bufreq_get_count_min_host(const struct hfi_buffer_requirements *req"):
+        if required not in helper:
+            raise RuntimeError(
+                f"Read-only buffer-requirement getter is not const-correct: {required}")
+
+    for required in (
             "V4L2_CID_ROTATE", "V4L2_CID_HFLIP", "V4L2_CID_VFLIP",
             "V4L2_CID_MPEG_VIDEO_H264_VUI_SAR_ENABLE",
             "V4L2_CID_MPEG_VIDEO_H264_VUI_SAR_IDC",

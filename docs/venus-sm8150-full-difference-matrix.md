@@ -1,6 +1,6 @@
 # SM8150 Venus 全量差异与迁移矩阵（持续更新）
 
-> 这是当前唯一的“活”总账，状态基于 `patches/series` 0001--0028。
+> 这是当前唯一的“活”总账，状态基于 `patches/series` 0001--0029。
 > `venus-sm8150-full-migration-audit.md`、`venus-sm8150-encoder-audit.md` 和各 Test 文档
 > 是冻结的历史证据；其中与本文冲突的阶段性判断，以本文和对应 patch hunk ledger 为准。
 
@@ -9,7 +9,7 @@
 | 角色 | 固定身份 | 用途 |
 |---|---|---|
 | Linux 基线 | `F:\linux\linux-raphael` @ `58f3df07833f2382fe2fbc28f996c4c85817c1f6` | 所有迁移补丁的共同父状态 |
-| 当前候选 | `F:\linux\test15-analysis` + 0001--0028 | 实际修改和宿主测试对象 |
+| 当前候选 | `F:\linux\test15-analysis` + 0001--0029 | 实际修改和宿主测试对象 |
 | 小米 Android 10 原厂 | `F:\linux\vendor-sm8150-reference` @ `192eca8550f95c2eec58a474793d1d93fc1b3b67` | SM8150/VPU5/HFI4 主语义来源 |
 | 证据与发布仓 | `F:\linux\raphael-kernel-build` | series、patch、测试、逐行和逐 hunk 台账 |
 
@@ -19,11 +19,11 @@
 1. `venus-sm8150-vendor-line-ledger.md`：原厂 42 文件、39,111/39,111 行、686/686
    个函数的正向处置；
 2. `venus-sm8150-current-line-ledger.md`：当前 Venus 36 文件的反向处置；
-3. 0018--0028 的逐 hunk ledger：覆盖逐行台账冻结后新增的每个实际修改；
+3. 0018--0029 的逐 hunk ledger：覆盖逐行台账冻结后新增的每个实际修改；
 4. 可从固定基线严格重放的 `patches/series`。
 
-0001--0028 已在独立 Git index 中顺序通过 `git apply --cached --check` 和 apply，重放
-tree 为 `15524a19bb2bf46dfb6478646576e9f93c262909`。候选 Venus 目录与重放 tree
+0001--0029 已在独立 Git index 中顺序通过 `git apply --cached --check` 和 apply，重放
+tree 为 `d9941d094f9b306f4cfe5d65f4a69c7076d5d414`。候选 Venus 目录与重放 tree
 完全一致；未把 panel、netfilter、litmus 等用户改动纳入 Venus 补丁。
 
 ## 2. 状态词
@@ -38,7 +38,7 @@ tree 为 `15524a19bb2bf46dfb6478646576e9f93c262909`。候选 Venus 目录与重�
 
 ## 3. 全量语义差异矩阵
 
-| 域 | 原厂 SM8150 语义 | 当前 0001--0028 状态 | 证据/补丁 | 后续组 |
+| 域 | 原厂 SM8150 语义 | 当前 0001--0029 状态 | 证据/补丁 | 后续组 |
 |---|---|---|---|---:|
 | 平台代际 | VPU5/IRIS1、HFI4 | 已对齐 | 0001、0004、0005；固件已启动 | — |
 | firmware | Raphael `.mbn`，VIDEO.IR.1.2 | 已实机加载并读出版本 | Test7+ 日志 | — |
@@ -95,6 +95,7 @@ tree 为 `15524a19bb2bf46dfb6478646576e9f93c262909`。候选 Venus 目录与重�
 | H | 0026 | Main10 精确 geometry、colorimetry、reconfigure、flush/drain |
 | I | 0027 | encoder output minimum、完整启动路径与实验 stage 收口 |
 | J | 0028 | test 编号日志统一为稳定 `venus-sm8150` 诊断前缀 |
+| K | 0029 | buffer-requirement getter `const` 编译契约；无运行时变化 |
 
 0024 验证：2 文件、12 hunk、+127/-22；SHA256
 `6eff1ad2ec54a5ca03ce53a93567ff28498edd00dd1413f19a82e34732e837e4`；严格
@@ -108,12 +109,12 @@ checkpatch 为 0/0/0；全部 IRIS1 宿主测试通过；完整重放 tree 为
 
 ## 5. 剩余工作组
 
-代码迁移组已经收口到 0028，没有待拆的新 kernel patch。剩余的是验证状态，不再以
+代码迁移组已经收口到 0029，没有待拆的新 kernel patch。剩余的是验证状态，不再以
 猜测驱动新补丁：
 
 | 顺序 | 验证 | 完成判据 |
 |---:|---|---|
-| 1 | Test16 ARM64 构建 | 28 个 patch 应用、完整内核和模块构建、产物清单一致 |
+| 1 | Test16 ARM64 构建 | 29 个 patch 应用、完整内核和模块构建、产物清单一致 |
 | 2 | Test16 实机准入 | H264/HEVC Main/Main10/VP8/VP9/MPEG2 decode；H264/HEVC/VP8 encode；reopen、动态分辨率、PM、并发均有非空/帧数/内容证据 |
 | 3 | 最终默认策略 | 只有 Test16 编码通过后，才决定删除总 gate 或改为默认 Y；这会形成至多一个极小发布 patch |
 

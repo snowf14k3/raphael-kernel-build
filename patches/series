@@ -26,3 +26,4 @@
 0026-media-venus-fix-SM8150-Main10-reconfigure-and-drain.patch
 0027-media-venus-complete-SM8150-encoder-startup-contract.patch
 0028-media-venus-normalize-SM8150-diagnostics.patch
+0029-media-venus-make-buffer-requirement-getters-const.patch

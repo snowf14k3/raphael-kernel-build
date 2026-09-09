@@ -8,23 +8,9 @@ config_fragment="${build_root}/raphael.config"
 patch_file="${build_root}/patches/0001-media-venus-fix-sm8150-runtime-data.patch"
 patch_dir="${build_root}/patches"
 patch_manifest="${build_root}/patches.sha256"
-ccache_dir="${build_root}/.ccache"
 expected_source_commit="58f3df07833f2382fe2fbc28f996c4c85817c1f6"
 build_commit="$(git -C "${build_root}" rev-parse HEAD)"
 patch_sha256="$(sha256sum "${patch_file}" | cut -d ' ' -f 1)"
-
-export CCACHE_DIR="${ccache_dir}"
-export CCACHE_BASEDIR="${build_root}"
-export CCACHE_COMPILERCHECK=content
-export CCACHE_NOHASHDIR=true
-# Kernel-generated timestamps otherwise make equivalent compilations miss the
-# cache.  Keep the compiler input deterministic as recommended by Kbuild.
-export KBUILD_BUILD_TIMESTAMP=''
-
-mkdir -p "${CCACHE_DIR}"
-ccache --set-config=max_size=2G
-ccache --set-config=compression=true
-ccache --zero-stats
 
 git clone --depth 1 --branch "${KERNEL_BRANCH}" \
 	"${KERNEL_REPOSITORY}" "${source_dir}"
@@ -58,7 +44,7 @@ curl --fail --location --silent --show-error \
 
 cd "${source_dir}"
 
-make_args=(ARCH=arm64 LLVM=1 "CC=ccache clang")
+make_args=(ARCH=arm64 LLVM=1 CC=clang)
 
 make "${make_args[@]}" defconfig
 
@@ -99,7 +85,6 @@ grep -E \
 	.config
 
 make -j"$(nproc)" "${make_args[@]}" bindeb-pkg
-ccache --show-stats
 
 dtb="${source_dir}/arch/arm64/boot/dts/qcom/sm8150-xiaomi-raphael.dtb"
 test -s "${dtb}"
@@ -147,6 +132,8 @@ install -m 0644 "${build_root}/docs/venus-sm8150-0027-hunk-ledger.md" \
 	"${artifact_dir}/0027-HUNK-LEDGER.md"
 install -m 0644 "${build_root}/docs/venus-sm8150-0028-hunk-ledger.md" \
 	"${artifact_dir}/0028-HUNK-LEDGER.md"
+install -m 0644 "${build_root}/docs/venus-sm8150-0029-hunk-ledger.md" \
+	"${artifact_dir}/0029-HUNK-LEDGER.md"
 install -m 0644 "${build_root}/docs/venus-sm8150-full-difference-matrix.md" \
 	"${artifact_dir}/FULL-DIFFERENCE-MATRIX.md"
 install -m 0644 "${build_root}/docs/venus-sm8150-test15-hunk-ledger.md" \
@@ -193,6 +180,7 @@ sha256sum \
 	0026-HUNK-LEDGER.md \
 	0027-HUNK-LEDGER.md \
 	0028-HUNK-LEDGER.md \
+	0029-HUNK-LEDGER.md \
 	FULL-DIFFERENCE-MATRIX.md \
 	TEST15-HUNK-LEDGER.md \
 	TEST15-VS-BASE-FULL.diff \

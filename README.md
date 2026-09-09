@@ -3,7 +3,7 @@
 这个仓库只做一件事：编译包含 SM8150 Venus 适配及运行修正的
 Redmi K20 Pro（Raphael）Linux 测试内核。
 
-当前实机冻结点是 **test15**，下一构建标识为 **test16**，目前包含候选补丁 0001--0028。
+当前实机冻结点是 **test15**，下一构建标识为 **test16**，目前包含候选补丁 0001--0029。
 Test15 已完成实机验证：解码 H.264/Main8 可用，编码
 Stage 0--8 通过，但 Stage 9 仍在首个 raw ETB 后整机复位。以小米 Android 10
 SM8150 实现为依据，补齐固件启动前的电源域、时钟与 MMCX 性能投票、
@@ -43,7 +43,8 @@ reconfigure、flush/drain。0027 重新逐行核对原厂启动函数后，纠�
 在最终 requirements 后发送 wire `0x20100c` 的 `BUFFER_SIZE_MINIMUM`；当前以上游同
 wire 名称发送 firmware-negotiated capture size。0027 同时删除全部 staged 分叉，使
 显式开启 gate 后只执行一条完整原厂顺序。0028 仅把历史 test 日志前缀统一为稳定的
-`venus-sm8150`，没有改变协议行为。
+`venus-sm8150`，没有改变协议行为。0029 修正三个只读 buffer-requirement getter 的
+`const` 签名，解决 Test16 首次 ARM64 构建发现的 Clang `-Werror`，不改变协议或运行时行为。
 
 同一补丁系列还限制 Raphael 面板的高频亮度更新：test14 恢复 LP 命令并将请求
 合并为最多 4 Hz，直接 sysfs 压力测试已不再闪屏。GNOME 亮度/音量弹窗仍可触发
@@ -56,6 +57,8 @@ FFmpeg 7.1 仍会拒绝该帧。0023 按小米 SM8150 原厂语义恢复 TP10 UB
 
 构建前会编译并运行实际补丁函数的宿主机故障注入和边界测试，再进行
 完整 arm64 内核编译。自动检查不代表实机硬件编解码已经通过。
+Actions 不再安装、恢复或保存 ccache；当前 ARM runner 的冷缓存和归档开销反而延长
+这类一次性测试构建，Test16 直接使用 Clang 并行编译。
 最新权威状态、完整语义差异、已完成组和剩余组见
 [SM8150 Venus 全量差异与迁移矩阵](docs/venus-sm8150-full-difference-matrix.md)；此前的
 [SM8150 Venus 全量迁移主报告](docs/venus-sm8150-migration-status.md)作为冻结过程记录保留。
@@ -74,7 +77,7 @@ FFmpeg 7.1 仍会拒绝该帧。0023 按小米 SM8150 原厂语义恢复 TP10 UB
 早期原厂、postmarketOS 对照依据保留在 [test4 说明](docs/venus-test4.md)。
 
 源码仍来自 `snowf14k3/linux` 的 `raphael-7.1` 分支，构建时会应用本仓库
-`patches/series` 中的二十八个补丁（原厂时序、队列校验、诊断、VPU5 会话配置、
+`patches/series` 中的二十九个补丁（原厂时序、队列校验、诊断、VPU5 会话配置、
 HFI 4xx 会话属性、两轮 10-bit 格式协商、SM8150 系统缓存/编码参数，以及
 编码会话生命周期加固）。
 补丁基于源码提交 `58f3df07833f2382fe2fbc28f996c4c85817c1f6`；
@@ -99,14 +102,14 @@ HFI 4xx 会话属性、两轮 10-bit 格式协商、SM8150 系统缓存/编码�
 - `sm8150-xiaomi-raphael.dtb`：包含 Venus 节点的设备树。
 - `kernel.config`：本次实际使用的内核配置。
 - `build-info.txt`：内核版本、源码提交、构建仓库提交及补丁清单 SHA256。
-- `patches.sha256`：二十八个补丁各自的 SHA256。
+- `patches.sha256`：二十九个补丁各自的 SHA256。
 - `venus-test-suite.sh`：安装并启动 test16 后，一次运行的实机测试脚本；硬编码由
   唯一总 gate 默认关闭；显式设置 `VENUS_TEST_ENCODER=1` 后先测 1 帧 H.264，再测
   30 帧 H.264/HEVC/VP8，每项要求非空且可软件解码，失败即停止剩余 codec job。
 - `TESTING.md`：测试范围、运行方式、限制与日志说明。
 - `ENCODER-AUDIT.md`：随构建产物保存的原厂逐项核对、已排除方向和实机结论。
 - `FULL-MIGRATION-AUDIT.md`：Test15 全量代码审计、原厂 42 文件语义映射和迁移路线。
-- `MIGRATION-STATUS.md`：Test16 + 0001--0028 候选树的权威迁移总账和完整准入矩阵。
+- `MIGRATION-STATUS.md`：Test16 + 0001--0029 候选树的权威迁移总账和完整准入矩阵。
 - `PENDING-HUNK-LEDGER.md`：0018 的 35 个 hunk 逐项原厂依据、风险和验证状态。
 - `0019-HUNK-LEDGER.md`：0019 的 11 个动态带宽 hunk、精确向量和实机边界。
 - `0020-HUNK-LEDGER.md`：0020 的时钟与 HQ/LP policy hunk。
@@ -117,13 +120,14 @@ HFI 4xx 会话属性、两轮 10-bit 格式协商、SM8150 系统缓存/编码�
 - `0026-HUNK-LEDGER.md`：0026 的 Main10 reconfigure/flush/drain 迁移。
 - `0027-HUNK-LEDGER.md`：0027 的 encoder 完整启动契约 17 个 hunk。
 - `0028-HUNK-LEDGER.md`：0028 的稳定诊断前缀 57 个纯日志 hunk。
+- `0029-HUNK-LEDGER.md`：0029 的 Clang `const` 编译修复。
 - `FULL-DIFFERENCE-MATRIX.md`：当前真值、全部语义域和剩余实机准入项。
 - `TEST15-HUNK-LEDGER.md`：最终 173 个合并后 diff hunk 的逐项结论。
 - `TEST15-VS-BASE-FULL.diff`：相对固定 7.1 基线的每一条原始增删行。
 - `VENDOR-LINE-LEDGER.md`：小米原厂 `msm/vidc` 42 文件、39,111 行、5,512 个连续
   复核区间的逐行覆盖台账。
 - `CURRENT-LINE-LEDGER.md`：0019 冻结点 `qcom/venus` 36 文件、22,143 行、3,079 个
-  连续复核区间的反向逐行台账；之后的改动由 0020--0028 hunk ledger 连续覆盖。
+  连续复核区间的反向逐行台账；之后的改动由 0020--0029 hunk ledger 连续覆盖。
 - `SHA256SUMS`：文件完整性校验值。
 
 构建过程不会创建 Release，也不会修改内核源码仓库。

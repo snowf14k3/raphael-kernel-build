@@ -1,8 +1,13 @@
 # SM8150 / Raphael Venus test16
 
 Test16 使用固定 Linux 基线
-`58f3df07833f2382fe2fbc28f996c4c85817c1f6`，当前依次应用 `patches/series` 的 28 个补丁。
+`58f3df07833f2382fe2fbc28f996c4c85817c1f6`，当前依次应用 `patches/series` 的 29 个补丁。
 它不宣称 Venus 已完整适配；这是全量审计后用于一次实机闭环的候选构建。
+
+Test16 首次云构建在 `venc_iris1_validate_external_req()` 被 Clang `-Werror` 截停：
+只读 requirement 指针是 `const`，旧 getter 签名却要求可写指针。0029 将三个纯 getter
+改为 `const` 参数，不改变 HFI、DMA 或运行时行为。重跑同时移除 ccache，避免当前
+ARM runner 的冷缓存恢复/保存开销。
 
 权威范围、逐文件处置、全部已知差异和准入矩阵见
 `MIGRATION-STATUS.md`。Test15 的历史 173-hunk、0018 的 35-hunk 与 0019 的 11-hunk 台账
