@@ -190,6 +190,7 @@ def validate_format_sources(driver):
     valid_fmt = function(decoder, "vdec_format_is_valid")
     stream_fmt = function(decoder, "vdec_capture_fmt_matches_stream")
     output_conf = function(decoder, "vdec_output_conf")
+    set_num_bufs = function(decoder, "vdec_set_num_bufs")
     buf_done = function(decoder, "vdec_buf_done")
     colorimetry = function(decoder, "vdec_update_colorimetry")
     color_primaries = function(decoder, "vdec_hfi_color_primaries")
@@ -247,6 +248,14 @@ def validate_format_sources(driver):
         if required not in output_conf:
             raise RuntimeError(
                 f"SM8150 Main10 NV12 split-output check is missing: {required}")
+    for required in ("inst->dpb_buftype == HFI_BUFFER_OUTPUT",
+                     "inst->dpb_buftype == HFI_BUFFER_OUTPUT2",
+                     "hfi_bufreq_get_count_min(&req, ver)",
+                     "output2_bufs = inst->num_output_bufs",
+                     "venus_helper_set_num_bufs"):
+        if required not in set_num_bufs:
+            raise RuntimeError(
+                f"SM8150 split-output buffer count mapping is incomplete: {required}")
     keep_nv12 = source_change.find(
         "inst->fmt_cap->pixfmt != V4L2_PIX_FMT_NV12")
     choose_p010 = source_change.find(
@@ -706,12 +715,16 @@ def validate_encoder_sources(driver):
                      "venus_helper_get_bufreq(inst, HFI_BUFFER_OUTPUT"):
         if required not in set_num_bufs:
             raise RuntimeError(f"HFI4 host buffer count is incomplete: {required}")
-    if set_num_bufs.count("hfi_bufreq_get_count_min(&bufreq, ver)") != 2:
+    if set_num_bufs.count("hfi_bufreq_get_count_min(&bufreq, ver)") != 3:
         raise RuntimeError(
-            "IRIS1 final count_min_host must use both firmware minima")
+            "IRIS1 final count_min_host must use all firmware minima")
     if set_num_bufs.count("iris1_encoder && inst->bufreq_cache_valid") != 2:
         raise RuntimeError(
             "IRIS1 initial 4/4 must not consult the unavailable requirements cache")
+    for required in ("iris1_decoder", "HFI_BUFFER_OUTPUT2"):
+        if required not in set_num_bufs:
+            raise RuntimeError(
+                f"IRIS1 decoder host-min contract is incomplete: {required}")
     for required in ('source=%s', '"firmware" : "initial"'):
         if required not in set_num_bufs:
             raise RuntimeError(
@@ -900,7 +913,9 @@ def validate_encoder_sources(driver):
 
     queue_init = function(encoder, "m2m_queue_init")
     for required in ("IS_IRIS1(inst->core)",
-                     "src_vq->bidirectional = 1"):
+                     "src_vq->bidirectional = 1",
+                     "dst_vq->bidirectional = 1",
+                     "encoder capture DMA bidirectional"):
         if required not in queue_init:
             raise RuntimeError(f"SM8150 encoder DMA direction is incomplete: {required}")
     for forbidden in ("iris1_encoder_vendor_nv12",

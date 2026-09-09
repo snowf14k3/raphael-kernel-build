@@ -1,6 +1,6 @@
 # SM8150 Venus 全量迁移主报告
 
-> 本文是 `Test16 + 0001--0029` 候选树的权威总账。旧的 `venus-sm8150-full-migration-audit.md`
+> 本文是 `Test17 + 0001--0031` 候选树的权威总账。旧的 `venus-sm8150-full-migration-audit.md`
 > 和 `venus-sm8150-encoder-audit.md` 保留历史过程，但不得用其中的阶段性判断覆盖本文。
 > “已实现”只表示代码已进入候选补丁；没有实机证据时一律写成“待实机”，不宣称修复。
 > 0027 已删除 Stage0--9，补回原厂 output-size minimum，并固定原厂 raw layout 与 DMA
@@ -13,16 +13,18 @@
 下，尽可能完整地支持 SM8150 固件实际提供的编解码能力。当前优先阻断项是：
 
 1. HEVC Main10/P010 已到达首个 capture completion，但 FFmpeg/mpv 判定为 invalid frame；
-2. encoder Stage 9 在首个 raw NV12 ETB 后整机硬复位，尚无 EBD/FBD；
+2. Test16 encoder 在四个单向 CAPTURE FTB 和首个双向 raw NV12 ETB 后整机硬复位，尚无 EBD/FBD；0031 已补齐原厂要求的 CAPTURE 双向 DMA，待 Test17；
 3. 0019 已移植 SM8150 动态 DDR/LLCC 模型，但尚未用实机 ICC/长序列/多实例验证；
-4. VP8、VP9、MPEG2 decoder 与 HEVC、VP8 encoder 尚无完整实机准入矩阵。
+4. Test16 VP8 在 source-change 后因 split-output count 契约偏差收到
+   `HFI_ERR_SESSION_BAD_POINTER`；0030 已按原厂语义修正，待 Test17。
+5. VP9、MPEG2 decoder 与 H.264/HEVC/VP8 encoder 尚无完整实机准入矩阵。
 
 ### 1.1 固定源码身份
 
 | 角色 | 路径/提交 | 本报告用途 |
 |---|---|---|
 | Linux 固定基线 | `F:\linux\linux-raphael`，`58f3df07833f2382fe2fbc28f996c4c85817c1f6` | 主线 V4L2/VB2/PM 架构基线 |
-| 当前候选源码 | `F:\linux\test15-analysis`，基线 + `patches/series` 0001--0029 | 本报告逐行反查对象 |
+| 当前候选源码 | `F:\linux\test15-analysis`，基线 + `patches/series` 0001--0031 | 本报告逐行反查对象 |
 | 构建与证据库 | `F:\linux\raphael-kernel-build`，基准提交 `3403ed0d17c1d9c4b9834539eab789343b9b4693` 后工作区 | 补丁、生成器、测试和报告 |
 | 小米原厂 | `F:\linux\vendor-sm8150-reference`，`192eca8550f95c2eec58a474793d1d93fc1b3b67` | SM8150/VPU5/HFI4 主参考 |
 | 原厂源码树 | `drivers/media/platform/msm/vidc`，tree `1e66319e3b0a9e1ad7f59d624b4d58f5c0c67fc4` | 42 文件完整覆盖 |
@@ -83,13 +85,13 @@ Test15 hunk、35 个 0018 hunk、11 个 0019 hunk和可重放补丁共同构成�
 | H.264 8-bit decode | 30/30，硬件与软件逐帧 MD5 一致 | 已实机通过 |
 | HEVC Main 8-bit decode | MKV 30/30 | 已实机通过；MKV 容器本身无问题 |
 | HEVC Main10/P010 decode | source-change=P010、首 capture completion；用户态 0 帧 | 已实机到达，未通过；0018 待测 |
-| VP8 decode | 原厂和固件能力路径存在 | 未做逐帧准入 |
+| VP8 decode | Test16 到达 START/source-change，随后报 `HFI_ERR_SESSION_BAD_POINTER` 且 0 帧 | 未通过；0030 已按原厂 DPB/OPB count 契约修正，待 Test17 |
 | VP9 Profile 0/2 decode | 原厂和固件能力路径存在 | 未做 8/10-bit 逐帧准入 |
 | MPEG2 decode | 原厂和固件能力路径存在 | 未做 progressive/interlace 准入 |
 | VC1/MPEG4/H263/Xvid decode | 通用数组有条目，SM8150 原厂 capability 不列 | 不宣称支持 |
-| H.264 encode | Test13--15 Stage0--8 安全、旧 Stage9 复位；0027 完整路径待测 | Test16 gate 默认 N；明确开启后先做 1 帧准入 |
-| HEVC encode | 原厂 SM8150 支持，0027 共用完整启动契约 | Test16 H.264 通过后同轮测试 |
-| VP8 encode | 原厂 SM8150 支持，0027 共用完整启动契约 | Test16 H.264/HEVC 通过后同轮测试 |
+| H.264 encode | Test13--15 Stage0--8 安全、旧 Stage9 复位；0027 完整路径待测 | gate 默认 N；明确开启后先做 1 帧准入 |
+| HEVC encode | 原厂 SM8150 支持，0027 共用完整启动契约 | H.264 通过后同轮测试 |
+| VP8 encode | 原厂 SM8150 支持，0027 共用完整启动契约 | H.264/HEVC 通过后同轮测试 |
 | TME encode | 原厂私有能力 | 有意排除，无通用 V4L2 用户 |
 | runtime PM | decode/预检退出后父设备和两个 core 均 suspended | 已实机通过 |
 | protected/secure playback | 原厂有 secure context bank；当前无完整 session/UAPI | 未实现，不宣称 |
@@ -118,7 +120,7 @@ HEVC、VP8/9 等 elementary packets 后才送 V4L2 M2M。当前“MP4 能播、�
 | `Makefile` | 23/0 | 模块组成 | 当前 core/dec/enc 模块替代 |
 | `msm_cvp.c` | 635/18 | CVP 会话 | 有意排除；MVS1 仅保留共享资源，不伪装 codec core |
 | `msm_cvp.h` | 33/0 | CVP API | 有意排除 |
-| `msm_smem.c` | 606/13 | dma-buf、IOMMU、cache sync | 关键映射到 VB2 dma-contig；0018 补 encoder raw 双向映射 |
+| `msm_smem.c` | 606/13 | dma-buf、IOMMU、cache sync | 原厂所有 video dma-buf 均双向；0018 只补 raw source，0031 补 compressed CAPTURE |
 | `msm_v4l2_private.c` | 234/3 | 私有 controls 映射 | 标准 control 优先；不批量复制私有 ABI |
 | `msm_v4l2_private.h` | 22/0 | 私有 UAPI 常量 | 有意排除，除非以后有标准化消费者 |
 | `msm_v4l2_vidc.c` | 928/50 | ioctl/VB2 桥接 | 映射 `vdec.c`/`venc.c`/V4L2 M2M |
@@ -584,7 +586,9 @@ length。现在剩余最强差异是 allocation layout 与 DMA mapping/sync 语�
 原厂 `msm_smem.c:92,127,156,430,448,473` 对 dma-buf attachment、unmap 和 CPU access
 统一使用 `DMA_BIDIRECTIONAL`。旧 VB2 source queue按设备只读使用 TO_DEVICE；该方向在
 正常 DMA API 理论上可行，但与固件/VPU5 对 buffer metadata/cache 的行为不一致。0018
-对 IRIS1 encoder source queue 设置 `bidirectional=1`，让 vb2-dma-contig 采用双向映射，
+对 IRIS1 encoder source queue 设置 `bidirectional=1`，让 vb2-dma-contig 采用双向映射；
+Test16 证明 CAPTURE 仍为 `bidirectional=0` 且复位发生在首 ETB 后。0031 继续把 IRIS1
+encoder CAPTURE queue 设置为双向，与原厂所有 video dma-buf 的映射方式一致，
 并在 open 时快照。这是原厂语义迁移，不是对所有 decoder/其他 SoC 全局改方向。
 
 两项修正在同一构建中存在，是因为每次编译代价高；日志仍分别输出 size 和 direction，

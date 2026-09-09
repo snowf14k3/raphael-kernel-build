@@ -1,0 +1,160 @@
+From 0000000000000000000000000000000000000030 Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Date: Wed, 9 Sep 2026 21:30:00 +0800
+Subject: [PATCH] media: venus: match SM8150 split-output buffer counts
+
+The downstream SM8150 decoder treats OUTPUT and OUTPUT2 as distinct pools
+in split-output mode.  The driver-owned UBWC DPB port is advertised with
+the firmware minimum, while the client-facing linear port uses the actual
+capture queue depth.
+
+The upstream helper currently advertises VB2_MAX_FRAME for both ports even
+though venus_helper_alloc_dpb_bufs() allocates only the firmware minimum.
+The SM8150 VP8 firmware rejects the first DPB FTBs in this state with
+HFI_ERR_SESSION_BAD_POINTER (0x1003).  H.264 and HEVC happen to tolerate
+the inconsistent counts.
+
+Derive each port's actual count from its OPB/DPB role, and send the
+firmware minimum as count_min_host on IRIS1 decoder sessions.  Log the
+resolved roles and each internal DPB submission so a remaining firmware
+rejection can be matched to an exact type, address and allocation without
+another diagnostic kernel.
+
+Signed-off-by: Codex <codex@openai.com>
+---
+ drivers/media/platform/qcom/venus/helpers.c | 21 ++++++++++++--
+ drivers/media/platform/qcom/venus/vdec.c    | 45 ++++++++++++++++++++++++++---
+ 2 files changed, 60 insertions(+), 6 deletions(-)
+
+diff --git a/drivers/media/platform/qcom/venus/helpers.c b/drivers/media/platform/qcom/venus/helpers.c
+index 18ecd0cba059..ed63ada98900 100644
+--- a/drivers/media/platform/qcom/venus/helpers.c
++++ b/drivers/media/platform/qcom/venus/helpers.c
+@@ -129,6 +129,11 @@ int venus_helper_queue_dpb_bufs(struct venus_inst *inst)
+ 		}
+ 
+ 		fdata.clnt_data = buf->dpb_out_tag;
++		if (IS_IRIS1(inst->core))
++			dev_info(inst->core->dev_dec,
++				 "venus-sm8150: queue DPB type=%#x tag=%u dma=%pad alloc=%u\n",
++				 fdata.buffer_type, fdata.clnt_data, &buf->da,
++				 fdata.alloc_len);
+ 
+ 		ret = hfi_session_process_buf(inst, &fdata);
+ 		if (ret)
+@@ -1721,6 +1726,8 @@ int venus_helper_set_num_bufs(struct venus_inst *inst, unsigned int input_bufs,
+ 	struct hfi_buffer_count_actual buf_count = {};
+ 	struct hfi_buffer_requirements bufreq;
+ 	enum hfi_version ver = inst->core->res->hfi_version;
++	bool iris1_decoder = IS_IRIS1(inst->core) &&
++		inst->session_type == VIDC_SESSION_TYPE_DEC;
+ 	bool iris1_encoder = IS_IRIS1(inst->core) &&
+ 		inst->session_type == VIDC_SESSION_TYPE_ENC;
+ 	int ret;
+@@ -1728,7 +1735,8 @@ int venus_helper_set_num_bufs(struct venus_inst *inst, unsigned int input_bufs,
+ 	buf_count.type = HFI_BUFFER_INPUT;
+ 	buf_count.count_actual = input_bufs;
+ 	buf_count.count_min_host = input_bufs;
+-	if (iris1_encoder && inst->bufreq_cache_valid) {
++	if (iris1_decoder ||
++	    (iris1_encoder && inst->bufreq_cache_valid)) {
+ 		/* Match downstream queue_setup: advertise the firmware minimum. */
+ 		ret = venus_helper_get_bufreq(inst, HFI_BUFFER_INPUT, &bufreq);
+ 		if (ret)
+@@ -1749,7 +1757,8 @@ int venus_helper_set_num_bufs(struct venus_inst *inst, unsigned int input_bufs,
+ 	buf_count.type = HFI_BUFFER_OUTPUT;
+ 	buf_count.count_actual = output_bufs;
+ 	buf_count.count_min_host = output_bufs;
+-	if (iris1_encoder && inst->bufreq_cache_valid) {
++	if (iris1_decoder ||
++	    (iris1_encoder && inst->bufreq_cache_valid)) {
+ 		/* Match downstream queue_setup: advertise the firmware minimum. */
+ 		ret = venus_helper_get_bufreq(inst, HFI_BUFFER_OUTPUT, &bufreq);
+ 		if (ret)
+@@ -1771,6 +1780,14 @@ int venus_helper_set_num_bufs(struct venus_inst *inst, unsigned int input_bufs,
+ 		buf_count.type = HFI_BUFFER_OUTPUT2;
+ 		buf_count.count_actual = output2_bufs;
+ 		buf_count.count_min_host = output2_bufs;
++		if (iris1_decoder) {
++			ret = venus_helper_get_bufreq(inst, HFI_BUFFER_OUTPUT2,
++						      &bufreq);
++			if (ret)
++				return ret;
++			buf_count.count_min_host =
++				hfi_bufreq_get_count_min(&bufreq, ver);
++		}
+ 
+ 		ret = hfi_session_set_property(inst, ptype, &buf_count);
+ 	}
+diff --git a/drivers/media/platform/qcom/venus/vdec.c b/drivers/media/platform/qcom/venus/vdec.c
+index af8f9a650142..51b1e299c868 100644
+--- a/drivers/media/platform/qcom/venus/vdec.c
++++ b/drivers/media/platform/qcom/venus/vdec.c
+@@ -1266,6 +1266,45 @@ static int vdec_verify_conf(struct venus_inst *inst)
+ 	return 0;
+ }
+ 
++static int vdec_set_num_bufs(struct venus_inst *inst)
++{
++	enum hfi_version ver = inst->core->res->hfi_version;
++	struct hfi_buffer_requirements req;
++	unsigned int output_bufs = inst->num_output_bufs;
++	unsigned int output2_bufs = 0;
++	int ret;
++
++	/*
++	 * In split-output mode the two firmware ports have different owners:
++	 * OUTPUT is the driver's compressed DPB pool and OUTPUT2 is the client
++	 * capture queue.  Downstream SM8150 advertises exactly the firmware
++	 * minimum for the DPB port, not the userspace queue depth for both ports.
++	 */
++	if (inst->dpb_buftype == HFI_BUFFER_OUTPUT) {
++		ret = venus_helper_get_bufreq(inst, HFI_BUFFER_OUTPUT, &req);
++		if (ret)
++			return ret;
++
++		output_bufs = hfi_bufreq_get_count_min(&req, ver);
++		output2_bufs = inst->num_output_bufs;
++	} else if (inst->dpb_buftype == HFI_BUFFER_OUTPUT2) {
++		ret = venus_helper_get_bufreq(inst, HFI_BUFFER_OUTPUT2, &req);
++		if (ret)
++			return ret;
++
++		output2_bufs = hfi_bufreq_get_count_min(&req, ver);
++	}
++
++	if (IS_IRIS1(inst->core))
++		dev_info(inst->core->dev_dec,
++			 "venus-sm8150: decoder buffer roles input=%u output=%u output2=%u opb=%#x dpb=%#x\n",
++			 inst->num_input_bufs, output_bufs, output2_bufs,
++			 inst->opb_buftype, inst->dpb_buftype);
++
++	return venus_helper_set_num_bufs(inst, inst->num_input_bufs,
++					 output_bufs, output2_bufs);
++}
++
+ static int vdec_start_capture(struct venus_inst *inst)
+ {
+ 	int ret;
+@@ -1291,8 +1330,7 @@ static int vdec_start_capture(struct venus_inst *inst)
+ 	if (ret)
+ 		return ret;
+ 
+-	ret = venus_helper_set_num_bufs(inst, inst->num_input_bufs,
+-					VB2_MAX_FRAME, VB2_MAX_FRAME);
++	ret = vdec_set_num_bufs(inst);
+ 	if (ret)
+ 		return ret;
+ 
+@@ -1402,8 +1440,7 @@ static int vdec_start_output(struct venus_inst *inst)
+ 	if (ret)
+ 		return ret;
+ 
+-	ret = venus_helper_set_num_bufs(inst, inst->num_input_bufs,
+-					VB2_MAX_FRAME, VB2_MAX_FRAME);
++	ret = vdec_set_num_bufs(inst);
+ 	if (ret)
+ 		return ret;
+ 
+-- 
+2.51.0

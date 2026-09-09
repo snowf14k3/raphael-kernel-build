@@ -88,3 +88,19 @@ H.264/Main8 回归失败时不要进入 Main10。Main10 必须非空 30 帧、ha
 `suspended` 才算通过。FFmpeg exit 0 但 0 帧不算通过。
 
 构建后内核版本必须为 `7.1.0-sm8150-venus-test16+`。
+
+## 实机结果（2026-09-09）
+
+| 项目 | 结果 |
+|---|---|
+| H.264 small/720p/1080p/reopen | PASS |
+| HEVC Main8 MKV | PASS |
+| VP8 MKV | FAIL；0 帧，`POLLERR/EIO` |
+| VP9p0/MPEG2/Main10/VP9p2 | 旧脚本在 VP8 失败后提前停止，未测 |
+| encoder | 默认 gate 为 N，该次未测 |
+
+VP8 不是容器问题：固件已完成 session init、internal buffers、LOAD/START
+和 source-change，随后在 DPB FTB 阶段返回 event `0x1003`。小米原厂定义该值为
+`HFI_ERR_SESSION_BAD_POINTER`。对比原厂后确认当前 Venus 把 OUTPUT 与 OUTPUT2
+都广告为 `VB2_MAX_FRAME`，但实际只分配 firmware-minimum 数量的内部 DPB。
+修复候选及逐 hunk 依据见 `venus-sm8150-0030-hunk-ledger.md`。

@@ -54,7 +54,7 @@ scripts/kconfig/merge_config.sh -m .config \
 	"${config_fragment}" \
 	arch/arm64/configs/sm8150.config
 
-scripts/config --set-str LOCALVERSION "-sm8150-venus-test16"
+scripts/config --set-str LOCALVERSION "-sm8150-venus-test17"
 scripts/config --disable LOCALVERSION_AUTO
 scripts/config --module VIDEO_QCOM_VENUS
 scripts/config --enable SM_GCC_8150
@@ -105,7 +105,7 @@ install -m 0644 "${dtb}" \
 install -m 0644 .config "${artifact_dir}/kernel.config"
 install -m 0644 "${patch_manifest}" "${artifact_dir}/patches.sha256"
 install -m 0644 "${build_root}/scripts/venus-test-suite.sh" "${artifact_dir}/venus-test-suite.sh"
-install -m 0644 "${build_root}/docs/venus-test16.md" "${artifact_dir}/TESTING.md"
+install -m 0644 "${build_root}/docs/venus-test17.md" "${artifact_dir}/TESTING.md"
 install -m 0644 "${build_root}/docs/venus-sm8150-encoder-audit.md" \
 	"${artifact_dir}/ENCODER-AUDIT.md"
 install -m 0644 "${build_root}/docs/venus-sm8150-full-migration-audit.md" \
@@ -134,6 +134,12 @@ install -m 0644 "${build_root}/docs/venus-sm8150-0028-hunk-ledger.md" \
 	"${artifact_dir}/0028-HUNK-LEDGER.md"
 install -m 0644 "${build_root}/docs/venus-sm8150-0029-hunk-ledger.md" \
 	"${artifact_dir}/0029-HUNK-LEDGER.md"
+install -m 0644 "${build_root}/docs/venus-sm8150-0030-hunk-ledger.md" \
+	"${artifact_dir}/0030-HUNK-LEDGER.md"
+install -m 0644 "${build_root}/docs/venus-sm8150-0031-hunk-ledger.md" \
+	"${artifact_dir}/0031-HUNK-LEDGER.md"
+install -m 0644 "${build_root}/docs/venus-test16-encoder-reset-analysis.md" \
+	"${artifact_dir}/TEST16-ENCODER-RESET.md"
 install -m 0644 "${build_root}/docs/venus-sm8150-full-difference-matrix.md" \
 	"${artifact_dir}/FULL-DIFFERENCE-MATRIX.md"
 install -m 0644 "${build_root}/docs/venus-sm8150-test15-hunk-ledger.md" \
@@ -181,6 +187,9 @@ sha256sum \
 	0027-HUNK-LEDGER.md \
 	0028-HUNK-LEDGER.md \
 	0029-HUNK-LEDGER.md \
+	0030-HUNK-LEDGER.md \
+	0031-HUNK-LEDGER.md \
+	TEST16-ENCODER-RESET.md \
 	FULL-DIFFERENCE-MATRIX.md \
 	TEST15-HUNK-LEDGER.md \
 	TEST15-VS-BASE-FULL.diff \

@@ -144,7 +144,7 @@ test13 的目标是保持这个顺序，并把每个危险边界拆成可单独�
 | 线性 NV12 输入 | 原厂格式表明确支持，HFI color format 为 `0x2` | 当前公开 NV12 且发送相同 HFI 值；UBWC 只是原厂默认，不是唯一输入 | 已排除 |
 | ETB 长度 | 原厂 `alloc_len=plane.length`、`filled_len=plane.bytesused` | 当前同样使用分配长度和 V4L2 payload，不能把 `filled_len` 粗暴改成 `sizeimage` | 对齐 |
 | ETB/FTB 提交顺序 | 原厂按 deferred 注册表顺序提交；正常客户端必须先提供 CAPTURE，才能安全接收码流 | 当前 `m2m_device_run()` 明确先提交 CAPTURE/FTB，再提交 OUTPUT/ETB；比依赖注册顺序更确定 | 对齐且更保守 |
-| V4L2 DMA 方向 | 原厂编码输入 clean+invalidate、编码输出 invalidate | 当前 vb2 OUTPUT 队列为 `DMA_TO_DEVICE`，CAPTURE 队列为 `DMA_FROM_DEVICE`；MMAP coherent 无需额外同步，USERPTR 由 `vb2_dma_contig` prepare/finish 同步，DMABUF 由 attachment/exporter 处理 | 静态对齐 |
+| V4L2 DMA 方向 | 原厂所有 video dma-buf attachment 都以 `DMA_BIDIRECTIONAL` 映射；输入 clean+invalidate、输出 invalidate | Test16 只有 OUTPUT/source 为双向，CAPTURE 仍是 `DMA_FROM_DEVICE`，不符合原厂映射权限；0031 已把 IRIS1 CAPTURE 也改为双向 | 已实现，待 Test17 实机 |
 | 压缩输出分配尺寸 | 原厂把固件返回的 output requirement 作为最小 `sizeimage` | 当前 128x96 的通用保守公式分配 73728，固件 minimum 为 36864；FTB 传真实 73728 `alloc_len`，大于固件最小值 | 安全过量分配，保留 |
 | bitrate savings | 原厂只对非 VBR 强制开启 | test13 已按有效 HFI RC mode 排除 VBR_CFR/VBR_VFR | 静态对齐 |
 | rotation 顺序 | rotation/flip 在 start 中先于 bitrate savings、route、mode、core | test13 已改为 rotation → properties → route → mode → core | 静态对齐 |

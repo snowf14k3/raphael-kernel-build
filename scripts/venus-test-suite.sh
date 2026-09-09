@@ -8,7 +8,7 @@ frame_hashes() {
 }
 if [[ "${1:-}" == --plan ]]; then
 	printf '%s\n' \
-		'Preflight: test16 kernel, SM8150 Venus nodes, idle devices, tools, free space.' \
+		'Preflight: test17 kernel, SM8150 Venus nodes, idle devices, tools, free space.' \
 		'A: PM held on; H.264, HEVC Main8, VP8, VP9 Profile0 and MPEG2 decode.' \
 		'B: HEVC Main10 and VP9 Profile2 P010 paths are compared to software hashes.' \
 		'C: PM auto; observe suspended, decode, repeat for two cycles.' \
@@ -16,7 +16,7 @@ if [[ "${1:-}" == --plan ]]; then
 		'Encoder stays disabled unless VENUS_TEST_ENCODER=1 is set explicitly.' \
 		'When enabled, one H.264 frame is tested first, then H.264/HEVC/VP8 short streams.' \
 		'Restore original PM/debug settings; save local logs and report.tar.gz.' \
-		'Stop issuing codec jobs after a timeout or functional failure.'
+		'Stop immediately after a codec failure to avoid a firmware event/log storm.'
 	exit 0
 fi
 if [[ "${1:-}" == --self-test ]]; then
@@ -36,8 +36,8 @@ if [[ "${1:-}" == --self-test ]]; then
 fi
 [[ $# -eq 0 ]] || { echo 'Usage: sudo bash venus-test-suite.sh [--plan|--self-test]' >&2; exit 2; }
 [[ $EUID -eq 0 ]] || { echo '请使用 sudo bash venus-test-suite.sh。' >&2; exit 2; }
-[[ "$(uname -r)" == *sm8150-venus-test16* ]] || {
-	echo '当前不是 test16 内核，未开始测试，也未修改设备设置。' >&2; exit 2;
+[[ "$(uname -r)" == *sm8150-venus-test17* ]] || {
+	echo '当前不是 test17 内核，未开始测试，也未修改设备设置。' >&2; exit 2;
 }
 [[ "${VENUS_TEST_ENCODER:-0}" == 0 || "${VENUS_TEST_ENCODER:-0}" == 1 ]] || {
 	echo 'VENUS_TEST_ENCODER 只能是 0 或 1；未开始测试。' >&2; exit 2;
@@ -328,7 +328,7 @@ elif grep -q 'h264_v4l2m2m' "$run_root/encoders.txt"; then
 	set_knob "$encoder_protocol_gate" Y || {
 		record hw-encode FAIL 'cannot unlock encoder gate'; stop_batch;
 	}
-	logger -t venus-test16-host 'ENCODER_FULL_BEGIN'
+	logger -t venus-test17-host 'ENCODER_FULL_BEGIN'
 	sync
 	encode_codec_case encode-h264-one h264_v4l2m2m h264 h264 h264 1 128x96 || stop_batch
 	encode_codec_case encode-h264 h264_v4l2m2m h264 h264 h264 30 320x240 || stop_batch
