@@ -1,0 +1,675 @@
+diff --git a/drivers/media/platform/qcom/venus/core.h b/drivers/media/platform/qcom/venus/core.h
+index d5dd7d534c3469bab1315a38106ace5278c0f70f..8bb9f79e948c700f8ffc7da0b6d708d11d2baa39 100644
+--- a/drivers/media/platform/qcom/venus/core.h
++++ b/drivers/media/platform/qcom/venus/core.h
+@@ -493,12 +493,15 @@ enum venus_inst_modes {
+  * @enc_test_stage: snapshotted SM8150 encoder bring-up checkpoint
+  * @enc_vendor_nv12: use the downstream SM8150 linear NV12 allocation formula
+  * @enc_dma_bidirectional: map raw encoder buffers for firmware read/write
+- * @enc_ebd_count: number of encoder input-done messages seen in this instance
+- * @enc_recon_index: latest VPU5 reconstruction-buffer index
+- * @enc_ubwc_cr_q16: latest VPU5 UBWC compression ratio in Q16 format
+- * @enc_complexity_factor_q16: latest VPU5 complexity factor in Q16 format
+- * @enc_complexity_number: latest raw VPU5 complexity counter
+- * @enc_bw_diag_ebd_count: last encoder EBD included in the bandwidth log
++ * @iris1_ebd_count: number of VPU5 input-done messages seen in this instance
++ * @iris1_recon_index: latest VPU5 reconstruction-buffer index
++ * @iris1_ubwc_cr_q16: latest VPU5 UBWC compression ratio in Q16 format
++ * @iris1_complexity_factor_q16: latest VPU5 complexity factor in Q16 format
++ * @iris1_complexity_number: latest raw VPU5 complexity counter
++ * @iris1_recon_cr_q16: VPU5 compression ratio indexed by reconstruction buffer
++ * @iris1_recon_cf_q16: VPU5 complexity factor indexed by reconstruction buffer
++ * @iris1_recon_valid_mask: reconstruction slots containing statistics
++ * @iris1_bw_diag_ebd_count: last EBD included in the bandwidth diagnostic
+  * @flags:	bitmask flags describing current instance mode
+  * @dpb_ids:	DPB buffer ID's
+  */
+@@ -576,12 +579,15 @@ struct venus_inst {
+ 	u8 enc_test_stage;
+ 	bool enc_vendor_nv12;
+ 	bool enc_dma_bidirectional;
+-	u32 enc_ebd_count;
+-	u32 enc_recon_index;
+-	u32 enc_ubwc_cr_q16;
+-	u32 enc_complexity_factor_q16;
+-	u32 enc_complexity_number;
+-	u32 enc_bw_diag_ebd_count;
++	u32 iris1_ebd_count;
++	u32 iris1_recon_index;
++	u32 iris1_ubwc_cr_q16;
++	u32 iris1_complexity_factor_q16;
++	u32 iris1_complexity_number;
++	u32 iris1_recon_cr_q16[VIDEO_MAX_FRAME];
++	u32 iris1_recon_cf_q16[VIDEO_MAX_FRAME];
++	u32 iris1_recon_valid_mask;
++	u32 iris1_bw_diag_ebd_count;
+ 	enum venus_inst_modes flags;
+ 	struct ida dpb_ids;
+ };
+diff --git a/drivers/media/platform/qcom/venus/hfi_msgs.c b/drivers/media/platform/qcom/venus/hfi_msgs.c
+index 7a688bb4263985b4a40cb0a2330984ea047a78f5..420d3eae9cafe95d7e21b62f31482c76bdb0d7aa 100644
+--- a/drivers/media/platform/qcom/venus/hfi_msgs.c
++++ b/drivers/media/platform/qcom/venus/hfi_msgs.c
+@@ -547,8 +547,12 @@ static void hfi_session_etb_done(struct venus_core *core,
+ {
+ 	struct hfi_msg_session_empty_buffer_done_pkt *pkt = packet;
+ 	u32 hfi_flags = 0;
++	u32 ebd_count = 0;
+ 
+-	if (IS_IRIS1(core) && inst->session_type == VIDC_SESSION_TYPE_ENC &&
++	if (IS_IRIS1(core))
++		ebd_count = READ_ONCE(inst->iris1_ebd_count) + 1;
++
++	if (IS_IRIS1(core) &&
+ 	    pkt->shdr.hdr.size >= sizeof(*pkt) +
+ 				  sizeof(struct hfi_msg_session_empty_buffer_done_v4_tail)) {
+ 		const struct hfi_msg_session_empty_buffer_done_v4_tail *tail;
+@@ -558,7 +562,6 @@ static void hfi_session_etb_done(struct venus_core *core,
+ 		u64 weighted_sum = 0, sum = 0, numerator;
+ 		u32 cr_q16 = 0, cf_q16, frame_size;
+ 		u32 mbs_per_frame, picture_type = 0;
+-		u32 ebd_count;
+ 		unsigned int i;
+ 
+ 		tail = (const void *)pkt->data;
+@@ -582,14 +585,21 @@ static void hfi_session_etb_done(struct venus_core *core,
+ 		cf_q16 = frame_size ? tail->recon.complexity_number / frame_size :
+ 				      4 << 16;
+ 
+-		WRITE_ONCE(inst->enc_recon_index, tail->recon.frame_index);
+-		WRITE_ONCE(inst->enc_ubwc_cr_q16, cr_q16);
+-		WRITE_ONCE(inst->enc_complexity_factor_q16, cf_q16);
+-		WRITE_ONCE(inst->enc_complexity_number,
++		WRITE_ONCE(inst->iris1_recon_index, tail->recon.frame_index);
++		WRITE_ONCE(inst->iris1_ubwc_cr_q16, cr_q16);
++		WRITE_ONCE(inst->iris1_complexity_factor_q16, cf_q16);
++		WRITE_ONCE(inst->iris1_complexity_number,
+ 			   tail->recon.complexity_number);
+-		ebd_count = READ_ONCE(inst->enc_ebd_count) + 1;
+-		WRITE_ONCE(inst->enc_ebd_count, ebd_count);
+-
++		if (tail->recon.frame_index < VIDEO_MAX_FRAME) {
++			u32 index = tail->recon.frame_index;
++			u32 mask;
++
++			WRITE_ONCE(inst->iris1_recon_cr_q16[index], cr_q16);
++			WRITE_ONCE(inst->iris1_recon_cf_q16[index], cf_q16);
++			mask = READ_ONCE(inst->iris1_recon_valid_mask) | BIT(index);
++			/* Publish both samples before making this slot visible. */
++			smp_store_release(&inst->iris1_recon_valid_mask, mask);
++		}
+ 		if (tail->is_sync_frame &&
+ 		    pkt->shdr.hdr.size >= sizeof(*pkt) + sizeof(*tail) +
+ 					  sizeof(picture_type))
+@@ -597,14 +607,18 @@ static void hfi_session_etb_done(struct venus_core *core,
+ 
+ 		if (ebd_count <= 4 || !(ebd_count % 60))
+ 			dev_info(core->dev,
+-				 "sm8150-venus: EBD count=%u tag=%u flags=%#x recon=%u cr_q16=%u cf_q16=%u complexity=%u sync=%u picture=%#x\n",
+-				 ebd_count, pkt->input_tag, hfi_flags,
++				 "sm8150-venus: EBD type=%u count=%u tag=%u flags=%#x recon=%u cr_q16=%u cf_q16=%u complexity=%u sync=%u picture=%#x\n",
++				 inst->session_type, ebd_count, pkt->input_tag, hfi_flags,
+ 				 tail->recon.frame_index, cr_q16, cf_q16,
+ 				 tail->recon.complexity_number,
+ 				 tail->is_sync_frame, picture_type);
+ 	}
++	if (IS_IRIS1(core))
++		WRITE_ONCE(inst->iris1_ebd_count, ebd_count);
+ 
+ 	inst->error = pkt->error_type;
++	if (pkt->input_tag < VIDEO_MAX_FRAME)
++		WRITE_ONCE(inst->payloads[pkt->input_tag], 0);
+ 	inst->ops->buf_done(inst, HFI_BUFFER_INPUT, pkt->input_tag,
+ 			    pkt->filled_len, pkt->offset, 0, hfi_flags, 0);
+ }
+diff --git a/drivers/media/platform/qcom/venus/pm_helpers.c b/drivers/media/platform/qcom/venus/pm_helpers.c
+index adce713019c4c534b4ddd01c4a25e74c8de92663..c509b0b8ac912d7346683bb48ac96e0643e7c5fc 100644
+--- a/drivers/media/platform/qcom/venus/pm_helpers.c
++++ b/drivers/media/platform/qcom/venus/pm_helpers.c
+@@ -8,6 +8,7 @@
+ #include <linux/interconnect.h>
+ #include <linux/iopoll.h>
+ #include <linux/kernel.h>
++#include <linux/math64.h>
+ #include <linux/pm_domain.h>
+ #include <linux/pm_opp.h>
+ #include <linux/pm_runtime.h>
+@@ -225,29 +226,465 @@ static void mbs_to_bw(struct venus_inst *inst, u32 mbs, u32 *avg, u32 *peak)
+ 	}
+ }
+ 
++/*
++ * SM8150 downstream uses the msm-vidc-ddr/msm-vidc-llcc dynamic governor,
++ * not the SDM845 macroblock lookup tables.  Its model is expressed in Q16
++ * megabytes/second and returns kilobytes/second.  Keep the arithmetic here
++ * so the mainline ICC path receives the same per-session vote inputs without
++ * importing the downstream msm-bus/devfreq plumbing.
++ */
++#define IRIS1_BW_MAX_KBPS	6533000U
++#define IRIS1_FP_SHIFT		16
++#define IRIS1_FP_ONE		BIT_ULL(IRIS1_FP_SHIFT)
++#define IRIS1_FP_INT(x)		((u64)(x) << IRIS1_FP_SHIFT)
++#define IRIS1_FP_CONST(i, n, d)	(IRIS1_FP_INT(i) + div_u64(IRIS1_FP_INT(n), d))
++
++struct iris1_bw_vote {
++	u32 ddr_kbps;
++	u32 llcc_kbps;
++};
++
++struct iris1_bw_lut {
++	u32 frame_size;
++	u32 frame_rate;
++	u32 bitrate_mbps;
++	u32 cr_8_q16;
++	u32 cr_10_q16;
++};
++
++static const struct iris1_bw_lut iris1_bw_lut[] = {
++	{ 1280 * 720, 30,  14, 83886, 80609 },
++	{ 1280 * 720, 60,  22, 83886, 80609 },
++	{ 1920 * 1088, 30, 40, 83886, 80609 },
++	{ 1920 * 1088, 60, 64, 83886, 80609 },
++	{ 2560 * 1440, 30, 64, 82575, 79953 },
++	{ 2560 * 1440, 60, 102, 82575, 79953 },
++	{ 3840 * 2160, 30, 84, 82575, 79953 },
++	{ 3840 * 2160, 60, 134, 82575, 79953 },
++	{ 4096 * 2160, 30, 88, 82575, 79953 },
++	{ 4096 * 2160, 60, 141, 82575, 79953 },
++	{ 4096 * 2304, 30, 96, 82575, 79953 },
++	{ 4096 * 2304, 60, 154, 82575, 79953 },
++};
++
++static u64 iris1_fp_mul(u64 a, u64 b)
++{
++	return div64_u64(a * b, IRIS1_FP_ONE);
++}
++
++static u64 iris1_fp_div(u64 a, u64 b)
++{
++	if (!b)
++		return 0;
++
++	return div64_u64(a * IRIS1_FP_ONE, b);
++}
++
++static u64 iris1_fp_ratio(u64 numerator, u64 denominator)
++{
++	if (!denominator)
++		return IRIS1_FP_ONE;
++
++	return div64_u64(numerator << IRIS1_FP_SHIFT, denominator);
++}
++
++/* Downstream deliberately truncates firmware Q16 telemetry to two decimals. */
++static u64 iris1_fp_from_fw_q16(u32 value, u32 minimum, u32 maximum)
++{
++	u32 integer, hundredths;
++
++	value = clamp(value, minimum, maximum);
++	integer = value >> IRIS1_FP_SHIFT;
++	hundredths = ((value & (IRIS1_FP_ONE - 1)) * 100) >>
++		     IRIS1_FP_SHIFT;
++
++	return IRIS1_FP_INT(integer) + div_u64(IRIS1_FP_INT(hundredths), 100);
++}
++
++static u32 iris1_fp_mbps_to_kbps(u64 value)
++{
++	u64 mbps = value >> IRIS1_FP_SHIFT;
++
++	if ((value & (IRIS1_FP_ONE - 1)) >=
++	    ((IRIS1_FP_ONE - 1) >> 1))
++		mbps++;
++
++	return min_t(u64, mbps * 1000, IRIS1_BW_MAX_KBPS);
++}
++
++static const struct iris1_bw_lut *iris1_find_bw_lut(u32 width, u32 height,
++						     u32 fps)
++{
++	u64 frame_size = (u64)width * height;
++	unsigned int i;
++
++	for (i = 0; i < ARRAY_SIZE(iris1_bw_lut); i++)
++		if (iris1_bw_lut[i].frame_size >= frame_size &&
++		    iris1_bw_lut[i].frame_rate >= fps)
++			return &iris1_bw_lut[i];
++
++	return &iris1_bw_lut[ARRAY_SIZE(iris1_bw_lut) - 1];
++}
++
++static bool iris1_fmt_ubwc(u32 fmt)
++{
++	return fmt == HFI_COLOR_FORMAT_NV12_UBWC ||
++	       fmt == HFI_COLOR_FORMAT_YUV420_TP10_UBWC;
++}
++
++static bool iris1_fmt_10bit(u32 fmt)
++{
++	return fmt == HFI_COLOR_FORMAT_P010 ||
++	       fmt == HFI_COLOR_FORMAT_YUV420_TP10_UBWC ||
++	       (fmt & HFI_COLOR_FORMAT_10_BIT_BASE);
++}
++
++static u32 iris1_encoder_input_fmt(struct venus_inst *inst)
++{
++	if (!inst->fmt_out)
++		return HFI_COLOR_FORMAT_NV12;
++
++	switch (inst->fmt_out->pixfmt) {
++	case V4L2_PIX_FMT_P010:
++		return HFI_COLOR_FORMAT_P010;
++	case V4L2_PIX_FMT_QC08C:
++		return HFI_COLOR_FORMAT_NV12_UBWC;
++	case V4L2_PIX_FMT_QC10C:
++		return HFI_COLOR_FORMAT_YUV420_TP10_UBWC;
++	default:
++		return HFI_COLOR_FORMAT_NV12;
++	}
++}
++
++/* Match fill_dynamic_stats(): minimum valid CR and maximum valid CF. */
++static void iris1_dynamic_stats(struct venus_inst *inst, u32 *cr_q16,
++				u32 *cf_q16)
++{
++	/* Pair with the release-store after the EBD handler writes both samples. */
++	u32 mask = smp_load_acquire(&inst->iris1_recon_valid_mask);
++	u32 cr = 5U << IRIS1_FP_SHIFT;
++	u32 cf = 1U << IRIS1_FP_SHIFT;
++	unsigned int i;
++
++	for (i = 0; i < VIDEO_MAX_FRAME; i++) {
++		u32 sample;
++
++		if (!(mask & BIT(i)))
++			continue;
++
++		sample = READ_ONCE(inst->iris1_recon_cr_q16[i]);
++		if (sample)
++			cr = min(cr, sample);
++
++		sample = READ_ONCE(inst->iris1_recon_cf_q16[i]);
++		if (sample)
++			cf = max(cf, sample);
++	}
++
++	if (cr_q16)
++		*cr_q16 = clamp(cr, 1U << IRIS1_FP_SHIFT,
++				5U << IRIS1_FP_SHIFT);
++	if (cf_q16)
++		*cf_q16 = clamp(cf, 1U << IRIS1_FP_SHIFT,
++				4U << IRIS1_FP_SHIFT);
++}
++
++static unsigned long iris1_input_payload(struct venus_inst *inst)
++{
++	unsigned long payload = 0;
++	unsigned int i;
++
++	if (!load_per_instance(inst))
++		return 0;
++
++	for (i = 0; i < inst->num_input_bufs; i++)
++		payload = max(payload, inst->payloads[i]);
++
++	return payload;
++}
++
++static void iris1_calculate_decoder_bw(struct venus_inst *inst,
++					unsigned long payload,
++					struct iris1_bw_vote *vote)
++{
++	u32 cr_q16, cf_q16;
++	u32 input_width = max(inst->out_width, 1U);
++	u32 input_height = max(inst->out_height, 1U);
++	u32 output_width = max(inst->width, 1U);
++	u32 output_height = max(inst->height, 1U);
++	u32 width = max(input_width, 1280U);
++	u32 height = max(input_height, 720U);
++	u32 fps = max_t(u32, inst->fps, 1);
++	u32 lcu_size = inst->hfi_codec == HFI_VIDEO_CODEC_HEVC ||
++		       inst->hfi_codec == HFI_VIDEO_CODEC_VP9 ? 32 : 16;
++	u32 dpb_fmt = inst->dpb_fmt ?: inst->opb_fmt;
++	u32 dpb_bpp = iris1_fmt_10bit(dpb_fmt) ? 10 : 8;
++	u64 lcu_per_frame = DIV_ROUND_UP(width, lcu_size) *
++			    DIV_ROUND_UP(height, lcu_size);
++	u64 compression;
++	u64 complexity;
++	u64 scaling = iris1_fp_ratio((u64)input_width * input_height,
++				     (u64)output_width * output_height);
++	u64 bitrate = DIV_ROUND_UP_ULL((u64)payload * fps * 8, 1000000);
++	u64 bins = IRIS1_FP_INT(4);
++	u64 vsp_read = iris1_fp_div(iris1_fp_mul(IRIS1_FP_INT(bitrate),
++						 bins + IRIS1_FP_INT(2)),
++				 IRIS1_FP_INT(8));
++	u64 vsp_write = iris1_fp_div(iris1_fp_mul(IRIS1_FP_INT(bitrate), bins),
++				  IRIS1_FP_INT(8));
++	u64 collocated = IRIS1_FP_INT(div_u64(lcu_per_frame *
++					(lcu_size == 16 ? 16 : 64) * fps,
++					1000000));
++	u64 y8 = iris1_fp_ratio((u64)width * height * fps, 1000000);
++	u64 y10 = iris1_fp_div(iris1_fp_mul(y8, IRIS1_FP_INT(256)),
++				 IRIS1_FP_INT(192));
++	u64 p010 = y8 * 2;
++	u64 dpb_base = dpb_bpp == 8 ? y8 : y10;
++	u64 dpb_read, dpb_write, dpb_total;
++	u64 llcc_dpb = 0, llcc_line = 0;
++	u64 opb_write = 0;
++	u64 line = IRIS1_FP_INT(div_u64((lcu_size == 16 ? 128 : 64) *
++					lcu_per_frame * fps, 1000000));
++	u64 ddr, llcc;
++	bool use_sys_cache = inst->core->iris1_llcc_mask ==
++		GENMASK(VIDC_IRIS1_LLCC_NUM - 1, 0);
++	bool h264_category = inst->hfi_codec != HFI_VIDEO_CODEC_HEVC &&
++			     inst->hfi_codec != HFI_VIDEO_CODEC_VP9;
++
++	iris1_dynamic_stats(inst, &cr_q16, &cf_q16);
++	compression = iris1_fp_from_fw_q16(cr_q16,
++					    1U << 16, 5U << 16);
++	complexity = iris1_fp_from_fw_q16(cf_q16,
++					   1U << 16, 4U << 16);
++	dpb_read = iris1_fp_div(iris1_fp_mul(dpb_base,
++			iris1_fp_mul(IRIS1_FP_CONST(1, 50, 100), complexity)),
++			compression);
++	dpb_write = iris1_fp_div(iris1_fp_mul(dpb_base,
++			iris1_fp_mul(IRIS1_FP_CONST(1, 50, 100),
++					     IRIS1_FP_CONST(1, 5, 100))),
++			compression);
++	dpb_total = dpb_read + dpb_write;
++
++	if (use_sys_cache) {
++		dpb_read = iris1_fp_div(dpb_read,
++			h264_category ? IRIS1_FP_CONST(1, 15, 100) :
++					IRIS1_FP_CONST(1, 30, 100));
++		llcc_dpb = dpb_total - dpb_write - dpb_read;
++		if (h264_category) {
++			llcc_line = line * 2;
++			line = 0;
++		}
++	}
++
++	if (inst->dpb_fmt) {
++		opb_write = dpb_bpp == 8 ? y8 :
++			(iris1_fmt_ubwc(inst->opb_fmt) ? y10 : p010);
++		opb_write = iris1_fp_div(
++			iris1_fp_mul(IRIS1_FP_CONST(1, 50, 100), opb_write),
++			iris1_fp_mul(scaling,
++				iris1_fmt_ubwc(inst->opb_fmt) ? compression :
++								  IRIS1_FP_ONE));
++	}
++
++	ddr = vsp_read + vsp_write + collocated * 2 + dpb_read + dpb_write +
++	      opb_write + line * 2;
++	ddr = iris1_fp_mul(ddr, IRIS1_FP_CONST(1, 3, 100));
++	llcc = llcc_dpb + llcc_line + ddr;
++
++	vote->ddr_kbps = iris1_fp_mbps_to_kbps(ddr);
++	vote->llcc_kbps = iris1_fp_mbps_to_kbps(llcc);
++}
++
++static void iris1_calculate_encoder_bw(struct venus_inst *inst,
++					struct iris1_bw_vote *vote)
++{
++	const struct iris1_bw_lut *lut;
++	u32 cr_q16;
++	u32 input_fmt = iris1_encoder_input_fmt(inst);
++	u32 input_width = max(inst->out_width, 1U);
++	u32 input_height = max(inst->out_height, 1U);
++	u32 output_width = max(inst->width, 1U);
++	u32 output_height = max(inst->height, 1U);
++	u32 width = max(output_width, 1280U);
++	u32 height = max(output_height, 720U);
++	u32 fps = max_t(u32, inst->fps, 1);
++	u32 lcu_size = inst->hfi_codec == HFI_VIDEO_CODEC_HEVC ? 32 : 16;
++	u64 lcu_per_frame = DIV_ROUND_UP(width, lcu_size) *
++			    DIV_ROUND_UP(height, lcu_size);
++	u64 downscale = max(iris1_fp_ratio((u64)input_width * input_height,
++					   (u64)output_width * output_height),
++			    IRIS1_FP_ONE);
++	u64 compression;
++	u64 original_compression;
++	u64 original_compression_y;
++	u64 bitrate;
++	u64 y8 = iris1_fp_ratio((u64)width * height * fps, 1000000);
++	u64 y10 = iris1_fp_div(iris1_fp_mul(y8, IRIS1_FP_INT(256)),
++				 IRIS1_FP_INT(192));
++	u64 dpb_base = iris1_fmt_10bit(input_fmt) ? y10 : y8;
++	u64 original_base = iris1_fmt_10bit(input_fmt) ?
++		(iris1_fmt_ubwc(input_fmt) ? y10 : y8 * 2) : y8;
++	u64 vsp_read, vsp_write, collocated, ref_y, ref_cbcr;
++	u64 ref_write, ref_overlap, original_read, line, mese_factor;
++	u64 mese_read, mese_write;
++	u64 llcc_ref = 0, llcc_line = 0, ddr, llcc;
++	bool use_sys_cache = inst->core->iris1_llcc_mask ==
++		GENMASK(VIDC_IRIS1_LLCC_NUM - 1, 0);
++
++	lut = iris1_find_bw_lut(width, height, fps);
++	iris1_dynamic_stats(inst, &cr_q16, NULL);
++	compression = iris1_fp_from_fw_q16(cr_q16,
++					    1U << 16, 5U << 16);
++	if (iris1_fmt_ubwc(input_fmt)) {
++		original_compression = iris1_fmt_10bit(input_fmt) ?
++			lut->cr_10_q16 : lut->cr_8_q16;
++		original_compression_y = original_compression;
++	} else {
++		original_compression = IRIS1_FP_ONE;
++		original_compression_y = IRIS1_FP_ONE;
++	}
++	bitrate = inst->controls.enc.bitrate ?
++		DIV_ROUND_UP(inst->controls.enc.bitrate, 1000000) :
++		lut->bitrate_mbps;
++
++	vsp_read = iris1_fp_div(iris1_fp_mul(IRIS1_FP_INT(bitrate),
++					     IRIS1_FP_INT(4)), IRIS1_FP_INT(8));
++	vsp_write = vsp_read + iris1_fp_div(IRIS1_FP_INT(bitrate),
++					     IRIS1_FP_INT(8));
++	collocated = IRIS1_FP_INT(div_u64(lcu_per_frame *
++					 (lcu_size == 16 ? 16 : 64) * fps,
++					 1000000));
++
++	ref_y = dpb_base;
++	if (width != 960)
++		ref_y = iris1_fp_mul(ref_y, IRIS1_FP_CONST(1, 30, 100));
++	ref_y = iris1_fp_div(ref_y, compression);
++	if (inst->controls.enc.num_b_frames)
++		ref_y *= 2;
++
++	ref_cbcr = iris1_fp_div(iris1_fp_mul(dpb_base,
++					     IRIS1_FP_CONST(0, 50, 100)),
++				 compression);
++	if (inst->controls.enc.num_b_frames)
++		ref_cbcr *= 2;
++	if (use_sys_cache) {
++		llcc_ref = ref_cbcr;
++		ref_cbcr = iris1_fp_div(ref_cbcr,
++					 IRIS1_FP_CONST(1, 50, 100));
++		llcc_ref -= ref_cbcr;
++	}
++
++	ref_write = iris1_fp_mul(dpb_base,
++		iris1_fp_div(IRIS1_FP_CONST(1, 50, 100), compression));
++	ref_overlap = iris1_fp_div(
++		iris1_fp_mul(ref_write, IRIS1_FP_CONST(0, 8, 100)),
++		IRIS1_FP_CONST(1, 8, 100));
++	original_read = iris1_fp_div(
++		iris1_fp_mul(iris1_fp_mul(original_base,
++					     IRIS1_FP_CONST(1, 50, 100)), downscale),
++		original_compression);
++
++	line = IRIS1_FP_INT(div_u64(16 * lcu_per_frame * fps, 1000000));
++	if (use_sys_cache) {
++		llcc_line = line * 2;
++		line = 0;
++	}
++
++	mese_factor = iris1_fp_div(
++		IRIS1_FP_INT(div_u64((u64)width * height * fps, 4)),
++		original_compression_y);
++	mese_factor = iris1_fp_div(
++		iris1_fp_mul(mese_factor, IRIS1_FP_CONST(2, 53, 100)),
++		IRIS1_FP_INT(1000000));
++	mese_read = mese_factor;
++	mese_read += iris1_fp_div(
++		iris1_fp_mul(dpb_base, IRIS1_FP_CONST(1, 37, 100)),
++		original_compression_y);
++	mese_write = IRIS1_FP_INT(((u64)width * height) / 512) +
++		iris1_fp_div(IRIS1_FP_INT(((u64)width * height) / 4),
++			     original_compression_y) +
++		IRIS1_FP_INT(((u64)width * height) / 128);
++	mese_write = iris1_fp_div(iris1_fp_mul(mese_write, IRIS1_FP_INT(fps)),
++				  IRIS1_FP_INT(1000000));
++
++	ddr = vsp_read + vsp_write + collocated * 2 + ref_y + ref_cbcr +
++	      ref_write + ref_overlap + original_read + line * 2 +
++	      mese_read + mese_write;
++	ddr = iris1_fp_mul(ddr, IRIS1_FP_CONST(1, 3, 100));
++	llcc = llcc_ref + llcc_line + ddr;
++
++	vote->ddr_kbps = iris1_fp_mbps_to_kbps(ddr);
++	vote->llcc_kbps = iris1_fp_mbps_to_kbps(llcc);
++}
++
++static void iris1_calculate_bw(struct venus_inst *inst,
++				unsigned long payload,
++				struct iris1_bw_vote *vote)
++{
++	if (inst->session_type == VIDC_SESSION_TYPE_DEC)
++		iris1_calculate_decoder_bw(inst, payload, vote);
++	else if (inst->session_type == VIDC_SESSION_TYPE_ENC)
++		iris1_calculate_encoder_bw(inst, vote);
++}
++
+ static int load_scale_bw(struct venus_core *core)
+ {
+ 	struct venus_inst *inst = NULL;
+ 	u32 mbs_per_sec, avg, peak, total_avg = 0, total_peak = 0;
++	bool iris1_turbo = false;
+ 
+ 	list_for_each_entry(inst, &core->instances, list) {
++		unsigned long payload = iris1_input_payload(inst);
++
++		if (IS_IRIS1(core) && !payload)
++			continue;
++
++		if (IS_IRIS1(core)) {
++			struct iris1_bw_vote vote = { 0 };
++
++			/* Downstream turns any first-16-frame session into a max vote. */
++			if (READ_ONCE(inst->iris1_ebd_count) < 16) {
++				iris1_turbo = true;
++				continue;
++			}
++
++			iris1_calculate_bw(inst, payload, &vote);
++			/*
++			 * The mainline video-mem path spans VIDEO_P0 through LLCC to
++			 * EBI.  One ICC vote must therefore cover the larger of the
++			 * downstream DDR and LLCC votes.
++			 */
++			avg = max(vote.ddr_kbps, vote.llcc_kbps);
++			peak = 0;
++			total_avg += avg;
++
++			if (READ_ONCE(inst->iris1_ebd_count) !=
++			    inst->iris1_bw_diag_ebd_count) {
++				inst->iris1_bw_diag_ebd_count =
++					READ_ONCE(inst->iris1_ebd_count);
++				dev_dbg(core->dev,
++					"sm8150-venus: dynamic bandwidth type=%u ebd=%u mbs=%u ddr=%u llcc=%u vote=%u cr_q16=%u cf_q16=%u\n",
++					inst->session_type,
++					inst->iris1_bw_diag_ebd_count,
++					load_per_instance(inst), vote.ddr_kbps,
++					vote.llcc_kbps, avg,
++					READ_ONCE(inst->iris1_ubwc_cr_q16),
++					READ_ONCE(inst->iris1_complexity_factor_q16));
++			}
++			continue;
++		}
++
+ 		mbs_per_sec = load_per_instance(inst);
+ 		mbs_to_bw(inst, mbs_per_sec, &avg, &peak);
+ 		total_avg += avg;
+ 		total_peak += peak;
++	}
+ 
+-		if (IS_IRIS1(core) &&
+-		    inst->session_type == VIDC_SESSION_TYPE_ENC &&
+-		    READ_ONCE(inst->enc_ebd_count) != inst->enc_bw_diag_ebd_count) {
+-			inst->enc_bw_diag_ebd_count = READ_ONCE(inst->enc_ebd_count);
+-			dev_info(core->dev,
+-				 "sm8150-venus: bandwidth diagnostic ebd=%u mbs=%u table_avg=%u table_peak=%u cr_q16=%u cf_q16=%u complexity=%u (vote unchanged)\n",
+-				 inst->enc_bw_diag_ebd_count, mbs_per_sec, avg, peak,
+-				 READ_ONCE(inst->enc_ubwc_cr_q16),
+-				 READ_ONCE(inst->enc_complexity_factor_q16),
+-				 READ_ONCE(inst->enc_complexity_number));
+-		}
++	if (iris1_turbo) {
++		total_avg = IRIS1_BW_MAX_KBPS;
++		total_peak = 0;
+ 	}
++	total_avg = min(total_avg, IRIS1_BW_MAX_KBPS);
+ 
+ 	/*
+ 	 * keep minimum bandwidth vote for "video-mem" path,
+@@ -1457,9 +1894,9 @@ static int load_scale_v4(struct venus_inst *inst)
+ 			return PTR_ERR(opp);
+ 		dev_pm_opp_put(opp);
+ 
+-		if (inst->sequence_out < 16)
++		if (READ_ONCE(inst->iris1_ebd_count) < 16)
+ 			freq = max_freq;
+-		if (!inst->sequence_out)
++		if (!READ_ONCE(inst->iris1_ebd_count))
+ 			dev_info(dev,
+ 				 "venus-test7: first-input clock=%lu Hz route=%u payload=%lu\n",
+ 				 freq, inst->clk_data.work_route, filled_len);
+diff --git a/drivers/media/platform/qcom/venus/vdec.c b/drivers/media/platform/qcom/venus/vdec.c
+index d754e4f26e1726fda8db6cd4ea4596ec98a39f70..292e057cf8985fcb81066b6f552e927a7a6e2593 100644
+--- a/drivers/media/platform/qcom/venus/vdec.c
++++ b/drivers/media/platform/qcom/venus/vdec.c
+@@ -1254,6 +1254,17 @@ static int vdec_start_output(struct venus_inst *inst)
+ 
+ 	venus_helper_init_instance(inst);
+ 	inst->sequence_out = 0;
++	inst->iris1_ebd_count = 0;
++	inst->iris1_recon_index = 0;
++	inst->iris1_ubwc_cr_q16 = 0;
++	inst->iris1_complexity_factor_q16 = 0;
++	inst->iris1_complexity_number = 0;
++	memset(inst->iris1_recon_cr_q16, 0,
++	       sizeof(inst->iris1_recon_cr_q16));
++	memset(inst->iris1_recon_cf_q16, 0,
++	       sizeof(inst->iris1_recon_cf_q16));
++	inst->iris1_recon_valid_mask = 0;
++	inst->iris1_bw_diag_ebd_count = 0;
+ 	inst->reconfig = false;
+ 	inst->next_buf_last = false;
+ 
+diff --git a/drivers/media/platform/qcom/venus/venc.c b/drivers/media/platform/qcom/venus/venc.c
+index 9ea3a3890fb6310cc1bdd84e667067e155fc55df..97fb6bd5ec764231c9406efc839ed175ab083ed5 100644
+--- a/drivers/media/platform/qcom/venus/venc.c
++++ b/drivers/media/platform/qcom/venus/venc.c
+@@ -1527,12 +1527,17 @@ static int venc_start_streaming(struct vb2_queue *q, unsigned int count)
+ 
+ 	venus_helper_init_instance(inst);
+ 	inst->bufreq_cache_valid = false;
+-	inst->enc_ebd_count = 0;
+-	inst->enc_recon_index = 0;
+-	inst->enc_ubwc_cr_q16 = 0;
+-	inst->enc_complexity_factor_q16 = 0;
+-	inst->enc_complexity_number = 0;
+-	inst->enc_bw_diag_ebd_count = 0;
++	inst->iris1_ebd_count = 0;
++	inst->iris1_recon_index = 0;
++	inst->iris1_ubwc_cr_q16 = 0;
++	inst->iris1_complexity_factor_q16 = 0;
++	inst->iris1_complexity_number = 0;
++	memset(inst->iris1_recon_cr_q16, 0,
++	       sizeof(inst->iris1_recon_cr_q16));
++	memset(inst->iris1_recon_cf_q16, 0,
++	       sizeof(inst->iris1_recon_cf_q16));
++	inst->iris1_recon_valid_mask = 0;
++	inst->iris1_bw_diag_ebd_count = 0;
+ 
+ 	inst->sequence_cap = 0;
+ 	inst->sequence_out = 0;

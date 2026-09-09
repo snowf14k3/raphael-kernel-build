@@ -10,8 +10,12 @@ typedef uint32_t u32;
 #define EXPORT_SYMBOL_GPL(symbol)
 #define ALIGN(x, a) (((x) + (a) - 1) & ~((a) - 1))
 #define SZ_4K 4096U
+#define EINVAL 22
 #define VIDC_SESSION_TYPE_DEC 1
 #define VIDC_SESSION_TYPE_ENC 2
+#define VIDC_BITDEPTH_8  0x00010001
+#define VIDC_BITDEPTH_10 0x00020002
+#define IS_IRIS1(core) ((core)->iris1)
 
 #define V4L2_PIX_FMT_H264 0x34363248
 #define V4L2_PIX_FMT_H264_NO_SC 0x31435641
@@ -42,8 +46,10 @@ typedef uint32_t u32;
 #define HFI_VIDEO_CODEC_DIVX (1U << 8)
 #define HFI_VIDEO_CODEC_HEVC (1U << 9)
 
+#define HFI_BUFFER_INPUT 0
 #define HFI_BUFFER_OUTPUT 1
 #define HFI_BUFFER_OUTPUT2 2
+#define HFI_COLOR_FORMAT_UBWC_BASE 0x80000000
 #define HFI_COLOR_FORMAT_NV12 0x1
 #define HFI_COLOR_FORMAT_NV21 0x2
 #define HFI_COLOR_FORMAT_NV12_UBWC 0x80000001
@@ -65,19 +71,21 @@ struct hfi_plat_caps {
 struct venus_core {
 	u32 enc_codecs;
 	u32 dec_codecs;
-	struct hfi_plat_caps caps[2];
+	bool iris1;
+	struct hfi_plat_caps caps[3];
 };
 
 struct venus_inst {
 	struct venus_core *core;
 	u32 session_type;
 	u32 hfi_codec;
+	u32 bit_depth;
 };
 
 static struct hfi_plat_caps *venus_caps_by_codec(struct venus_core *core,
 						  u32 codec, u32 domain)
 {
-	for (unsigned int i = 0; i < 2; i++)
+	for (unsigned int i = 0; i < 3; i++)
 		if (core->caps[i].codec == codec && core->caps[i].domain == domain)
 			return &core->caps[i];
 	return NULL;
@@ -88,6 +96,8 @@ static struct hfi_plat_caps *venus_caps_by_codec(struct venus_core *core,
 int main(void)
 {
 	struct venus_core core = {
+		.iris1 = true,
+		.enc_codecs = HFI_VIDEO_CODEC_H264,
 		.dec_codecs = HFI_VIDEO_CODEC_H264 | HFI_VIDEO_CODEC_HEVC,
 		.caps = {
 			{
@@ -99,10 +109,22 @@ int main(void)
 				.codec = HFI_VIDEO_CODEC_HEVC,
 				.domain = VIDC_SESSION_TYPE_DEC,
 				.fmts = {
+					{HFI_BUFFER_OUTPUT,
+					 HFI_COLOR_FORMAT_YUV420_TP10_UBWC},
 					{HFI_BUFFER_OUTPUT2, HFI_COLOR_FORMAT_NV12},
 					{HFI_BUFFER_OUTPUT2, HFI_COLOR_FORMAT_P010},
 				},
-				.num_fmts = 2,
+				.num_fmts = 3,
+			}, {
+				.codec = HFI_VIDEO_CODEC_H264,
+				.domain = VIDC_SESSION_TYPE_ENC,
+				.fmts = {
+					{HFI_BUFFER_INPUT, HFI_COLOR_FORMAT_NV12},
+					{HFI_BUFFER_INPUT, HFI_COLOR_FORMAT_NV12_UBWC},
+					{HFI_BUFFER_INPUT, HFI_COLOR_FORMAT_YUV420_TP10_UBWC},
+					{HFI_BUFFER_INPUT, HFI_COLOR_FORMAT_P010},
+				},
+				.num_fmts = 4,
 			},
 		},
 	};
@@ -110,7 +132,9 @@ int main(void)
 		.core = &core,
 		.session_type = VIDC_SESSION_TYPE_DEC,
 		.hfi_codec = HFI_VIDEO_CODEC_H264,
+		.bit_depth = VIDC_BITDEPTH_8,
 	};
+	u32 out_fmt, out2_fmt;
 
 	assert(venus_helper_get_codec(V4L2_PIX_FMT_HEVC) == HFI_VIDEO_CODEC_HEVC);
 	assert(venus_helper_get_codec(V4L2_PIX_FMT_H264_NO_SC) == HFI_VIDEO_CODEC_H264);
@@ -122,15 +146,38 @@ int main(void)
 	assert(!venus_helper_check_format(&inst, V4L2_PIX_FMT_P010));
 	inst.hfi_codec = venus_helper_get_codec(V4L2_PIX_FMT_HEVC);
 	assert(venus_helper_check_format(&inst, V4L2_PIX_FMT_P010));
+	inst.session_type = VIDC_SESSION_TYPE_ENC;
+	inst.hfi_codec = venus_helper_get_codec(V4L2_PIX_FMT_H264);
+	assert(venus_helper_check_format(&inst, V4L2_PIX_FMT_NV12));
+	assert(venus_helper_check_format(&inst, V4L2_PIX_FMT_QC08C));
+	assert(venus_helper_check_format(&inst, V4L2_PIX_FMT_QC10C));
+	assert(venus_helper_check_format(&inst, V4L2_PIX_FMT_P010));
+	assert(venus_helper_check_format(&inst, V4L2_PIX_FMT_NV21));
+	inst.session_type = VIDC_SESSION_TYPE_DEC;
+	inst.hfi_codec = venus_helper_get_codec(V4L2_PIX_FMT_HEVC);
 	assert(vdec_fmt_is_8bit(V4L2_PIX_FMT_NV12));
 	assert(vdec_fmt_is_8bit(V4L2_PIX_FMT_QC08C));
 	assert(!vdec_fmt_is_8bit(V4L2_PIX_FMT_P010));
 	assert(vdec_fmt_is_10bit(V4L2_PIX_FMT_P010));
 	assert(vdec_fmt_is_10bit(V4L2_PIX_FMT_QC10C));
 	assert(!vdec_fmt_is_10bit(V4L2_PIX_FMT_NV12));
+	assert(vdec_capture_fmt_matches_stream(&inst, V4L2_PIX_FMT_NV12));
+	assert(!vdec_capture_fmt_matches_stream(&inst, V4L2_PIX_FMT_P010));
+	inst.bit_depth = VIDC_BITDEPTH_10;
+	assert(vdec_capture_fmt_matches_stream(&inst, V4L2_PIX_FMT_NV12));
+	assert(vdec_capture_fmt_matches_stream(&inst, V4L2_PIX_FMT_P010));
+	assert(!vdec_capture_fmt_matches_stream(&inst, V4L2_PIX_FMT_QC08C));
+	assert(!venus_helper_get_out_fmts(&inst, V4L2_PIX_FMT_NV12,
+					  &out_fmt, &out2_fmt, true));
+	assert(out_fmt == HFI_COLOR_FORMAT_YUV420_TP10_UBWC);
+	assert(out2_fmt == HFI_COLOR_FORMAT_NV12);
+	core.iris1 = false;
+	assert(!vdec_capture_fmt_matches_stream(&inst, V4L2_PIX_FMT_NV12));
+	assert(vdec_capture_fmt_matches_stream(&inst, V4L2_PIX_FMT_P010));
+	core.iris1 = true;
 	assert(get_framesize_raw_p010(320, 240) == 294912);
 	assert(get_framesize_raw_p010(1920, 1080) == 6266880);
 
-	puts("PASS: HEVC exposes P010 with depth helpers and 256-byte stride");
+	puts("PASS: native P010 and SM8150 Main10-to-NV12 split output");
 	return 0;
 }

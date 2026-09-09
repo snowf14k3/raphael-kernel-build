@@ -43,6 +43,9 @@ def validate_protocol_sources(driver):
     cmds = (driver / "hfi_cmds.c").read_text(encoding="utf-8")
     helper = (driver / "hfi_helper.h").read_text(encoding="utf-8")
     messages = (driver / "hfi_msgs.c").read_text(encoding="utf-8")
+    message_header = (driver / "hfi_msgs.h").read_text(encoding="utf-8")
+    parser_source = (driver / "hfi_parser.c").read_text(encoding="utf-8")
+    hfi_source = (driver / "hfi.c").read_text(encoding="utf-8")
 
     packetizer = function(cmds, "pkt_session_set_property_4xx")
     route_case = packetizer.find("case HFI_PROPERTY_PARAM_WORK_ROUTE:")
@@ -55,9 +58,52 @@ def validate_protocol_sources(driver):
         if required not in route_body:
             raise RuntimeError(f"Incomplete HFI 4xx WORK_ROUTE packet: {required}")
 
+    constraints_case = packetizer.find(
+        "case HFI_PROPERTY_PARAM_UNCOMPRESSED_PLANE_ACTUAL_CONSTRAINTS_INFO:")
+    constraints_next = packetizer.find("case ", constraints_case + 5)
+    if constraints_case < 0 or constraints_next < constraints_case:
+        raise RuntimeError("HFI 4xx P010 constraints property is missing")
+    constraints_body = packetizer[constraints_case:constraints_next]
+    for required in ("!in->num_planes",
+                     "in->num_planes > ARRAY_SIZE(info->plane_format)",
+                     "in->num_planes * sizeof(info->plane_format[0])",
+                     "sizeof(info->buffer_type)", "sizeof(info->num_planes)"):
+        if required not in constraints_body:
+            raise RuntimeError(
+                f"HFI 4xx P010 constraints packet is incomplete: {required}")
+
     legacy = function(cmds, "pkt_session_set_property_1x")
     if "case HFI_PROPERTY_PARAM_VENC_LOW_LATENCY_MODE:" not in legacy:
         raise RuntimeError("VENC low-latency property has no generic packetizer")
+    for required in (
+            "case HFI_PROPERTY_PARAM_VENC_ASPECT_RATIO:",
+            "case HFI_PROPERTY_CONFIG_VENC_VBV_HRD_BUF_SIZE:",
+            "case HFI_PROPERTY_CONFIG_VENC_BASELAYER_PRIORITYID:",
+            "case HFI_FLIP_BOTH:"):
+        if required not in legacy:
+            raise RuntimeError(
+                f"SM8150 encoder control packetizer is incomplete: {required}")
+    for required in (
+            "#define HFI_PROPERTY_CONFIG_VENC_VBV_HRD_BUF_SIZE\t\t0x200600d",
+            "#define HFI_PROPERTY_CONFIG_VENC_BASELAYER_PRIORITYID\t\t0x200600f",
+            "#define HFI_FLIP_VERTICAL\t0x4",
+            "#define HFI_FLIP_BOTH"):
+        if required not in helper:
+            raise RuntimeError(f"SM8150 encoder HFI ABI is incomplete: {required}")
+
+    qp_range = packetizer.find(
+        "case HFI_PROPERTY_PARAM_VENC_SESSION_QP_RANGE_V2:")
+    qp_range_end = packetizer.find("case ", qp_range + 5)
+    if qp_range < 0 or qp_range_end < qp_range:
+        raise RuntimeError("HFI4 packed QP-range property is missing")
+    qp_range_body = packetizer[qp_range:qp_range_end]
+    for required in ("min_qp > 0xffffff", "range->min_qp.qp_packed = min_qp",
+                     "in->min_qp.layer_id", "in->min_qp.enable"):
+        if required not in qp_range_body:
+            raise RuntimeError(
+                f"HFI4 packed QP-range packet is incomplete: {required}")
+    if "(min_qp & 0xFF) << 8" in qp_range_body:
+        raise RuntimeError("HFI4 packetizer still replicates one QP across I/P/B")
 
     encoder_etb = function(cmds, "pkt_session_etb_encoder")
     if "pkt->data = 0" not in encoder_etb:
@@ -75,7 +121,56 @@ def validate_protocol_sources(driver):
     dispatcher = function(messages, "hfi_process_msg_packet")
     if "(!handler->pkt_sz2 || hdr->size < handler->pkt_sz2)" not in dispatcher:
         raise RuntimeError("HFI response dispatcher accepts undersized fixed packets")
-    print("PASS: HFI 4xx packets, 12-entry parser and response-size invariants")
+
+    for required in ("struct hfi_msg_session_empty_buffer_done_v4_tail",
+                     "struct hfi_frame_cr_stats", "u32 info[7]", "u32 data[]"):
+        if required not in message_header:
+            raise RuntimeError(f"VPU5 extended EBD ABI is incomplete: {required}")
+    ebd = function(messages, "hfi_session_etb_done")
+    flush = function(hfi_source, "hfi_session_flush")
+    flush_done = function(messages, "hfi_session_flush_done")
+    for required in ("pkt->shdr.hdr.size >= sizeof(*pkt)",
+                     "sizeof(struct hfi_msg_session_empty_buffer_done_v4_tail)",
+                     "32, 64, 96, 128, 160, 192, 256",
+                     "weighted_sum += ubwc_bucket_weights[i] * samples",
+                     "div64_u64(numerator, weighted_sum)",
+                     "tail->recon.complexity_number / frame_size",
+                     "inst->iris1_ebd_count", "tail->is_sync_frame"):
+        if required not in ebd:
+            raise RuntimeError(f"VPU5 extended EBD parser is incomplete: {required}")
+    if "inst->ops->buf_done" not in ebd:
+        raise RuntimeError("Common short EBD completion path was lost")
+    eos_filter = ebd.find("pkt->packet_buffer == HFI_DUMMY_EOS_BUFFER_ADDR")
+    ebd_complete = ebd.find("inst->ops->buf_done")
+    if eos_filter < 0 or ebd_complete < 0 or eos_filter > ebd_complete:
+        raise RuntimeError("Synthetic EOS EBD can consume a userspace buffer tag")
+
+    for required in ("atomic_inc_return(&inst->flush_pending)",
+                     "reinit_completion(&inst->flush_done)",
+                     "wait_session_flush(inst)"):
+        if required not in flush:
+            raise RuntimeError(f"Flush response tracking is incomplete: {required}")
+    for required in ("atomic_dec_return(&inst->flush_pending)",
+                     "complete(&inst->flush_done)",
+                     "WRITE_ONCE(inst->flush_error"):
+        if required not in flush_done:
+            raise RuntimeError(f"Flush completion accounting is incomplete: {required}")
+    if "complete(&inst->done)" in flush_done:
+        raise RuntimeError("Flush response still completes an unrelated HFI command")
+
+    alloc_mode = function(parser_source, "parse_alloc_mode")
+    caps = function(parser_source, "parse_caps")
+    raw_formats = function(parser_source, "parse_raw_formats")
+    if "mode->num_entries * sizeof(u32) + sizeof(*mode)" not in alloc_mode:
+        raise RuntimeError("parse_alloc_mode omits its property header size")
+    if "num_caps * sizeof(*cap) + sizeof(u32)" not in caps:
+        raise RuntimeError("parse_caps omits its capability-count header size")
+    if "size += sizeof(*constr) * num_planes + 2 * sizeof(u32)" not in raw_formats:
+        raise RuntimeError("parse_raw_formats does not account for each entry's planes")
+    if "i * num_planes" in raw_formats:
+        raise RuntimeError("parse_raw_formats still uses the last entry's plane count")
+
+    print("PASS: HFI4 route/P010, extended EBD, 12-entry and payload-size invariants")
 
 
 def validate_format_sources(driver):
@@ -87,9 +182,22 @@ def validate_format_sources(driver):
     source_change = function(decoder, "vdec_event_change")
     session_init = function(hfi, "hfi_session_init")
     p010_size = function(helpers, "get_framesize_raw_p010")
+    sm8150_p010_size = function(decoder, "vdec_get_framesz")
+    sm8150_p010_raw_size = function(decoder, "vdec_get_framesz_raw")
     try_fmt = function(decoder, "vdec_try_fmt_common")
     find_fmt = function(decoder, "find_format")
     enum_fmt = function(decoder, "find_format_by_index")
+    valid_fmt = function(decoder, "vdec_format_is_valid")
+    stream_fmt = function(decoder, "vdec_capture_fmt_matches_stream")
+    output_conf = function(decoder, "vdec_output_conf")
+    buf_done = function(decoder, "vdec_buf_done")
+    colorimetry = function(decoder, "vdec_update_colorimetry")
+    color_primaries = function(decoder, "vdec_hfi_color_primaries")
+    transfer_char = function(decoder, "vdec_hfi_transfer_char")
+    matrix_coefficients = function(decoder, "vdec_hfi_matrix_coefficients")
+    constraints = function(helpers, "venus_helper_set_format_constraints")
+    constraints_common = function(
+        helpers, "venus_helper_set_format_constraints_for_type")
 
     codec_sync = "inst->hfi_codec = venus_helper_get_codec(fmt->pixfmt);"
     if codec_sync not in s_fmt:
@@ -106,26 +214,107 @@ def validate_format_sources(driver):
     if "ALIGN(width * 2, 256)" not in p010_size or \
        "ALIGN(stride, 256)" not in try_fmt:
         raise RuntimeError("linear P010 does not use the required 256-byte stride")
+    for body in (sm8150_p010_size, sm8150_p010_raw_size):
+        if "IS_IRIS1(inst->core)" not in body or "size += SZ_4K" not in body:
+            raise RuntimeError("SM8150 P010 size omits the downstream 4 KiB tail padding")
     for required in ("pixmp->pixelformat = V4L2_PIX_FMT_P010",
                      "pixmp->pixelformat == V4L2_PIX_FMT_QC10C",
+                     "pixmp->width = ALIGN(pixmp->width, 128)",
+                     "pixmp->width = roundup(pixmp->width, 192)",
                      "stride = stride * 4 / 3",
                      "pixmp->height = ALIGN(pixmp->height, 16)"):
         if required not in try_fmt:
             raise RuntimeError(f"10-bit fallback/format geometry is incomplete: {required}")
-    if "vdec_fmt_is_8bit" not in find_fmt or "vdec_fmt_is_10bit" not in find_fmt:
+    if "vdec_format_is_valid(inst, &fmt[i], type, true)" not in find_fmt:
         raise RuntimeError("capture TRY/S_FMT does not enforce stream bit depth")
+    if "vdec_format_is_valid(inst, &fmt[i], type, false)" not in enum_fmt:
+        raise RuntimeError("ENUM_FMT does not use stable capability-only filtering")
     if "inst->bit_depth" in enum_fmt:
         raise RuntimeError("ENUM_FMT must stay stable across stream bit-depth changes")
+    for required in ("venus_helper_check_codec", "match_bit_depth",
+                     "vdec_capture_fmt_matches_stream"):
+        if required not in valid_fmt:
+            raise RuntimeError(f"Shared decoder format filter is incomplete: {required}")
+    for required in ("IS_IRIS1(inst->core)", "VIDC_BITDEPTH_10",
+                     "pixfmt == V4L2_PIX_FMT_NV12",
+                     "vdec_fmt_is_10bit", "vdec_fmt_is_8bit"):
+        if required not in stream_fmt:
+            raise RuntimeError(
+                f"SM8150 Main10 output compatibility is incomplete: {required}")
+    for required in ("HFI_COLOR_FORMAT_YUV420_TP10_UBWC",
+                     "HFI_COLOR_FORMAT_NV12",
+                     "10-bit NV12 output requires TP10 DPB split mode"):
+        if required not in output_conf:
+            raise RuntimeError(
+                f"SM8150 Main10 NV12 split-output check is missing: {required}")
+    keep_nv12 = source_change.find(
+        "inst->fmt_cap->pixfmt != V4L2_PIX_FMT_NV12")
+    choose_p010 = source_change.find(
+        "inst->fmt_cap = &vdec_formats[VENUS_FMT_P010]")
+    if keep_nv12 < 0 or choose_p010 < keep_nv12:
+        raise RuntimeError(
+            "IRIS1 source change does not preserve the NV12 compatibility output")
+    for required in ("data_offset > length",
+                     "bytesused > length - data_offset",
+                     "VB2_BUF_STATE_ERROR"):
+        if required not in buf_done:
+            raise RuntimeError(f"Decoder payload bounds check is incomplete: {required}")
+    last_branch = buf_done.find("if (vbuf->flags & V4L2_BUF_FLAG_LAST)")
+    clear_fallback = buf_done.find("inst->next_buf_last = false", last_branch)
+    queue_eos = buf_done.find("v4l2_event_queue_fh", last_branch)
+    if min(last_branch, clear_fallback, queue_eos) < 0 or not \
+       last_branch < clear_fallback < queue_eos:
+        raise RuntimeError("Firmware LAST does not suppress the fallback LAST buffer")
+    for required in ("FIELD_GET(BIT(29), colour_space)",
+                     "FIELD_GET(BIT(25), colour_space)",
+                     "FIELD_GET(BIT(24), colour_space)",
+                     "FIELD_GET(GENMASK(23, 16), colour_space)",
+                     "FIELD_GET(GENMASK(15, 8), colour_space)",
+                     "FIELD_GET(GENMASK(7, 0), colour_space)",
+                     "V4L2_QUANTIZATION_FULL_RANGE",
+                     "V4L2_QUANTIZATION_LIM_RANGE"):
+        if required not in colorimetry:
+            raise RuntimeError(f"HFI colorimetry unpacking is incomplete: {required}")
+    for required in ("case 1:", "case 4:", "case 5:", "case 6:",
+                     "case 7:", "case 9:", "case 11:",
+                     "V4L2_COLORSPACE_DCI_P3"):
+        if required not in color_primaries:
+            raise RuntimeError(f"HFI color-primary mapping is incomplete: {required}")
+    for required in ("case 1:", "case 7:", "case 13:", "case 16:",
+                     "V4L2_XFER_FUNC_SMPTE2084"):
+        if required not in transfer_char:
+            raise RuntimeError(f"HFI transfer-characteristic mapping is incomplete: {required}")
+    for required in ("case 1:", "case 5:", "case 6:", "case 7:",
+                     "case 9:", "case 10:",
+                     "V4L2_YCBCR_ENC_BT2020_CONST_LUM"):
+        if required not in matrix_coefficients:
+            raise RuntimeError(f"HFI matrix-coefficient mapping is incomplete: {required}")
+    if "vdec_update_colorimetry(inst, ev_data->colour_space)" not in source_change:
+        raise RuntimeError("decoder source change drops firmware colorimetry")
+    for required in ("IS_IRIS1(inst->core)",
+                     "inst->opb_fmt != HFI_COLOR_FORMAT_P010",
+                     "stride_multiple = IS_IRIS1(inst->core) ? 256 : 128",
+                     "venus_helper_set_format_constraints_for_type"):
+        if required not in constraints:
+            raise RuntimeError(f"SM8150 linear-P010 constraints are incomplete: {required}")
+    for required in ("pconstraint.buffer_type = buffer_type",
+                     "pconstraint.num_planes = 2", ".max_stride = 8192",
+                     ".min_plane_buffer_height_multiple = 32",
+                     ".min_plane_buffer_height_multiple = 16",
+                     ".buffer_alignment = 256"):
+        if required not in constraints_common:
+            raise RuntimeError(f"Shared linear-P010 constraints are incomplete: {required}")
     for required in ("V4L2_CID_MPEG_VIDEO_HEVC_PROFILE",
                      "V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN_10"):
         if required not in controls:
             raise RuntimeError(f"decoder HEVC profile control is incomplete: {required}")
 
-    print("PASS: codec, Main10/P010 negotiation and 256-byte stride invariants")
+    print("PASS: native P010, Main10 split output, colorimetry and bounded payload ABI")
 
 
 def validate_encoder_sources(driver):
     core_header = (driver / "core.h").read_text(encoding="utf-8")
+    core_source = (driver / "core.c").read_text(encoding="utf-8")
     pm = (driver / "pm_helpers.c").read_text(encoding="utf-8")
     commands = (driver / "hfi_cmds.c").read_text(encoding="utf-8")
     command_header = (driver / "hfi_cmds.h").read_text(encoding="utf-8")
@@ -135,6 +324,162 @@ def validate_encoder_sources(driver):
     helpers = (driver / "helpers.c").read_text(encoding="utf-8")
     encoder = (driver / "venc.c").read_text(encoding="utf-8")
     controls = (driver / "venc_ctrls.c").read_text(encoding="utf-8")
+    decoder_controls = (driver / "vdec_ctrls.c").read_text(encoding="utf-8")
+    hfi4_caps = (driver / "hfi_platform_v4.c").read_text(encoding="utf-8")
+
+    for required in (
+            "V4L2_CID_ROTATE", "V4L2_CID_HFLIP", "V4L2_CID_VFLIP",
+            "V4L2_CID_MPEG_VIDEO_H264_VUI_SAR_ENABLE",
+            "V4L2_CID_MPEG_VIDEO_H264_VUI_SAR_IDC",
+            "V4L2_CID_MPEG_VIDEO_H264_VUI_EXT_SAR_WIDTH",
+            "V4L2_CID_MPEG_VIDEO_H264_VUI_EXT_SAR_HEIGHT",
+            "V4L2_CID_MPEG_VIDEO_HEVC_TIER"):
+        if required not in controls:
+            raise RuntimeError(f"SM8150 standard encoder control is missing: {required}")
+    for required in (
+            "ctr->h264_i_min_qp = ctrl->val",
+            "ctr->h264_p_min_qp = ctrl->val",
+            "ctr->h264_b_min_qp = ctrl->val",
+            "ctr->hevc_i_max_qp = ctrl->val",
+            "ctr->hevc_p_max_qp = ctrl->val",
+            "ctr->hevc_b_max_qp = ctrl->val"):
+        if required not in controls:
+            raise RuntimeError(f"Generic/per-frame QP synchronization is missing: {required}")
+
+    internal_config = function(encoder, "venc_iris1_internal_config")
+    for required in (
+            "HFI_PROPERTY_CONFIG_VENC_VBV_HRD_BUF_SIZE",
+            "HFI_PROPERTY_PARAM_VENC_LOW_LATENCY_MODE",
+            "HFI_PROPERTY_PARAM_VENC_MULTI_SLICE_CONTROL",
+            "HFI_PROPERTY_CONFIG_VENC_BASELAYER_PRIORITYID",
+            "VENUS_IRIS1_CBR_MB_LIMIT", "mbs_per_frame / 10",
+            "max_avg_slice"):
+        if required not in internal_config:
+            raise RuntimeError(
+                f"SM8150 encoder internal config is incomplete: {required}")
+    set_work_mode = function(helpers, "venus_helper_set_work_mode")
+    if "HFI_PROPERTY_PARAM_VENC_LOW_LATENCY_MODE" in set_work_mode:
+        raise RuntimeError("Low latency is still incorrectly coupled to work mode")
+
+    qp_setup = function(encoder, "venc_set_properties")
+    for required in (
+            "venc_pack_qp(ctr->h264_i_min_qp",
+            "venc_pack_qp(ctr->h264_i_max_qp",
+            "venc_pack_qp(ctr->hevc_i_min_qp",
+            "venc_pack_qp(ctr->hevc_i_max_qp",
+            "quant_range_v2.min_qp.layer_id",
+            "venc_iris1_internal_config(inst, rate_control)"):
+        if required not in qp_setup:
+            raise RuntimeError(f"Encoder property setup is incomplete: {required}")
+
+    rotation = function(encoder, "venc_iris1_set_rotation")
+    for required in ("HFI_FLIP_BOTH", "HFI_ROTATE_90", "HFI_ROTATE_270",
+                     "HFI_PROPERTY_PARAM_FRAME_SIZE", "inst->height",
+                     "inst->width"):
+        if required not in rotation:
+            raise RuntimeError(f"SM8150 rotation/flip setup is incomplete: {required}")
+
+    profile_level = function(helpers, "venus_helper_set_profile_level")
+    for required in ("V4L2_MPEG_VIDEO_HEVC_TIER_HIGH",
+                     "HFI_HEVC_TIER_HIGH0", "HFI_HEVC_TIER_MAIN", "<< 28"):
+        if required not in profile_level:
+            raise RuntimeError(f"SM8150 HEVC tier packing is incomplete: {required}")
+
+    encoder_formats = encoder[encoder.find(
+        "static const struct venus_format venc_formats[]"):
+        encoder.find("static int venc_v4l2_to_hfi")]
+    for required in ("V4L2_PIX_FMT_NV12", "V4L2_PIX_FMT_NV21",
+                     "V4L2_PIX_FMT_QC08C", "V4L2_PIX_FMT_QC10C",
+                     "V4L2_PIX_FMT_P010"):
+        if required not in encoder_formats:
+            raise RuntimeError(
+                f"SM8150 encoder raw-format table is incomplete: {required}")
+
+    check_format = function(helpers, "venus_helper_check_format")
+    encoder_input = check_format.find(
+        "inst->session_type == VIDC_SESSION_TYPE_ENC")
+    input_caps = check_format.find("HFI_BUFFER_INPUT", encoder_input)
+    nv21_fallback = check_format.find("HFI_COLOR_FORMAT_NV21", input_caps)
+    decoder_output = check_format.find("HFI_BUFFER_OUTPUT", nv21_fallback)
+    if min(encoder_input, input_caps, nv21_fallback, decoder_output) < 0 or \
+       not encoder_input < input_caps < nv21_fallback < decoder_output:
+        raise RuntimeError(
+            "Raw-format capability filtering does not distinguish encoder input from decoder output")
+
+    find_encoder_fmt = function(encoder, "find_format")
+    enum_encoder_fmt = function(encoder, "find_format_by_index")
+    for body in (find_encoder_fmt, enum_encoder_fmt):
+        if "venus_helper_check_format" not in body:
+            raise RuntimeError("Encoder raw format enumeration bypasses HFI capabilities")
+
+    framesz = function(encoder, "venc_get_framesz")
+    for required in ("V4L2_PIX_FMT_NV21", "V4L2_PIX_FMT_QC08C",
+                     "V4L2_PIX_FMT_QC10C", "V4L2_PIX_FMT_P010",
+                     "ALIGN(roundup(width, 192) * 4 / 3, 256)",
+                     "DIV_ROUND_UP(width, 48)",
+                     "uv_stride * uv_scanlines + SZ_4K"):
+        if required not in framesz:
+            raise RuntimeError(
+                f"SM8150 encoder raw layout is incomplete: {required}")
+
+    try_encoder_fmt = function(encoder, "venc_try_fmt_common")
+    if "venc_get_stride(pixmp->pixelformat" not in try_encoder_fmt:
+        raise RuntimeError("Encoder bytesperline is not selected by raw format")
+
+    set_encoder_fmt = function(encoder, "venc_s_fmt")
+    for required in ("inst->bit_depth = VIDC_BITDEPTH_10",
+                     "inst->bit_depth = VIDC_BITDEPTH_8",
+                     "inst->hfi_codec = venus_helper_get_codec(fmt->pixfmt)"):
+        if required not in set_encoder_fmt:
+            raise RuntimeError(f"Encoder format state is incomplete: {required}")
+
+    input_constraints = function(
+        helpers, "venus_helper_set_input_format_constraints")
+    for required in ("VIDC_SESSION_TYPE_ENC", "V4L2_PIX_FMT_P010",
+                     "HFI_BUFFER_INPUT, 256"):
+        if required not in input_constraints:
+            raise RuntimeError(
+                f"SM8150 encoder P010 constraints are incomplete: {required}")
+
+    init_encoder = function(encoder, "venc_init_session")
+    color = init_encoder.find("venus_helper_set_color_format")
+    constraints = init_encoder.find(
+        "venus_helper_set_input_format_constraints", color)
+    properties = init_encoder.find("venc_set_properties", constraints)
+    if min(color, constraints, properties) < 0 or not color < constraints < properties:
+        raise RuntimeError(
+            "SM8150 encoder input constraints are not sent after color selection")
+
+    encoder_cmd = function(encoder, "venc_encoder_cmd")
+    drain_send = encoder_cmd.find("hfi_session_process_buf(inst, &fdata)")
+    drain_state = encoder_cmd.find("inst->enc_state = VENUS_ENC_STATE_DRAIN", drain_send)
+    success_guard = encoder_cmd.rfind("if (!ret)", drain_send, drain_state)
+    if min(drain_send, drain_state, success_guard) < 0 or not drain_send < success_guard < drain_state:
+        raise RuntimeError("Encoder enters DRAIN after a failed synthetic EOS ETB")
+
+    for required in ("u32 max_hq_mbs_per_frame;", "u32 max_hq_mbs_per_sec;",
+                     "u32 fw_cycles;", "u32 fw_vpp_cycles;"):
+        if required not in core_header:
+            raise RuntimeError(f"SM8150 clock resource is missing: {required}")
+    sm8150_res = core_source[core_source.find(
+        "static const struct venus_resources sm8150_res"):
+        core_source.find("static const struct freq_tbl sc7180_freq_table")]
+    for required in (".max_hq_mbs_per_frame = 8160",
+                     ".max_hq_mbs_per_sec = 244800",
+                     ".fw_cycles = 760000", ".fw_vpp_cycles = 166667"):
+        if required not in sm8150_res:
+            raise RuntimeError(f"SM8150 downstream clock constant differs: {required}")
+
+    power_save = function(pm, "power_save_mode_enable")
+    for required in ("mbs_per_frame > res->max_hq_mbs_per_frame",
+                     "mbs_per_sec > res->max_hq_mbs_per_sec",
+                     "V4L2_MPEG_VIDEO_BITRATE_MODE_CQ"):
+        if required not in power_save:
+            raise RuntimeError(f"SM8150 HQ/LP selection is incomplete: {required}")
+    hq_limit = power_save.find("mbs_per_frame > res->max_hq_mbs_per_frame")
+    cq_override = power_save.find("V4L2_MPEG_VIDEO_BITRATE_MODE_CQ")
+    if hq_limit < 0 or cq_override < hq_limit:
+        raise RuntimeError("CQ must override the SM8150 forced low-power threshold")
 
     core_get = function(pm, "core_get_iris1")
     llcc_enable = function(pm, "iris1_llcc_enable")
@@ -222,7 +567,7 @@ def validate_encoder_sources(driver):
                      "IS_IRIS1(inst->core) ? HFI_LAYER_ID_ALL : 0",
                      "HFI_PROPERTY_PARAM_VENC_DISABLE_RC_TIMESTAMP",
                      "en.enable = ctr->rc_enable",
-                     "venus-test15: encoder rc timestamp disable=%u",
+                     "venus-sm8150: encoder rc timestamp disable=%u",
                      "HFI_PROPERTY_PARAM_VENC_BITRATE_SAVINGS",
                      "HFI_PROPERTY_PARAM_NAL_STREAM_FORMAT_SELECT",
                      "HFI_NAL_FORMAT_STARTCODES",
@@ -299,6 +644,10 @@ def validate_encoder_sources(driver):
             raise RuntimeError(
                 f"Firmware buffer requirements are mutated in the cache: {forbidden}")
 
+    s_fmt = function(encoder, "venc_s_fmt")
+    if "inst->bufreq_cache_valid = false" not in s_fmt:
+        raise RuntimeError("Encoder S_FMT does not invalidate cached requirements")
+
     get_bufreq = function(helpers, "venus_helper_get_bufreq")
     for required in ("IS_IRIS1(inst->core)",
                      "inst->session_type == VIDC_SESSION_TYPE_ENC",
@@ -307,10 +656,24 @@ def validate_encoder_sources(driver):
             raise RuntimeError(f"VPU5 requirements cache use is incomplete: {required}")
 
     queue_setup = function(encoder, "venc_queue_setup")
-    iris_queue = queue_setup.find("if (IS_IRIS1(core))")
-    legacy_query = queue_setup.find("venc_out_num_buffers(inst, &num)")
-    if min(iris_queue, legacy_query) < 0 or iris_queue > legacy_query:
-        raise RuntimeError("VPU5 queue setup still performs an early firmware GET")
+    for required in ("venus_helper_get_bufreq(inst, type, &iris1_req)",
+                     "sizes[0] = iris1_req.size",
+                     "hfi_bufreq_get_count_min(&iris1_req, ver)",
+                     "hfi_bufreq_get_count_min_host(&iris1_req, ver)",
+                     "firmware-defined"):
+        if required not in queue_setup:
+            raise RuntimeError(
+                f"VPU5 external queue contract is incomplete: {required}")
+    external_req = function(encoder, "venc_iris1_validate_external_req")
+    for required in ("req->type != type", "!req->size",
+                     "!req->count_actual", "!count_min",
+                     "req->count_actual < count_min",
+                     "req->count_actual > VIDEO_MAX_FRAME",
+                     "count_host > VIDEO_MAX_FRAME",
+                     "!is_power_of_2(req->alignment)"):
+        if required not in external_req:
+            raise RuntimeError(
+                f"VPU5 external requirement validation is incomplete: {required}")
 
     volatile_ctrl = function(controls, "venc_op_g_volatile_ctrl")
     iris_ctrl = volatile_ctrl.find("if (IS_IRIS1(inst->core))")
@@ -360,12 +723,30 @@ def validate_encoder_sources(driver):
             raise RuntimeError(
                 f"IRIS1 internal DMA size/address guard is incomplete: {required}")
 
+    intbuf_4xx_match = re.search(
+        r"static const unsigned int intbuf_types_4xx\[\]\s*=\s*\{(.*?)\};",
+        helpers, re.DOTALL)
+    if not intbuf_4xx_match:
+        raise RuntimeError("HFI4 internal-buffer type list is missing")
+    if "HFI_BUFFER_INTERNAL_RECON" in intbuf_4xx_match.group(1):
+        raise RuntimeError(
+            "RECON is vendor metadata, not a host DMA internal buffer")
+
     process_buf = function(helpers, "session_process_buf")
     address_guard = process_buf.find("upper_32_bits(buf->dma_addr)")
-    address_copy = process_buf.find("fdata.device_addr = buf->dma_addr")
+    address_copy = process_buf.find("fdata.device_addr = dma_addr")
     if min(address_guard, address_copy) < 0 or address_guard > address_copy:
         raise RuntimeError(
             "Frame IOVA is truncated into the HFI field before validation")
+    for required in ("dma_addr > U32_MAX - (buf->size - 1)",
+                     "fdata.offset > fdata.alloc_len",
+                     "fdata.filled_len > fdata.alloc_len - fdata.offset",
+                     "venus_helper_get_bufreq(inst, fdata.buffer_type, &req)",
+                     "fdata.alloc_len < req.size",
+                     "!IS_ALIGNED(fdata.device_addr, req.alignment)"):
+        if required not in process_buf:
+            raise RuntimeError(
+                f"Encoder frame DMA validation is incomplete: {required}")
     for required in ("queue %s tag=%u", "alloc=%u filled=%u offset=%u"):
         if required not in process_buf:
             raise RuntimeError(
@@ -391,14 +772,10 @@ def validate_encoder_sources(driver):
             raise RuntimeError(f"Internal-buffer cleanup diagnostics are incomplete: {required}")
 
     intbuf_alloc = function(helpers, "venus_helper_intbufs_alloc")
-    protocol_gate = intbuf_alloc.find(
-        "inst->enc_test_stage == VENUS_IRIS1_ENC_STAGE_PROTOCOL")
-    zero_buffers = intbuf_alloc.find("arr_sz = 0", protocol_gate)
-    prefix_gate = intbuf_alloc.find(
-        "inst->enc_test_stage <= VENUS_IRIS1_ENC_STAGE_INTERNAL")
-    if min(protocol_gate, zero_buffers, prefix_gate) < 0 or \
-       not protocol_gate < zero_buffers < prefix_gate:
-        raise RuntimeError("Stage 0 is not independently protected from internal DMA")
+    for forbidden in ("enc_test_stage", "VENUS_IRIS1_ENC_STAGE"):
+        if forbidden in intbuf_alloc:
+            raise RuntimeError(
+                f"Product encoder allocator still contains a checkpoint gate: {forbidden}")
 
     start = function(encoder, "venc_start_streaming")
     stop = function(encoder, "venc_stop_streaming")
@@ -411,56 +788,70 @@ def validate_encoder_sources(driver):
     start_preflight = start.find("venc_iris1_preflight(inst)")
     start_requirements = start.find("venus_helper_cache_bufreqs(inst)")
     start_counts = start.find("venus_helper_set_num_bufs")
-    start_bufsize = start.find("venus_helper_set_bufsize")
     final_requirements = start.find("venus_helper_cache_bufreqs(inst)",
                                     start_requirements + 1)
+    output_size = start.find("venus_helper_set_bufsize(inst, inst->output_buf_size")
+    output_type = start.find("HFI_BUFFER_OUTPUT", output_size)
     start_verify = start.find("venc_verify_conf(inst)")
-    start_stage_gate = start.find("venc_iris1_stage_preflight(inst)")
     start_hw = start.find("venus_helper_vb2_start_streaming(inst)")
     start_pin = start.find("inst->enc_pm_active = true")
     ordered = (start_get, start_rotation, start_properties, start_route,
                start_mode, start_core, start_preflight, start_requirements, start_counts,
-               start_bufsize, final_requirements, start_verify,
-               start_stage_gate, start_hw, start_pin)
+               final_requirements, output_size, output_type, start_verify,
+               start_hw, start_pin)
     if min(ordered) < 0 or list(ordered) != sorted(ordered):
         raise RuntimeError("IRIS1 encoder setup/DMA/PM ordering differs from audited sequence")
+    if "0x20100c" not in start and "BUFFER_SIZE_MINIMUM" not in start:
+        raise RuntimeError(
+            "Encoder output-size property is not tied to the audited vendor wire contract")
+    verify_conf = function(encoder, "venc_verify_conf")
+    for required in ("inst->output_buf_size < bufreq.size",
+                     "inst->input_buf_size < bufreq.size"):
+        if required not in verify_conf:
+            raise RuntimeError(
+                f"Encoder final buffer requirement is not enforced: {required}")
     release_core = start.find("venus_pm_release_core(inst)", start.find("error:"))
     error_pm_put = start.find("venc_pm_put(inst, false)", start.find("error:"))
     if min(release_core, error_pm_put) < 0 or release_core > error_pm_put:
         raise RuntimeError("IRIS1 start error suspends power before releasing core ownership")
+    for required in ("inst->iris1_ebd_count = 0",
+                     "inst->iris1_recon_index = 0",
+                     "inst->iris1_ubwc_cr_q16 = 0",
+                     "inst->iris1_complexity_factor_q16 = 0",
+                     "inst->iris1_complexity_number = 0",
+                     "inst->iris1_bw_diag_ebd_count = 0"):
+        if required not in start:
+            raise RuntimeError(f"Encoder per-stream statistics are not reset: {required}")
 
-    stage_preflight = function(encoder, "venc_iris1_stage_preflight")
-    for required in ("venus_iris1_encoder_stage",
-                     "VENUS_IRIS1_ENC_STAGE_FULL", "return -EACCES",
-                     "inst->enc_test_stage = stage"):
-        if required not in stage_preflight:
-            raise RuntimeError(f"Encoder stage gate is incomplete: {required}")
-    for required in ("VENUS_IRIS1_ENC_STAGE_PROTOCOL",
-                     "VENUS_IRIS1_ENC_STAGE_INTERNAL",
-                     "VENUS_IRIS1_ENC_STAGE_LOAD",
-                     "VENUS_IRIS1_ENC_STAGE_START",
-                     "VENUS_IRIS1_ENC_STAGE_CAPTURE",
-                     "VENUS_IRIS1_ENC_STAGE_FULL",
-                     "u8 enc_test_stage"):
-        if required not in core_header:
-            raise RuntimeError(f"Encoder checkpoint state is incomplete: {required}")
+    buf_done = function(encoder, "venc_buf_done")
+    for required in ("data_offset > length",
+                     "bytesused > length - data_offset",
+                     "vb2_set_plane_payload(vb, 0, bytesused)",
+                     "VB2_BUF_STATE_ERROR"):
+        if required not in buf_done:
+            raise RuntimeError(
+                f"Encoder FBD payload validation is incomplete: {required}")
+
+    for forbidden in ("venus_iris1_encoder_stage", "iris1_encoder_stage",
+                      "VENUS_IRIS1_ENC_STAGE", "enc_test_stage",
+                      "venc_iris1_stage_preflight"):
+        if forbidden in encoder or forbidden in helpers or forbidden in core_header:
+            raise RuntimeError(
+                f"Product encoder path still contains a checkpoint artifact: {forbidden}")
 
     helper_start = function(helpers, "venus_helper_vb2_start_streaming")
     internal = helper_start.find("venus_helper_intbufs_alloc(inst)")
-    internal_stop = helper_start.find("VENUS_IRIS1_ENC_STAGE_INTERNAL")
     load = helper_start.find("hfi_session_load_res(inst)")
-    load_stop = helper_start.find("VENUS_IRIS1_ENC_STAGE_LOAD")
     hw_start = helper_start.find("hfi_session_start(inst)")
-    start_stop = helper_start.find("VENUS_IRIS1_ENC_STAGE_START")
-    checkpoints = (internal, internal_stop, load, load_stop,
-                   hw_start, start_stop)
+    checkpoints = (internal, load, hw_start)
     if min(checkpoints) < 0 or list(checkpoints) != sorted(checkpoints):
-        raise RuntimeError("Encoder internal/LOAD/START checkpoints are out of order")
-    for required in ("staged STOP ret=%d", "staged RELEASE_RESOURCES ret=%d",
-                     "staged internal cleanup ret=%d"):
+        raise RuntimeError("Encoder internal/LOAD/START sequence is out of order")
+    for required in ("failed to unload session during stream-start unwind",
+                     "failed to unregister buffers during stream-start unwind",
+                     "failed to free internal buffers during stream-start unwind"):
         if required not in helper_start:
             raise RuntimeError(
-                f"Encoder staged rollback diagnostics are incomplete: {required}")
+                f"Encoder rollback diagnostics are incomplete: {required}")
 
     unload = function(hfi, "hfi_session_unload_res")
     for required in ("IS_IRIS1(inst->core)", "INST_LOAD_RESOURCES",
@@ -468,7 +859,7 @@ def validate_encoder_sources(driver):
         if required not in unload:
             raise RuntimeError(
                 f"IRIS1 LOAD-only rollback is not permitted safely: {required}")
-    load_rollback = helper_start.find("hfi_session_unload_res(inst)", load_stop)
+    load_rollback = helper_start.find("hfi_session_unload_res(inst)", load)
     free_after_unload = helper_start.find("venus_helper_intbufs_free(inst)",
                                           load_rollback)
     if min(load_rollback, free_after_unload) < 0 or load_rollback > free_after_unload:
@@ -476,10 +867,10 @@ def validate_encoder_sources(driver):
             "LOAD-only rollback frees internal DMA before releasing firmware resources")
 
     device_run = function(helpers, "venus_helper_m2m_device_run")
-    for required in ("VENUS_IRIS1_ENC_STAGE_CAPTURE",
-                     "VENUS_IRIS1_ENC_STAGE_FULL"):
+    for required in ("v4l2_m2m_for_each_dst_buf_safe",
+                     "v4l2_m2m_for_each_src_buf_safe"):
         if required not in device_run:
-            raise RuntimeError(f"Encoder user-DMA checkpoint is missing: {required}")
+            raise RuntimeError(f"Encoder user-DMA submission is missing: {required}")
     stop_hw = stop.find("venus_helper_vb2_stop_streaming(q)")
     stop_put = stop.find("venc_pm_put(inst, true)")
     if min(stop_hw, stop_put) < 0 or stop_hw > stop_put:
@@ -492,6 +883,54 @@ def validate_encoder_sources(driver):
     if min(get_power, skip, session_end) < 0 or not get_power < skip < session_end:
         raise RuntimeError("SESSION_END may still be sent when encoder power is unavailable")
 
+    for required in ("IS_IRIS1(inst->core)", "ALIGN(width, 128)",
+                     "ALIGN(height, 32)",
+                     "ALIGN((height + 1) >> 1, 16)",
+                     "+ SZ_4K", "SZ_4K"):
+        if required not in framesz:
+            raise RuntimeError(f"Vendor-exact SM8150 NV12 sizing is incomplete: {required}")
+
+    queue_init = function(encoder, "m2m_queue_init")
+    for required in ("IS_IRIS1(inst->core)",
+                     "src_vq->bidirectional = 1"):
+        if required not in queue_init:
+            raise RuntimeError(f"SM8150 encoder DMA direction is incomplete: {required}")
+    for forbidden in ("iris1_encoder_vendor_nv12",
+                      "iris1_encoder_bidirectional",
+                      "enc_vendor_nv12", "enc_dma_bidirectional"):
+        if forbidden in encoder or forbidden in core_header:
+            raise RuntimeError(
+                f"Required SM8150 DMA/layout policy is still optional: {forbidden}")
+
+    for required in ("iris1_ebd_count", "iris1_recon_index",
+                     "iris1_ubwc_cr_q16", "iris1_complexity_factor_q16",
+                     "iris1_complexity_number", "iris1_recon_cr_q16",
+                     "iris1_recon_cf_q16", "iris1_recon_valid_mask",
+                     "iris1_bw_diag_ebd_count"):
+        if required not in core_header:
+            raise RuntimeError(f"VPU5 EBD/BW instance state is missing: {required}")
+    load_bw = function(pm, "load_scale_bw")
+    for required in ("IRIS1_BW_MAX_KBPS",
+                     "READ_ONCE(inst->iris1_ebd_count) < 16",
+                     "iris1_calculate_bw(inst, payload, &vote)",
+                     "max(vote.ddr_kbps, vote.llcc_kbps)",
+                     "READ_ONCE(inst->iris1_ebd_count)"):
+        if required not in load_bw:
+            raise RuntimeError(f"SM8150 dynamic BW path is incomplete: {required}")
+    decoder_bw = function(pm, "iris1_calculate_decoder_bw")
+    encoder_bw = function(pm, "iris1_calculate_encoder_bw")
+    for required in ("HFI_VIDEO_CODEC_HEVC", "HFI_VIDEO_CODEC_VP9",
+                     "iris1_dynamic_stats(inst, &cr_q16, &cf_q16)",
+                     "IRIS1_FP_CONST(1, 3, 100)"):
+        if required not in decoder_bw:
+            raise RuntimeError(f"SM8150 decoder BW model is incomplete: {required}")
+    for required in ("controls.enc.bitrate", "controls.enc.num_b_frames",
+                     "iris1_dynamic_stats(inst, &cr_q16, NULL)",
+                     "original_base", "mese_read", "mese_write",
+                     "IRIS1_FP_CONST(1, 3, 100)"):
+        if required not in encoder_bw:
+            raise RuntimeError(f"SM8150 encoder BW model is incomplete: {required}")
+
     dynamic = function(controls, "venc_op_s_ctrl")
     if "IS_IRIS1(inst->core) ?\n\t\t\t\t\t     HFI_LAYER_ID_ALL : 0" not in dynamic:
         raise RuntimeError("Dynamic VPU5 bitrate update does not address all layers")
@@ -499,6 +938,40 @@ def validate_encoder_sources(driver):
                      "V4L2_MPEG_VIDEO_H264_LEVEL_5_1"):
         if required not in controls:
             raise RuntimeError(f"SM8150 encoder defaults are incomplete: {required}")
+
+    for required in (
+            "{ HFI_H264_LEVEL_52, V4L2_MPEG_VIDEO_H264_LEVEL_5_2 }",
+            "vp8_levels", "HFI_VPX_PROFILE_MAIN",
+            "venus_helper_get_profile_mask",
+            "venus_helper_get_max_level"):
+        if required not in helpers:
+            raise RuntimeError(
+                f"SM8150 profile/level translation is incomplete: {required}")
+    vp8_get = function(helpers, "v4l2_id_profile_level")
+    for required in ("case HFI_VIDEO_CODEC_VP8:", "if (iris1)",
+                     "find_v4l2_id(hfi_lvl, vp8_levels"):
+        if required not in vp8_get:
+            raise RuntimeError(
+                f"SM8150 VP8 version decode is incomplete: {required}")
+    set_profile = function(helpers, "venus_helper_set_profile_level")
+    for required in ("inst->hfi_codec == HFI_VIDEO_CODEC_VP8",
+                     "pl.profile = HFI_VPX_PROFILE_MAIN",
+                     "pl.level = find_hfi_id(profile, vp8_levels"):
+        if required not in set_profile:
+            raise RuntimeError(
+                f"SM8150 VP8 version encode is incomplete: {required}")
+    if "{HFI_VP9_PROFILE_P0, 200}" in hfi4_caps or \
+            "{HFI_VP9_PROFILE_P2_10B, 200}" in hfi4_caps:
+        raise RuntimeError("HFI4 VP9 still advertises an unmappable literal level")
+    if hfi4_caps.count("HFI_VP9_LEVEL_61") < 4:
+        raise RuntimeError("HFI4 VP9 level 6.1 is missing from full/lite caps")
+    for source_name, source in (("encoder", controls),
+                                ("decoder", decoder_controls)):
+        for required in ("venus_helper_get_profile_mask",
+                         "venus_helper_get_max_level"):
+            if required not in source:
+                raise RuntimeError(
+                    f"{source_name} controls ignore firmware capability {required}")
 
     transform_case = dynamic[dynamic.find(
         "case V4L2_CID_MPEG_VIDEO_H264_8X8_TRANSFORM:"):]
@@ -510,9 +983,16 @@ def validate_encoder_sources(driver):
     for required in ("u32 h264_8x8_default = 1",
                      "h264_8x8_default = 0",
                      "h264_8x8_default);",
-                     "venus-test11: encoder control defaults failed"):
+                     "venus-sm8150: encoder control defaults failed"):
         if required not in control_init:
             raise RuntimeError(f"SM8150 8x8 control default fix is incomplete: {required}")
+
+    i_period = control_init.find("V4L2_CID_MPEG_VIDEO_H264_I_PERIOD")
+    if i_period < 0:
+        raise RuntimeError("Non-IRIS1 H.264 I-period compatibility control is missing")
+    i_period_guard = control_init.rfind("if (!IS_IRIS1(inst->core))", 0, i_period)
+    if i_period_guard < 0 or i_period - i_period_guard > 256:
+        raise RuntimeError("IRIS1 still advertises the unsupported H.264 I-period control")
 
     created_controls = set(re.findall(
         r"v4l2_ctrl_new_std(?:_menu|_compound)?\s*\("
@@ -528,7 +1008,7 @@ def validate_encoder_sources(driver):
             "Encoder defaults call an unhandled s_ctrl: " +
             ", ".join(sorted(missing_controls)))
 
-    print("PASS: SM8150 syscache, encoder protocol, PM pin and safety-gate invariants")
+    print("PASS: SM8150 syscache, encoder protocol/DMA/EBD, PM and safety invariants")
 
 
 def validate_panel_sources(kernel):
@@ -615,10 +1095,88 @@ def main():
         "helpers.c": [
             "venus_helper_get_codec", "venus_helper_check_codec",
             "to_hfi_raw_fmt", "find_fmt_from_caps",
-            "venus_helper_check_format", "get_framesize_raw_p010",
+            "venus_helper_check_format", "venus_helper_get_out_fmts",
+            "get_framesize_raw_p010",
         ],
-        "vdec.c": ["vdec_fmt_is_8bit", "vdec_fmt_is_10bit"],
+        "vdec.c": [
+            "vdec_fmt_is_8bit", "vdec_fmt_is_10bit",
+            "vdec_capture_fmt_matches_stream",
+        ],
     }
+    bandwidth_source = (driver / "pm_helpers.c").read_text(encoding="utf-8")
+    bandwidth_start = bandwidth_source.find("#define IRIS1_BW_MAX_KBPS")
+    bandwidth_end = bandwidth_source.find("static int load_scale_bw",
+                                          bandwidth_start)
+    if bandwidth_start < 0 or bandwidth_end < bandwidth_start:
+        raise RuntimeError("SM8150 dynamic bandwidth implementation is missing")
+    bandwidth_functions = bandwidth_source[bandwidth_start:bandwidth_end]
+    bandwidth_harness = (repo / "tests/iris1-bandwidth.c").read_text(
+        encoding="utf-8")
+    bandwidth_harness = bandwidth_harness.replace(
+        "/* ACTUAL_DRIVER_FUNCTIONS */", bandwidth_functions)
+    with tempfile.TemporaryDirectory(prefix="venus-iris1-bandwidth-") as directory:
+        target = Path(directory)
+        source = target / "iris1-bandwidth.c"
+        executable = target / (
+            "iris1-bandwidth.exe" if os.name == "nt" else "iris1-bandwidth")
+        source.write_text(bandwidth_harness, encoding="utf-8")
+        subprocess.run([args.cc, "-std=gnu11", "-O1", "-g", "-Wall", "-Wextra",
+                        "-Werror", str(source), "-o", str(executable)], check=True)
+        subprocess.run([str(executable)], check=True)
+
+    clock_function = function(bandwidth_source, "calculate_inst_freq")
+    clock_harness = (repo / "tests/iris1-clock.c").read_text(encoding="utf-8")
+    clock_harness = clock_harness.replace(
+        "/* ACTUAL_DRIVER_FUNCTION */", clock_function)
+    with tempfile.TemporaryDirectory(prefix="venus-iris1-clock-") as directory:
+        target = Path(directory)
+        source = target / "iris1-clock.c"
+        executable = target / (
+            "iris1-clock.exe" if os.name == "nt" else "iris1-clock")
+        source.write_text(clock_harness, encoding="utf-8")
+        subprocess.run([args.cc, "-std=gnu11", "-O1", "-g", "-Wall", "-Wextra",
+                        "-Werror", str(source), "-o", str(executable)], check=True)
+        subprocess.run([str(executable)], check=True)
+
+    encoder_source = (driver / "venc.c").read_text(encoding="utf-8")
+    raw_layout_functions = "\n\n".join((
+        function(encoder_source, "venc_get_framesz"),
+        function(encoder_source, "venc_get_stride"),
+    ))
+    raw_layout_harness = (repo / "tests/iris1-raw-layout.c").read_text(
+        encoding="utf-8")
+    raw_layout_harness = raw_layout_harness.replace(
+        "/* ACTUAL_DRIVER_FUNCTIONS */", raw_layout_functions)
+    with tempfile.TemporaryDirectory(prefix="venus-iris1-raw-layout-") as directory:
+        target = Path(directory)
+        source = target / "iris1-raw-layout.c"
+        executable = target / (
+            "iris1-raw-layout.exe" if os.name == "nt" else "iris1-raw-layout")
+        source.write_text(raw_layout_harness, encoding="utf-8")
+        subprocess.run([args.cc, "-std=gnu11", "-O1", "-g", "-Wall", "-Wextra",
+                        "-Werror", str(source), "-o", str(executable)], check=True)
+        subprocess.run([str(executable)], check=True)
+
+    encoder_control_functions = "\n\n".join((
+        function(encoder_source, "venc_pack_qp"),
+        function(encoder_source, "venc_iris1_h264_sar"),
+        function(encoder_source, "venc_iris1_internal_config"),
+    ))
+    encoder_control_harness = (
+        repo / "tests/iris1-encoder-controls.c").read_text(encoding="utf-8")
+    encoder_control_harness = encoder_control_harness.replace(
+        "/* ACTUAL_DRIVER_FUNCTIONS */", encoder_control_functions)
+    with tempfile.TemporaryDirectory(prefix="venus-iris1-encoder-controls-") as directory:
+        target = Path(directory)
+        source = target / "iris1-encoder-controls.c"
+        executable = target / (
+            "iris1-encoder-controls.exe" if os.name == "nt" else
+            "iris1-encoder-controls")
+        source.write_text(encoder_control_harness, encoding="utf-8")
+        subprocess.run([args.cc, "-std=gnu11", "-O1", "-g", "-Wall", "-Wextra",
+                        "-Werror", str(source), "-o", str(executable)], check=True)
+        subprocess.run([str(executable)], check=True)
+
     for name, sources in [("power", power_sources), ("hfi", hfi_sources),
                           ("queues", queue_sources),
                           ("session", session_sources),

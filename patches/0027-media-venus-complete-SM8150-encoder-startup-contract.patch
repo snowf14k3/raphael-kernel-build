@@ -1,0 +1,382 @@
+From f4fd6db203f92b630db43016d2135f3cb61f0e8b Mon Sep 17 00:00:00 2001
+From: snowf14k3 <60956553+snowf14k3@users.noreply.github.com>
+Date: Wed, 9 Sep 2026 20:20:00 +0800
+Subject: [PATCH] media: venus: complete SM8150 encoder startup contract
+
+Follow the downstream SM8150 encoder start contract by sending the
+negotiated compressed-output size on wire property 0x20100c after the
+final buffer-requirements query.
+
+Remove the completed checkpoint scaffolding and make the audited IRIS1
+raw layout and DMA direction mandatory whenever the explicit encoder gate
+is enabled.
+
+Signed-off-by: snowf14k3 <60956553+snowf14k3@users.noreply.github.com>
+---
+ drivers/media/platform/qcom/venus/core.h    |  24 -----
+ drivers/media/platform/qcom/venus/helpers.c | 101 +++-----------------
+ drivers/media/platform/qcom/venus/venc.c    |  75 +++------------
+ 3 files changed, 29 insertions(+), 171 deletions(-)
+
+diff --git a/drivers/media/platform/qcom/venus/core.h b/drivers/media/platform/qcom/venus/core.h
+index 186eaea12efe..31017cc8780b 100644
+--- a/drivers/media/platform/qcom/venus/core.h
++++ b/drivers/media/platform/qcom/venus/core.h
+@@ -403,24 +403,6 @@ enum venus_enc_state {
+ 	VENUS_ENC_STATE_DRAIN		= 4,
+ };
+ 
+-/*
+- * SM8150 encoder bring-up checkpoints.  Values below FULL deliberately stop
+- * before the next operation so one kernel can isolate a hard lock without
+- * repeatedly rebuilding it.
+- */
+-enum venus_iris1_enc_stage {
+-	VENUS_IRIS1_ENC_STAGE_PROTOCOL,
+-	VENUS_IRIS1_ENC_STAGE_SCRATCH,
+-	VENUS_IRIS1_ENC_STAGE_SCRATCH_1,
+-	VENUS_IRIS1_ENC_STAGE_SCRATCH_2,
+-	VENUS_IRIS1_ENC_STAGE_PERSIST,
+-	VENUS_IRIS1_ENC_STAGE_INTERNAL,
+-	VENUS_IRIS1_ENC_STAGE_LOAD,
+-	VENUS_IRIS1_ENC_STAGE_START,
+-	VENUS_IRIS1_ENC_STAGE_CAPTURE,
+-	VENUS_IRIS1_ENC_STAGE_FULL,
+-};
+-
+ struct venus_ts_metadata {
+ 	bool used;
+ 	u64 ts_ns;
+@@ -506,9 +488,6 @@ enum venus_inst_modes {
+  * @next_buf_last: a flag to mark next queued capture buffer as last
+  * @drain_active:	Drain sequence is in progress
+  * @enc_pm_active: encoder stream owns a runtime-PM reference
+- * @enc_test_stage: snapshotted SM8150 encoder bring-up checkpoint
+- * @enc_vendor_nv12: use downstream SM8150 raw-input allocation formulas
+- * @enc_dma_bidirectional: map raw encoder buffers for firmware read/write
+  * @iris1_ebd_count: number of VPU5 input-done messages seen in this instance
+  * @iris1_recon_index: latest VPU5 reconstruction-buffer index
+  * @iris1_ubwc_cr_q16: latest VPU5 UBWC compression ratio in Q16 format
+@@ -595,9 +574,6 @@ struct venus_inst {
+ 	bool next_buf_last;
+ 	bool drain_active;
+ 	bool enc_pm_active;
+-	u8 enc_test_stage;
+-	bool enc_vendor_nv12;
+-	bool enc_dma_bidirectional;
+ 	u32 iris1_ebd_count;
+ 	u32 iris1_recon_index;
+ 	u32 iris1_ubwc_cr_q16;
+diff --git a/drivers/media/platform/qcom/venus/helpers.c b/drivers/media/platform/qcom/venus/helpers.c
+index 1fd7a9d160f7..b4fa10962063 100644
+--- a/drivers/media/platform/qcom/venus/helpers.c
++++ b/drivers/media/platform/qcom/venus/helpers.c
+@@ -414,20 +414,6 @@ int venus_helper_intbufs_alloc(struct venus_inst *inst)
+ 		intbuf = intbuf_types_1xx;
+ 	}
+ 
+-	/*
+-	 * One test13 image can stop after each VPU5 internal buffer class.
+-	 * The enum values 1..5 intentionally match this array's prefix length:
+-	 * scratch, scratch1, scratch2, persist and persist1.
+-	 */
+-	if (IS_IRIS1(inst->core) &&
+-	    inst->session_type == VIDC_SESSION_TYPE_ENC) {
+-		/* Defense in depth: stage 0 must never allocate DMA buffers. */
+-		if (inst->enc_test_stage == VENUS_IRIS1_ENC_STAGE_PROTOCOL)
+-			arr_sz = 0;
+-		else if (inst->enc_test_stage <= VENUS_IRIS1_ENC_STAGE_INTERNAL)
+-			arr_sz = min_t(size_t, arr_sz, inst->enc_test_stage);
+-	}
+-
+ 	for (i = 0; i < arr_sz; i++) {
+ 		if (IS_IRIS1(inst->core) &&
+ 		    inst->session_type == VIDC_SESSION_TYPE_ENC)
+@@ -2060,13 +2046,6 @@ void venus_helper_vb2_buf_queue(struct vb2_buffer *vb)
+ 	    !(inst->streamon_out && inst->streamon_cap))
+ 		return;
+ 
+-	if (IS_IRIS1(inst->core) &&
+-	    inst->session_type == VIDC_SESSION_TYPE_ENC &&
+-	    inst->enc_test_stage < VENUS_IRIS1_ENC_STAGE_FULL &&
+-	    (inst->enc_test_stage != VENUS_IRIS1_ENC_STAGE_CAPTURE ||
+-	     V4L2_TYPE_IS_OUTPUT(vb->vb2_queue->type)))
+-		return;
+-
+ 	if (vb2_start_streaming_called(vb->vb2_queue)) {
+ 		ret = is_buf_refed(inst, vbuf);
+ 		if (ret)
+@@ -2189,8 +2168,6 @@ EXPORT_SYMBOL_GPL(venus_helper_process_initial_out_bufs);
+ 
+ int venus_helper_vb2_start_streaming(struct venus_inst *inst)
+ {
+-	bool staged_encoder = IS_IRIS1(inst->core) &&
+-		inst->session_type == VIDC_SESSION_TYPE_ENC;
+ 	int cleanup_ret;
+ 	int ret;
+ 
+@@ -2201,14 +2178,6 @@ int venus_helper_vb2_start_streaming(struct venus_inst *inst)
+ 	ret = venus_helper_intbufs_alloc(inst);
+ 	if (ret)
+ 		return ret;
+-	if (staged_encoder &&
+-	    inst->enc_test_stage <= VENUS_IRIS1_ENC_STAGE_INTERNAL) {
+-		dev_info(inst->core->dev,
+-			 "venus-test13: encoder stage %u reached (internal prefix)\n",
+-			 inst->enc_test_stage);
+-		ret = -EACCES;
+-		goto err_bufs_free;
+-	}
+ 
+ 	ret = session_register_bufs(inst);
+ 	if (ret)
+@@ -2223,66 +2192,32 @@ int venus_helper_vb2_start_streaming(struct venus_inst *inst)
+ 		goto err_unreg_bufs;
+ 	if (IS_IRIS1(inst->core))
+ 		dev_info(inst->core->dev, "venus-test7: LOAD_RESOURCES complete\n");
+-	if (staged_encoder &&
+-	    inst->enc_test_stage == VENUS_IRIS1_ENC_STAGE_LOAD) {
+-		dev_info(inst->core->dev,
+-			 "venus-test13: encoder stage %u reached (LOAD_RESOURCES)\n",
+-			 inst->enc_test_stage);
+-		ret = -EACCES;
+-		goto err_unload_res;
+-	}
+ 
+ 	ret = hfi_session_start(inst);
+ 	if (ret)
+ 		goto err_unload_res;
+ 	if (IS_IRIS1(inst->core))
+ 		dev_info(inst->core->dev, "venus-test7: START complete\n");
+-	if (staged_encoder &&
+-	    inst->enc_test_stage == VENUS_IRIS1_ENC_STAGE_START) {
+-		dev_info(inst->core->dev,
+-			 "venus-test13: encoder stage %u reached (START)\n",
+-			 inst->enc_test_stage);
+-		ret = -EACCES;
+-		goto err_stop;
+-	}
+ 
+ 	return 0;
+ 
+-err_stop:
+-	cleanup_ret = hfi_session_stop(inst);
+-	if (staged_encoder)
+-		dev_info(inst->core->dev,
+-			 "venus-test13: staged STOP ret=%d state=%u\n",
+-			 cleanup_ret, inst->state);
+-	if (staged_encoder && cleanup_ret)
+-		dev_err(inst->core->dev,
+-			"venus-test13: staged STOP cleanup failed: %d\n",
+-			cleanup_ret);
+ err_unload_res:
+ 	cleanup_ret = hfi_session_unload_res(inst);
+-	if (staged_encoder)
+-		dev_info(inst->core->dev,
+-			 "venus-test13: staged RELEASE_RESOURCES ret=%d state=%u\n",
+-			 cleanup_ret, inst->state);
+-	if (staged_encoder && cleanup_ret)
++	if (cleanup_ret)
+ 		dev_err(inst->core->dev,
+-			"venus-test13: staged RELEASE_RESOURCES cleanup failed: %d\n",
++			"failed to unload session during stream-start unwind: %d\n",
+ 			cleanup_ret);
+ err_unreg_bufs:
+ 	cleanup_ret = venus_helper_unregister_bufs(inst);
+-	if (staged_encoder && cleanup_ret)
++	if (cleanup_ret)
+ 		dev_err(inst->core->dev,
+-			"venus-test13: staged unregister cleanup failed: %d\n",
++			"failed to unregister buffers during stream-start unwind: %d\n",
+ 			cleanup_ret);
+ err_bufs_free:
+ 	cleanup_ret = venus_helper_intbufs_free(inst);
+-	if (staged_encoder)
+-		dev_info(inst->core->dev,
+-			 "venus-test13: staged internal cleanup ret=%d\n",
+-			 cleanup_ret);
+-	if (staged_encoder && cleanup_ret)
++	if (cleanup_ret)
+ 		dev_err(inst->core->dev,
+-			"venus-test13: staged internal cleanup failed: %d\n",
++			"failed to free internal buffers during stream-start unwind: %d\n",
+ 			cleanup_ret);
+ 	return ret;
+ }
+@@ -2297,24 +2232,16 @@ void venus_helper_m2m_device_run(void *priv)
+ 
+ 	mutex_lock(&inst->lock);
+ 
+-	if (!IS_IRIS1(inst->core) ||
+-	    inst->session_type != VIDC_SESSION_TYPE_ENC ||
+-	    inst->enc_test_stage >= VENUS_IRIS1_ENC_STAGE_CAPTURE) {
+-		v4l2_m2m_for_each_dst_buf_safe(m2m_ctx, buf, n) {
+-			ret = session_process_buf(inst, &buf->vb);
+-			if (ret)
+-				return_buf_error(inst, &buf->vb);
+-		}
++	v4l2_m2m_for_each_dst_buf_safe(m2m_ctx, buf, n) {
++		ret = session_process_buf(inst, &buf->vb);
++		if (ret)
++			return_buf_error(inst, &buf->vb);
+ 	}
+ 
+-	if (!IS_IRIS1(inst->core) ||
+-	    inst->session_type != VIDC_SESSION_TYPE_ENC ||
+-	    inst->enc_test_stage >= VENUS_IRIS1_ENC_STAGE_FULL) {
+-		v4l2_m2m_for_each_src_buf_safe(m2m_ctx, buf, n) {
+-			ret = session_process_buf(inst, &buf->vb);
+-			if (ret)
+-				return_buf_error(inst, &buf->vb);
+-		}
++	v4l2_m2m_for_each_src_buf_safe(m2m_ctx, buf, n) {
++		ret = session_process_buf(inst, &buf->vb);
++		if (ret)
++			return_buf_error(inst, &buf->vb);
+ 	}
+ 
+ 	mutex_unlock(&inst->lock);
+diff --git a/drivers/media/platform/qcom/venus/venc.c b/drivers/media/platform/qcom/venus/venc.c
+index e4bcf3632ae6..a1590802d67b 100644
+--- a/drivers/media/platform/qcom/venus/venc.c
++++ b/drivers/media/platform/qcom/venus/venc.c
+@@ -32,23 +32,6 @@ module_param_named(iris1_encoder, venus_iris1_encoder_enable, bool, 0644);
+ MODULE_PARM_DESC(iris1_encoder,
+ 		 "Allow SM8150 encoder protocol setup (default: off)");
+ 
+-static unsigned int venus_iris1_encoder_stage;
+-module_param_named(iris1_encoder_stage, venus_iris1_encoder_stage, uint, 0644);
+-MODULE_PARM_DESC(iris1_encoder_stage,
+-		 "SM8150 encoder checkpoint: 0=protocol, 1=scratch, 2=scratch1, 3=scratch2, 4=persist, 5=all internal, 6=load, 7=start, 8=capture DMA, 9=full DMA (default: 0)");
+-
+-static bool venus_iris1_encoder_vendor_nv12 = true;
+-module_param_named(iris1_encoder_vendor_nv12,
+-		   venus_iris1_encoder_vendor_nv12, bool, 0644);
+-MODULE_PARM_DESC(iris1_encoder_vendor_nv12,
+-		 "Use SM8150 downstream raw-input allocation formulas (default: on)");
+-
+-static bool venus_iris1_encoder_bidirectional = true;
+-module_param_named(iris1_encoder_bidirectional,
+-		   venus_iris1_encoder_bidirectional, bool, 0644);
+-MODULE_PARM_DESC(iris1_encoder_bidirectional,
+-		 "Map SM8150 encoder raw-input buffers bidirectionally (default: on)");
+-
+ /*
+  * Three resons to keep MPLANE formats (despite that the number of planes
+  * currently is one):
+@@ -230,8 +213,7 @@ static u32 venc_get_framesz(struct venus_inst *inst, u32 pixfmt,
+ 	u32 uv_meta_stride, uv_meta_scanlines, uv_meta_plane;
+ 	u32 y_plane, uv_plane, half_height;
+ 
+-	if (!IS_IRIS1(inst->core) ||
+-	    !inst->enc_vendor_nv12)
++	if (!IS_IRIS1(inst->core))
+ 		return venus_helper_get_framesz(pixfmt, width, height);
+ 
+ 	switch (pixfmt) {
+@@ -1577,8 +1559,8 @@ static int venc_queue_setup(struct vb2_queue *q,
+ 		inst->input_buf_size = sizes[0];
+ 		if (IS_IRIS1(core))
+ 			dev_info(core->dev,
+-				 "venus-migrate: encoder raw input size=%u vendor_nv12=%u\n",
+-				 sizes[0], inst->enc_vendor_nv12);
++				 "venus-migrate: encoder raw input size=%u\n",
++				 sizes[0]);
+ 		break;
+ 	case V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE:
+ 		*num_planes = inst->fmt_cap->num_planes;
+@@ -1822,32 +1804,6 @@ static int venc_iris1_set_rotation(struct venus_inst *inst)
+ 	return 0;
+ }
+ 
+-static int venc_iris1_stage_preflight(struct venus_inst *inst)
+-{
+-	u32 stage;
+-
+-	if (!IS_IRIS1(inst->core))
+-		return 0;
+-
+-	stage = READ_ONCE(venus_iris1_encoder_stage);
+-	if (stage > VENUS_IRIS1_ENC_STAGE_FULL) {
+-		dev_err(inst->core->dev,
+-			"venus-test13: invalid encoder stage %u (valid: 0..9)\n",
+-			stage);
+-		return -EINVAL;
+-	}
+-	inst->enc_test_stage = stage;
+-	if (stage) {
+-		dev_info(inst->core->dev,
+-			 "venus-test13: encoder checkpoint stage=%u\n", stage);
+-		return 0;
+-	}
+-
+-	dev_warn_ratelimited(inst->core->dev,
+-			     "venus-test13: protocol preflight passed; set iris1_encoder_stage=1 to test the next checkpoint\n");
+-	return -EACCES;
+-}
+-
+ static int venc_start_streaming(struct vb2_queue *q, unsigned int count)
+ {
+ 	struct venus_inst *inst = vb2_get_drv_priv(q);
+@@ -1959,8 +1915,6 @@ static int venc_start_streaming(struct vb2_queue *q, unsigned int count)
+ 		 * SET_BUFFER_COUNT can change scratch and persistent requirements.
+ 		 * The internal-buffer allocator must only
+ 		 * consume a fresh, coherent table, just like the downstream driver.
+-		 * Do not send BUFFER_SIZE_ACTUAL for the encoder: downstream treats
+-		 * the firmware's OUTPUT requirement as authoritative.
+ 		 */
+ 		ret = venus_helper_cache_bufreqs(inst);
+ 		if (ret)
+@@ -1968,16 +1922,23 @@ static int venc_start_streaming(struct vb2_queue *q, unsigned int count)
+ 
+ 		dev_info(inst->core->dev,
+ 			 "venus-test12: final encoder buffer requirements cached\n");
++
++		/*
++		 * Downstream names wire property 0x20100c BUFFER_SIZE_MINIMUM and
++		 * sends the negotiated compressed-output size after the final
++		 * requirements query.  Upstream uses BUFFER_SIZE_ACTUAL for the
++		 * same wire ID and payload.
++		 */
++		ret = venus_helper_set_bufsize(inst, inst->output_buf_size,
++					       HFI_BUFFER_OUTPUT);
++		if (ret)
++			goto error;
+ 	}
+ 
+ 	ret = venc_verify_conf(inst);
+ 	if (ret)
+ 		goto error;
+ 
+-	ret = venc_iris1_stage_preflight(inst);
+-	if (ret)
+-		goto error;
+-
+ 	ret = venus_helper_vb2_start_streaming(inst);
+ 	if (ret)
+ 		goto error;
+@@ -2163,7 +2124,7 @@ static int m2m_queue_init(void *priv, struct vb2_queue *src_vq,
+ 	src_vq->dev = inst->core->dev;
+ 	src_vq->lock = &inst->ctx_q_lock;
+ 	if (inst->core->res->hfi_version == HFI_VERSION_1XX ||
+-	    (IS_IRIS1(inst->core) && inst->enc_dma_bidirectional))
++	    IS_IRIS1(inst->core))
+ 		src_vq->bidirectional = 1;
+ 	if (IS_IRIS1(inst->core))
+ 		dev_info(inst->core->dev,
+@@ -2223,12 +2184,6 @@ static int venc_open(struct file *file)
+ 	inst->clk_data.core_id = VIDC_CORE_ID_DEFAULT;
+ 	inst->core_acquired = false;
+ 	inst->nonblock = file->f_flags & O_NONBLOCK;
+-	if (IS_IRIS1(core)) {
+-		inst->enc_vendor_nv12 =
+-			READ_ONCE(venus_iris1_encoder_vendor_nv12);
+-		inst->enc_dma_bidirectional =
+-			READ_ONCE(venus_iris1_encoder_bidirectional);
+-	}
+ 
+ 	if (inst->enc_state == VENUS_ENC_STATE_DEINIT)
+ 		inst->enc_state = VENUS_ENC_STATE_INIT;
+-- 
+2.44.0.windows.1
+

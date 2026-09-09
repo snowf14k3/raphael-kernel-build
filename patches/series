@@ -15,3 +15,14 @@
 0015-media-venus-match-SM8150-RC-OFF-work-mode.patch
 0016-drm-panel-ams639rq08-throttle-runtime-brightness.patch
 0017-media-venus-match-SM8150-frame-RC-timestamps.patch
+0018-media-venus-close-SM8150-Main10-and-encoder-DMA-gaps.patch
+0019-media-venus-port-SM8150-dynamic-bandwidth-governor.patch
+0020-media-venus-port-SM8150-clock-and-HQ-policy.patch
+0021-media-venus-expose-SM8150-encoder-raw-formats.patch
+0022-media-venus-align-SM8150-encoder-controls.patch
+0023-media-venus-support-SM8150-Main10-split-output.patch
+0024-media-venus-harden-SM8150-encoder-DMA-contract.patch
+0025-media-venus-align-SM8150-codec-capability-matrix.patch
+0026-media-venus-fix-SM8150-Main10-reconfigure-and-drain.patch
+0027-media-venus-complete-SM8150-encoder-startup-contract.patch
+0028-media-venus-normalize-SM8150-diagnostics.patch

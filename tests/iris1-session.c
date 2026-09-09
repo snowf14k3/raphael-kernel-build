@@ -143,7 +143,7 @@ int main(void)
 	reset_capture();
 	assert(!venus_helper_set_work_route(&inst) && !property_calls);
 
-	/* Downstream SM8150 RC_OFF uses mode 1 plus low latency. */
+	/* Downstream SM8150 RC_OFF selects mode 1. */
 	core.iris1 = true;
 	inst.session_type = VIDC_SESSION_TYPE_ENC;
 	inst.hfi_codec = HFI_VIDEO_CODEC_H264;
@@ -153,10 +153,8 @@ int main(void)
 	inst.controls.enc.rc_enable = 0;
 	reset_capture();
 	assert(!venus_helper_set_work_mode(&inst));
-	assert(property_calls == 2 && property_type[0] == HFI_PROPERTY_PARAM_WORK_MODE);
+	assert(property_calls == 1 && property_type[0] == HFI_PROPERTY_PARAM_WORK_MODE);
 	assert(property_value[0] == VIDC_WORK_MODE_1);
-	assert(property_type[1] == HFI_PROPERTY_PARAM_VENC_LOW_LATENCY_MODE);
-	assert(property_value[1] == 1);
 
 	/* VBR is the only supported public mode that selects mode 2. */
 	inst.controls.enc.rc_enable = 1;
@@ -165,17 +163,15 @@ int main(void)
 	assert(property_calls == 1 && property_type[0] == HFI_PROPERTY_PARAM_WORK_MODE);
 	assert(property_value[0] == VIDC_WORK_MODE_2);
 
-	/* CBR returns to mode 1 and must carry the low-latency property. */
+	/* CBR returns to mode 1; internal config sends low latency separately. */
 	inst.controls.enc.bitrate_mode = V4L2_MPEG_VIDEO_BITRATE_MODE_CBR;
 	reset_capture();
 	assert(!venus_helper_set_work_mode(&inst));
-	assert(property_calls == 2);
+	assert(property_calls == 1);
 	assert(property_type[0] == HFI_PROPERTY_PARAM_WORK_MODE);
 	assert(property_value[0] == VIDC_WORK_MODE_1);
-	assert(property_type[1] == HFI_PROPERTY_PARAM_VENC_LOW_LATENCY_MODE);
-	assert(property_value[1] == 1);
 
-	/* The low-latency follow-up is VPU5-specific and obeys first-error exit. */
+	/* Work-mode packetization remains generic and obeys first-error exit. */
 	inst.hfi_codec = HFI_VIDEO_CODEC_VP8;
 	core.iris1 = false;
 	reset_capture();
@@ -185,10 +181,6 @@ int main(void)
 	property_error = -5;
 	fail_call = 1;
 	assert(venus_helper_set_work_mode(&inst) == -5 && property_calls == 1);
-	reset_capture();
-	property_error = -7;
-	fail_call = 2;
-	assert(venus_helper_set_work_mode(&inst) == -7 && property_calls == 2);
 
 	puts("PASS: IRIS1 VPU5 work-route/work-mode policy and error handling");
 	return 0;

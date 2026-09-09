@@ -8,13 +8,13 @@ frame_hashes() {
 }
 if [[ "${1:-}" == --plan ]]; then
 	printf '%s\n' \
-		'Preflight: test15 kernel, SM8150 Venus nodes, idle devices, tools, free space.' \
-		'A: PM held on; H.264 320x240/720p/1080p plus HEVC 8-bit decode.' \
-		'HEVC Main10 is skipped by default because Debian FFmpeg lacks V4L2 P010 mapping.' \
-		'B: PM auto; observe suspended, decode, repeat for two cycles.' \
+		'Preflight: test16 kernel, SM8150 Venus nodes, idle devices, tools, free space.' \
+		'A: PM held on; H.264, HEVC Main8, VP8, VP9 Profile0 and MPEG2 decode.' \
+		'B: HEVC Main10 and VP9 Profile2 P010 paths are compared to software hashes.' \
+		'C: PM auto; observe suspended, decode, repeat for two cycles.' \
 		'Compare decode frame hashes with software and check exact frame counts.' \
-		'Encoder protocol preflight stays locked unless VENUS_TEST_ENCODER=1 is set.' \
-		'Encoder internal buffers, LOAD/START and user DMA are never enabled by this test suite.' \
+		'Encoder stays disabled unless VENUS_TEST_ENCODER=1 is set explicitly.' \
+		'When enabled, one H.264 frame is tested first, then H.264/HEVC/VP8 short streams.' \
 		'Restore original PM/debug settings; save local logs and report.tar.gz.' \
 		'Stop issuing codec jobs after a timeout or functional failure.'
 	exit 0
@@ -36,15 +36,12 @@ if [[ "${1:-}" == --self-test ]]; then
 fi
 [[ $# -eq 0 ]] || { echo 'Usage: sudo bash venus-test-suite.sh [--plan|--self-test]' >&2; exit 2; }
 [[ $EUID -eq 0 ]] || { echo '请使用 sudo bash venus-test-suite.sh。' >&2; exit 2; }
-[[ "$(uname -r)" == *sm8150-venus-test15* ]] || {
-	echo '当前不是 test15 内核，未开始测试，也未修改设备设置。' >&2; exit 2;
+[[ "$(uname -r)" == *sm8150-venus-test16* ]] || {
+	echo '当前不是 test16 内核，未开始测试，也未修改设备设置。' >&2; exit 2;
 }
 [[ "${VENUS_TEST_ENCODER:-0}" == 0 || "${VENUS_TEST_ENCODER:-0}" == 1 ]] || {
 	echo 'VENUS_TEST_ENCODER 只能是 0 或 1；未开始测试。' >&2; exit 2;
 }
-if [[ "${VENUS_TEST_ENCODER_DMA:-0}" != 0 ]]; then
-	echo 'test15 自动脚本禁止开启编码 DMA；未开始测试。' >&2; exit 2;
-fi
 for command in ffmpeg timeout tar awk diff cmp sha256sum fuser dmesg logger readlink sync; do
 	command -v "$command" >/dev/null || { echo "缺少命令：$command；未开始测试。" >&2; exit 2; }
 done
@@ -76,18 +73,14 @@ fi
 run_root="$(mktemp -d /var/tmp/venus-batch.XXXXXX)"
 trace=/sys/module/venus_core/parameters/iris1_debug
 encoder_protocol_gate=/sys/module/venus_enc/parameters/iris1_encoder
-encoder_stage_gate=/sys/module/venus_enc/parameters/iris1_encoder_stage
 original_power="$(< "$control")"
 original_trace=
 original_encoder_protocol_gate=
-original_encoder_stage_gate=
 [[ ! -r "$trace" ]] || original_trace="$(< "$trace")"
 [[ ! -r "$encoder_protocol_gate" ]] || original_encoder_protocol_gate="$(< "$encoder_protocol_gate")"
-[[ ! -r "$encoder_stage_gate" ]] || original_encoder_stage_gate="$(< "$encoder_stage_gate")"
 power_changed=0
 trace_changed=0
 encoder_protocol_gate_changed=0
-encoder_stage_gate_changed=0
 summary="$run_root/summary.tsv"
 printf 'test\tresult\tdetail\n' > "$summary"
 record() {
@@ -122,9 +115,6 @@ finish() {
 	set +e
 	if (( trace_changed )); then
 		set_knob "$trace" "$original_trace" || { record restore-debug FAIL 'restore manually'; rc=1; }
-	fi
-	if (( encoder_stage_gate_changed )); then
-		set_knob "$encoder_stage_gate" "$original_encoder_stage_gate" || { record restore-encoder-stage-gate FAIL 'restore manually'; rc=1; }
 	fi
 	if (( encoder_protocol_gate_changed )); then
 		set_knob "$encoder_protocol_gate" "$original_encoder_protocol_gate" || { record restore-encoder-protocol-gate FAIL 'restore manually'; rc=1; }
@@ -219,14 +209,51 @@ prepare_sample() {
 }
 prepare_hevc_sample() {
 	local label="$1" pixel_format="$2" frames="$3"
+	local reference_format="${4:-$pixel_format}"
 	run_ffmpeg "$label.generate" -f lavfi -i testsrc2=size=320x240:rate=30 \
 		-frames:v "$frames" -c:v libx265 -threads 2 -pix_fmt "$pixel_format" \
 		-x265-params pools=2:frame-threads=1:log-level=error "$run_root/$label.mkv" || return 1
 	run_ffmpeg "$label.reference" -xerror -c:v hevc -threads 2 -i "$run_root/$label.mkv" \
+		-map 0:v:0 -an -pix_fmt "$reference_format" \
+		-f framemd5 "$run_root/$label.reference.framemd5" || return 1
+	frame_hashes "$run_root/$label.reference.framemd5" > "$run_root/$label.reference.hashes"
+	[[ "$(wc -l < "$run_root/$label.reference.hashes")" -eq "$frames" ]]
+}
+prepare_codec_sample() {
+	local label="$1" encoder_name="$2" pixel_format="$3" extension="$4" frames="$5"
+	shift 5
+	run_ffmpeg "$label.generate" -f lavfi -i testsrc2=size=320x240:rate=30 \
+		-frames:v "$frames" -c:v "$encoder_name" -threads 2 -pix_fmt "$pixel_format" \
+		"$@" "$run_root/$label.$extension" || return 1
+	run_ffmpeg "$label.reference" -xerror -threads 2 -i "$run_root/$label.$extension" \
 		-map 0:v:0 -an -pix_fmt "$pixel_format" \
 		-f framemd5 "$run_root/$label.reference.framemd5" || return 1
 	frame_hashes "$run_root/$label.reference.framemd5" > "$run_root/$label.reference.hashes"
 	[[ "$(wc -l < "$run_root/$label.reference.hashes")" -eq "$frames" ]]
+}
+encode_codec_case() {
+	local label="$1" encoder_name="$2" decoder_name="$3"
+	local mux="$4" extension="$5" frames="$6" size="$7"
+	local output="$run_root/$label.$extension"
+	local framemd5="$run_root/$label.verify.framemd5"
+
+	rm -f -- "$output" "$framemd5"
+	if ! run_ffmpeg "$label" -y -f lavfi -i "testsrc2=size=$size:rate=30" \
+		-frames:v "$frames" -pix_fmt nv12 -c:v "$encoder_name" \
+		-g 1 -b:v 512k -f "$mux" "$output"; then
+		record "$label" FAIL 'hardware encoder returned an error'; return 1
+	fi
+	if [[ ! -s "$output" ]]; then
+		record "$label" FAIL 'hardware encoder produced an empty stream'; return 1
+	fi
+	if ! run_ffmpeg "$label.verify" -xerror -c:v "$decoder_name" -i "$output" \
+		-map 0:v:0 -an -frames:v "$frames" -f framemd5 "$framemd5"; then
+		record "$label" FAIL 'encoded stream cannot be decoded in software'; return 1
+	fi
+	if [[ "$(awk '!/^#/ {n++} END {print n + 0}' "$framemd5")" -ne "$frames" ]]; then
+		record "$label" FAIL 'software decoder returned the wrong frame count'; return 1
+	fi
+	record "$label" PASS "$frames frames; non-empty stream; software decode passed"
 }
 stop_batch() {
 	record remaining SKIP 'stopped after failure; no module reload or reboot attempted'
@@ -249,44 +276,74 @@ for spec in 'hevc8 yuv420p'; do
 	}
 	decode_codec_case "on-$label" "$label.mkv" 30 hevc_v4l2m2m "$pixel_format" || stop_batch
 done
-record on-hevc10 SKIP 'kernel exposes Main10/P010; Debian FFmpeg 7.1 V4L2 lacks P010 mapping'
-if [[ "${VENUS_TEST_ENCODER:-0}" != 1 ]]; then
-	record encoder-protocol SKIP 'encoder gate kept off and checkpoint kept at protocol-only'
-	record hw-encode SKIP 'test15 suite never advances an encoder hardware checkpoint'
-elif grep -q 'h264_v4l2m2m' "$run_root/encoders.txt"; then
-	[[ -w "$encoder_protocol_gate" && -w "$encoder_stage_gate" ]] || {
-		record encoder-protocol FAIL 'kernel encoder gates are unavailable'; stop_batch;
+
+if grep -q 'libvpx ' "$run_root/encoders.txt" && grep -q 'vp8_v4l2m2m' "$run_root/decoders.txt"; then
+	prepare_codec_sample vp8 libvpx yuv420p mkv 30 -deadline realtime -cpu-used 8 || {
+		record prepare FAIL 'VP8 software generation failed'; exit 1;
 	}
-	encoder_stage_gate_changed=1
-	set_knob "$encoder_stage_gate" 0 || {
-		record encoder-protocol FAIL 'cannot force encoder checkpoint to protocol-only'; stop_batch;
+	decode_codec_case on-vp8 vp8.mkv 30 vp8_v4l2m2m yuv420p || stop_batch
+else
+	record on-vp8 SKIP 'FFmpeg lacks libvpx encoder or vp8_v4l2m2m decoder'
+fi
+
+if grep -q 'libvpx-vp9 ' "$run_root/encoders.txt" && grep -q 'vp9_v4l2m2m' "$run_root/decoders.txt"; then
+	prepare_codec_sample vp9p0 libvpx-vp9 yuv420p mkv 30 -deadline realtime -cpu-used 8 || {
+		record prepare FAIL 'VP9 Profile0 software generation failed'; exit 1;
+	}
+	decode_codec_case on-vp9p0 vp9p0.mkv 30 vp9_v4l2m2m yuv420p || stop_batch
+else
+	record on-vp9p0 SKIP 'FFmpeg lacks libvpx-vp9 encoder or vp9_v4l2m2m decoder'
+fi
+
+if grep -q 'mpeg2video ' "$run_root/encoders.txt" && grep -q 'mpeg2_v4l2m2m' "$run_root/decoders.txt"; then
+	prepare_codec_sample mpeg2 mpeg2video yuv420p m2v 30 || {
+		record prepare FAIL 'MPEG2 software generation failed'; exit 1;
+	}
+	decode_codec_case on-mpeg2 mpeg2.m2v 30 mpeg2_v4l2m2m yuv420p || stop_batch
+else
+	record on-mpeg2 SKIP 'FFmpeg lacks MPEG2 encoder or mpeg2_v4l2m2m decoder'
+fi
+
+prepare_hevc_sample hevc10 yuv420p10le 30 yuv420p || {
+	record prepare FAIL 'HEVC Main10 software generation failed'; exit 1;
+}
+decode_codec_case on-hevc10-nv12 hevc10.mkv 30 hevc_v4l2m2m yuv420p || stop_batch
+
+if grep -q 'libvpx-vp9 ' "$run_root/encoders.txt" && grep -q 'vp9_v4l2m2m' "$run_root/decoders.txt"; then
+	prepare_codec_sample vp9p2 libvpx-vp9 yuv420p10le mkv 30 \
+		-profile:v 2 -deadline realtime -cpu-used 8 || {
+		record prepare FAIL 'VP9 Profile2 software generation failed'; exit 1;
+	}
+	decode_codec_case on-vp9p2 vp9p2.mkv 30 vp9_v4l2m2m yuv420p10le || stop_batch
+else
+	record on-vp9p2 SKIP 'FFmpeg lacks libvpx-vp9 encoder or vp9_v4l2m2m decoder'
+fi
+if [[ "${VENUS_TEST_ENCODER:-0}" != 1 ]]; then
+	record hw-encode SKIP 'encoder gate kept off; set VENUS_TEST_ENCODER=1 explicitly'
+elif grep -q 'h264_v4l2m2m' "$run_root/encoders.txt"; then
+	[[ -w "$encoder_protocol_gate" ]] || {
+		record hw-encode FAIL 'kernel encoder gate is unavailable'; stop_batch;
 	}
 	encoder_protocol_gate_changed=1
 	set_knob "$encoder_protocol_gate" Y || {
-		record encoder-protocol FAIL 'cannot unlock protocol-only gate'; stop_batch;
+		record hw-encode FAIL 'cannot unlock encoder gate'; stop_batch;
 	}
-	logger -t venus-test15-host 'ENCODER_PROTOCOL_PREFLIGHT_BEGIN'
+	logger -t venus-test16-host 'ENCODER_FULL_BEGIN'
 	sync
-	protocol_rc=0
-	run_ffmpeg encoder-protocol -f lavfi -i testsrc2=size=128x96:rate=1 \
-		-frames:v 1 -pix_fmt nv12 -c:v h264_v4l2m2m -g 1 -b:v 128k \
-		-f h264 "$run_root/protocol-locked.h264" || protocol_rc=$?
-	timeout -k 2s 5s dmesg > "$run_root/encoder-protocol.dmesg.log" 2>&1 || true
-	if (( protocol_rc == 0 || protocol_rc == 124 || protocol_rc == 137 )) || \
-		! grep -q 'protocol preflight passed; set iris1_encoder_stage=1' \
-		"$run_root/encoder-protocol.dmesg.log" || \
-		! grep -q 'venus-test14: encoder work mode=2 rc_enable=1 bitrate_mode=0 low_latency=0' \
-		"$run_root/encoder-protocol.dmesg.log" || \
-		! grep -q 'venus-test15: encoder rc timestamp disable=1' \
-		"$run_root/encoder-protocol.dmesg.log"; then
-		record encoder-protocol FAIL 'expected a prompt safety-lock rejection; see logs'; stop_batch;
+	encode_codec_case encode-h264-one h264_v4l2m2m h264 h264 h264 1 128x96 || stop_batch
+	encode_codec_case encode-h264 h264_v4l2m2m h264 h264 h264 30 320x240 || stop_batch
+	if grep -q 'hevc_v4l2m2m' "$run_root/encoders.txt"; then
+		encode_codec_case encode-hevc hevc_v4l2m2m hevc hevc hevc 30 320x240 || stop_batch
+	else
+		record encode-hevc SKIP 'FFmpeg lacks hevc_v4l2m2m encoder'
 	fi
-	record encoder-protocol PASS 'VBR mode2 and disable-RC-timestamp confirmed; DMA and hardware remained locked'
-	snapshot encoder-protocol
-
-	record hw-encode SKIP 'test13 reset at the first ETB; full stage 9 remains manual only'
+	if grep -q 'vp8_v4l2m2m' "$run_root/encoders.txt"; then
+		encode_codec_case encode-vp8 vp8_v4l2m2m vp8 ivf ivf 30 320x240 || stop_batch
+	else
+		record encode-vp8 SKIP 'FFmpeg lacks vp8_v4l2m2m encoder'
+	fi
+	snapshot encoder-full
 else
-	record encoder-protocol SKIP 'FFmpeg lacks h264_v4l2m2m encoder'
 	record hw-encode SKIP 'FFmpeg lacks h264_v4l2m2m encoder'
 fi
 snapshot encoded

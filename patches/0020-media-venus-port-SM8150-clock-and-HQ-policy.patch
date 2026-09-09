@@ -1,0 +1,131 @@
+diff --git a/drivers/media/platform/qcom/venus/core.c b/drivers/media/platform/qcom/venus/core.c
+index dc36416e1c4b..d29284a0ece6 100644
+--- a/drivers/media/platform/qcom/venus/core.c
++++ b/drivers/media/platform/qcom/venus/core.c
+@@ -984,6 +984,10 @@ static const struct venus_resources sm8150_res = {
+ 	.vcodec_num = 1,
+ 	.num_vpp_pipes = 2,
+ 	.max_load = 3916800,	/* SM8150 downstream max-hw-load */
++	.max_hq_mbs_per_frame = 8160,
++	.max_hq_mbs_per_sec = 244800,
++	.fw_cycles = 760000,
++	.fw_vpp_cycles = 166667,
+ 	.hfi_version = HFI_VERSION_4XX,
+ 	.vpu_version = VPU_VERSION_IRIS1,
+ 	.autosuspend_delay_ms = 1500,
+diff --git a/drivers/media/platform/qcom/venus/core.h b/drivers/media/platform/qcom/venus/core.h
+index 8bb9f79e948c..82e46f15c0f9 100644
+--- a/drivers/media/platform/qcom/venus/core.h
++++ b/drivers/media/platform/qcom/venus/core.h
+@@ -95,6 +95,10 @@ struct venus_resources {
+ 	unsigned int autosuspend_delay_ms;
+ 	u8 num_vpp_pipes;
+ 	u32 max_load;
++	u32 max_hq_mbs_per_frame;
++	u32 max_hq_mbs_per_sec;
++	u32 fw_cycles;
++	u32 fw_vpp_cycles;
+ 	unsigned int vmem_id;
+ 	u32 vmem_size;
+ 	u32 vmem_addr;
+diff --git a/drivers/media/platform/qcom/venus/pm_helpers.c b/drivers/media/platform/qcom/venus/pm_helpers.c
+index c509b0b8ac91..debdc27737f3 100644
+--- a/drivers/media/platform/qcom/venus/pm_helpers.c
++++ b/drivers/media/platform/qcom/venus/pm_helpers.c
+@@ -999,13 +999,24 @@ static inline int power_save_mode_enable(struct venus_inst *inst,
+ 					 bool enable)
+ {
+ 	struct venc_controls *enc_ctr = &inst->controls.enc;
++	const struct venus_resources *res = inst->core->res;
+ 	const u32 ptype = HFI_PROPERTY_CONFIG_VENC_PERF_MODE;
++	u32 mbs_per_frame, mbs_per_sec;
+ 	u32 venc_mode;
+ 	int ret = 0;
+ 
+ 	if (inst->session_type != VIDC_SESSION_TYPE_ENC)
+ 		return 0;
+ 
++	mbs_per_frame = (ALIGN(inst->width, 16) / 16) *
++			(ALIGN(inst->height, 16) / 16);
++	mbs_per_sec = mbs_per_frame * inst->fps;
++	if ((res->max_hq_mbs_per_frame &&
++	     mbs_per_frame > res->max_hq_mbs_per_frame) ||
++	    (res->max_hq_mbs_per_sec &&
++	     mbs_per_sec > res->max_hq_mbs_per_sec))
++		enable = true;
++
+ 	if (enc_ctr->bitrate_mode == V4L2_MPEG_VIDEO_BITRATE_MODE_CQ)
+ 		enable = false;
+ 
+@@ -1833,15 +1844,71 @@ static int coreid_power_iris1(struct venus_inst *inst, int on)
+ static unsigned long calculate_inst_freq(struct venus_inst *inst,
+ 					 unsigned long filled_len)
+ {
++	const struct venus_resources *res = inst->core->res;
+ 	unsigned long vpp_freq_per_mb = 0, vpp_freq = 0, vsp_freq = 0;
+ 	u32 fps = (u32)inst->fps;
+ 	u32 mbs_per_sec;
++	u32 route;
++	u64 fw_cycles, fw_vpp_cycles;
++	u64 sw_overhead;
++	u64 vpp_cycles;
++	u64 vsp_cycles;
+ 
+ 	mbs_per_sec = load_per_instance(inst);
+ 
+ 	if (inst->state != INST_START)
+ 		return 0;
+ 
++	if (IS_IRIS1(inst->core)) {
++		route = max_t(u32, inst->clk_data.work_route, 1);
++		fw_cycles = (u64)fps * res->fw_cycles;
++		fw_vpp_cycles = (u64)fps * res->fw_vpp_cycles;
++
++		if (inst->session_type == VIDC_SESSION_TYPE_ENC) {
++			vpp_freq_per_mb = inst->flags & VENUS_LOW_POWER ?
++				inst->clk_data.low_power_freq :
++				inst->clk_data.vpp_freq;
++			vpp_cycles = div64_u64((u64)mbs_per_sec *
++						vpp_freq_per_mb, route);
++			vsp_cycles = (u64)mbs_per_sec * inst->clk_data.vsp_freq;
++			vsp_cycles += div_u64((u64)inst->controls.enc.bitrate * 10,
++					      5);
++
++			if (vpp_cycles) {
++				sw_overhead = div64_u64(vsp_cycles * fw_vpp_cycles,
++							vpp_cycles);
++				vsp_cycles += max_t(u64, vsp_cycles / 20,
++						      sw_overhead);
++			}
++			vpp_cycles += max_t(u64, vpp_cycles / 20,
++					      fw_vpp_cycles);
++			if (route > 1)
++				vpp_cycles += vpp_cycles * 14 / 1000;
++		} else if (inst->session_type == VIDC_SESSION_TYPE_DEC) {
++			vpp_cycles = div64_u64((u64)mbs_per_sec *
++						inst->clk_data.vpp_freq, route);
++			vsp_cycles = (u64)mbs_per_sec * inst->clk_data.vsp_freq;
++			vsp_cycles += div_u64((u64)fps * filled_len * 8 * 10,
++					      5);
++
++			if (vpp_cycles) {
++				sw_overhead = div64_u64(vsp_cycles * fw_vpp_cycles,
++							vpp_cycles);
++				vsp_cycles += max_t(u64, vsp_cycles / 20,
++						      sw_overhead);
++			}
++			vpp_cycles += max_t(u64, vpp_cycles / 20,
++					      fw_vpp_cycles);
++			if (route > 1)
++				vpp_cycles += vpp_cycles / 17;
++		} else {
++			return ULONG_MAX;
++		}
++
++		return min_t(u64, max3(vpp_cycles, vsp_cycles, fw_cycles),
++			     ULONG_MAX);
++	}
++
+ 	if (inst->session_type == VIDC_SESSION_TYPE_ENC) {
+ 		vpp_freq_per_mb = inst->flags & VENUS_LOW_POWER ?
+ 			inst->clk_data.low_power_freq :

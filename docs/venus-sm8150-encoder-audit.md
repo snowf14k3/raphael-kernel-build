@@ -1,5 +1,9 @@
 # SM8150 Venus 编码适配核对记录
 
+> **历史编码专项记录：**截至 Test15 的逐步排查保留在这里；0018 的 NV12 allocation、
+> bidirectional DMA、VPU5 EBD/recon/CR/CF 以及最新状态以
+> `venus-sm8150-migration-status.md` 和 `venus-sm8150-pending-hunk-ledger.md` 为准。
+
 这份文件是 Raphael / SM8150 Venus 编码适配的唯一持续核对记录。每次代码
 对比、实机测试和结论变化都应先更新这里，避免反复检查同一项或把推测当成
 已验证事实。
@@ -40,8 +44,11 @@
   卡死并重启。持久日志只留下测试开始标记，无法证明死在内部缓冲、LOAD、
   START、FTB 还是 ETB 中的哪一步。
 - HEVC Main10 经 Debian 13 的 FFmpeg 7.1 `hevc_v4l2m2m` 输出 0 帧并报
-  `An invalid frame was output by a decoder`。内核已返回 P010；FFmpeg 7.1
-  缺少相应 V4L2 P010 映射。这是已定位的用户态问题，不应回退内核为 NV12。
+  `An invalid frame was output by a decoder`。内核已识别 Main10、切换 P010，且固件
+  回收了首个 P010 CAPTURE buffer；但 HFI4 IRIS1 尚未发送原厂 P010 plane actual
+  constraints，ENUM/TRY/S_FMT 的位深过滤也不完全一致。因此当前只能定位为
+  “内核到用户态的 P010 协商/布局不一致”，不能再武断定性为 FFmpeg 7.1 单方面
+  缺少映射；仍然不应把 10-bit 数据伪报为 NV12。
 - 编码从未产出过一个有效 H.264 帧，所以当前不能宣称编码可用。
 
 ### test13 实机新增事实
@@ -118,19 +125,19 @@ test13 的目标是保持这个顺序，并把每个危险边界拆成可单独�
 | WORK_ROUTE | 普通 H.264 VBR 使用 route 2 | test14 实机为 route 2 | 对齐 |
 | WORK_MODE | VBR/MBR 使用 mode 2；RC_OFF/CBR/CQ 使用 mode 1 并开启 low-latency | test14 Stage 0 实测 FFmpeg 把会话配置为 VBR：`rc_enable=1 bitrate_mode=0 low_latency=0`，因此 mode 2 正确 | 已由实机确认 |
 | video core | MVS0；MVS1 属于 CVP | 当前选择 MVS0，不能改到 MVS1 | 对齐 |
-| 初始 IO 数量 | SESSION_INIT 后按 H.264 格式表发 4/4 | test13 仅在 requirements 缓存无效的初始阶段发 4/4 | 待实机 |
+| 初始 IO 数量 | SESSION_INIT 后按 H.264 格式表发 4/4 | test13 仅在 requirements 缓存无效的初始阶段发 4/4；Stage 0 日志确认 initial 4/4 | 已实机通过（Stage 0） |
 | 最终 IO 数量 | actual 为客户端实际数，`count_min_host` 为固件 minimum | test12 原本正确；test13 一度误改 4/4，现已恢复为固件返回的 3/2 | 静态对齐 |
 | RC 默认值 | 原厂 bitrate mode 默认 RC_OFF；vendor 的 FRAME_RC_ENABLE 另映射到时间戳 RC 属性 | test13 将 IRIS1 的 frame-RC control 默认改为 0；本次 FFmpeg 在 STREAMON 前把 frame RC 设为 1，同时当前标准 bitrate mode 为 VBR，实际 HFI RC 因而是 VBR | 默认与本次实际会话必须分开记录 |
-| 时间戳 RC | FRAME_RC_ENABLE 原样发送为 `VENC_DISABLE_RC_TIMESTAMP` | test15 对 IRIS1 补发同一 `0x2005027` enable 属性；本次 FFmpeg 预期值为 1 | 静态对齐，待实机 |
+| 时间戳 RC | FRAME_RC_ENABLE 原样发送为 `VENC_DISABLE_RC_TIMESTAMP` | test15 对 IRIS1 补发同一 `0x2005027` enable 属性；Stage 0 日志确认值为 1，Stage 9 仍复位 | 已实机确认发送；已排除为复位根因 |
 | 固定 QP | I/P/B 和范围默认 127 | test13 使用 127；HFI4 封包结果与原厂一致 | 静态对齐 |
-| bitrate savings | 默认启用，属性 `0x2005038` | test13 已补封包与发送 | 待实机 |
-| rotation | 原厂即使不旋转也发 NONE/NONE，属性 `0x3007001` | test13 已补 | 待实机 |
+| bitrate savings | 默认启用，属性 `0x2005038` | test13 已补封包；本次有效 RC 是 VBR，按原厂条件不发送 | 本次 VBR 不触发；封包静态对齐 |
+| rotation | 原厂即使不旋转也发 NONE/NONE，属性 `0x3007001` | test13 已补；Stage 0 日志确认 rotation=none、flip=none | 已实机通过（Stage 0） |
 | BUFFER_SIZE | 原厂名为 MINIMUM，当前名为 ACTUAL | 二者都是 `0x20100c` 且 payload 相同，仅命名差异 | 已排除 |
 | 缓冲类型 | 4=persist，5=persist1，6/7/8=scratch0/1/2，9=recon | 当前 HFI4 数值一致 | 对齐 |
 | recon | 只分配索引信息，不 SET_BUFFERS | 当前不把 type 9 当静态 DMA | 对齐 |
 | SET_BUFFERS 包 | type/size/count/device address | 当前 HFI4 布局与原厂一致 | 静态对齐 |
 | 内部缓冲登记粒度 | 每块 scratch/persist 各发一个 SET_BUFFERS | 当前同样逐块发送；`queued` 仅表示命令入队，释放路径等待应答 | 静态对齐 |
-| LOAD 后回滚 | 可从 LOAD_RESOURCES_DONE 直接 RELEASE_RESOURCES | 旧包装函数只允许 STOP，stage 6 会失败后带资源断电；test13 已仅对 IRIS1 放开该转换 | 已修正，待实机 |
+| LOAD 后回滚 | 可从 LOAD_RESOURCES_DONE 直接 RELEASE_RESOURCES | 旧包装函数只允许 STOP，stage 6 会失败后带资源断电；test13 已仅对 IRIS1 放开该转换 | 已实机通过（Stage 6） |
 | ETB/FTB 包 | 标准 VPU5 输入/输出帧包 | 当前布局与原厂一致 | 静态对齐 |
 | ETB_DONE/FTB_DONE | 编码 FTB_DONE 固定字段一致；原厂 ETB_DONE 末尾另带 flags 与 recon/UBWC 统计 | 当前会读取的 ETB_DONE 前缀字段偏移完全一致，只忽略末尾统计；包长检查允许更长消息 | 已排除为首帧 DMA 根因 |
 | 普通 CAPTURE 注册 | 不预先静态 SET_BUFFERS | 当前 HFI4 对普通 capture 注册为 no-op | 对齐 |
@@ -148,7 +155,7 @@ test13 的目标是保持这个顺序，并把每个危险边界拆成可单独�
 | 时钟策略 | v1 最高 480 MHz；量产 v2 最高 533 MHz | 当前 240/338/365/444/533 MHz 与原厂 `sm8150-v2` 表完全一致 | 已排除 |
 | IOMMU SID | 原厂通用 DTS 是 `0x1300`，但量产 `sm8150-v2.dtsi` 覆盖为 `0x2300` | 当前上游 DT 同为 `0x2300`，且本机使用量产 v2 时钟/固件配置、解码 DMA 正常 | 与量产 v2 对齐 |
 | HFI DMA 地址宽度 | 原厂映射后拒绝任何不能无损转为 32-bit 的 IOVA | test13 已在内部 DMA 和普通帧 DMA 进入 HFI 前增加上 32 位检查 | 已补安全门禁 |
-| 内部 DMA 分配长度 | 原厂统一向上对齐 4 KiB，并把对齐值作为 SET_BUFFERS 的 `buffer_size` | test12 只上报固件原始 size；test13 已仅对 IRIS1 encoder 改为原厂 4 KiB 语义 | 已修正，待实机 |
+| 内部 DMA 分配长度 | 原厂统一向上对齐 4 KiB，并把对齐值作为 SET_BUFFERS 的 `buffer_size` | test12 只上报固件原始 size；test13 已仅对 IRIS1 encoder 改为原厂 4 KiB 语义 | 已实机通过（Stage 1--5） |
 
 ## test13 新发现和待修项
 
@@ -424,19 +431,18 @@ HFI packetizer 再将其封装为
 IRIS1 补发该属性，值取 `ctr->rc_enable`，并打印
 `venus-test15: encoder rc timestamp disable=...`。其他 Venus 版本不变。
 
-这仍是待实机验证的根因候选，不把相关性表述成已经修复。Test15 应先在 Stage 0
-确认值为 1、VBR mode 2 保持不变且 PM 回到 `suspended`；通过后才运行一次带远程
-实时日志的 Stage 9。
+这条候选已经完成实机验证并被排除：Test15 Stage 0 确认值为 1、VBR mode 2 不变，
+Stage 9 仍在首个 raw ETB 后卡死重启。因此属性对齐本身保留，但不再把它列为根因，
+也不再重复运行 Stage 0--8 或 Test15 Stage 9。
 
-## 下一步
+## 已完成的 Test15 验证边界
 
-1. test15 Stage 0 必须同时确认 VBR `mode=2` 与
-   `encoder rc timestamp disable=1`，并确认 PM 回到 `suspended`。
-2. test13 Stage 1--8 的内部 DMA、LOAD/START 和 FTB 结论继续有效，不再重复。
-3. Stage 0 通过后，在远程实时内核日志和复位取证标记都开启时，只运行一次
-   test15 Stage 9；它是验证新增时间戳 RC 属性的必要硬件测试。
-4. Stage 9 必须产出非空 H.264，并经软件解码验证后才算编码通过；否则按新增日志
-   继续定位，不能宣称可用。
+1. Stage 0 已确认 VBR `mode=2`、`encoder rc timestamp disable=1`，退出后 PM 回到
+   `suspended`。
+2. Test13 Stage 1--8 的内部 DMA、LOAD/START 和 FTB 结论继续有效，不再重复。
+3. Test15 Stage 9 已执行且整机卡死重启，没有非空 H.264、EBD 或 FBD。
+4. 后续只围绕首 raw ETB 的 alloc-size、DMA direction/sync、IOMMU 可见性做可区分
+   A/B；任何编码“通过”仍必须满足非空码流、ffprobe 识别和软件解码成功。
 
 ## Test15 编译期间继续比对记录
 
@@ -497,7 +503,7 @@ Stage 0--8。比较对象固定为当前 Test15 完整补丁树与小米 Android
    这是实际差异但不是确定根因。
 3. **编码码流 output size 策略**：当前小分辨率公式得到 73728，并把该值通过
    `0x20100c` 发给固件且用于 FTB；固件最终 requirement 是 36864，原厂在 S_FMT 后
-   倾向采用固件 requirement。若 Test15 仍复位，Test16 应优先尝试在 IRIS1 encoder
+   倾向采用固件 requirement。Test15 已复位，后续诊断版应优先尝试在 IRIS1 encoder
    使用最终 firmware bufreq，而不是继续猜测无关属性。
 4. **原厂专有 bitrate-type 属性**：原厂还有 `VENC_BITRATE_TYPE`（`0x2005031`，
    `hfi_enable`，默认 enabled），当前没有。但原厂只在 userspace 显式设置对应私有
@@ -505,7 +511,7 @@ Stage 0--8。比较对象固定为当前 Test15 完整补丁树与小米 Android
 5. **DMA 方向实现**：原厂把 dma-buf 统一以 `DMA_BIDIRECTIONAL` 映射，再显式对
    encoder input 有效区间做 clean/invalidate；当前按 VB2 队列语义把 input 映射为
    `DMA_TO_DEVICE` 并由 VB2 自动同步。两种做法都保证设备读前可见，暂时只能算实现
-   差异。若 Test15 失败，可用只改变 mapping/sync 方式的诊断补丁单独验证，但优先级
+   差异。Test15 已失败，可用只改变 mapping/sync 方式的诊断补丁单独验证，但优先级
    低于已确认的 size 策略差异。
 
 ### 已纠正的误判
@@ -515,7 +521,8 @@ Stage 0--8。比较对象固定为当前 Test15 完整补丁树与小米 Android
    差异。后续可以统一清零加固，但不能当作当前根因。
 2. 原厂把属性 `0x20100c` 命名为 `BUFFER_SIZE_MINIMUM`，当前上游命名为
    `BUFFER_SIZE_ACTUAL`；两边 wire ID 和 `{buffer_type, buffer_size}` payload 完全
-   相同。真正差异只是发送的 size 数值，不是属性编号或封包格式。
+   相同。真正差异包括发送的 size 数值以及当前是否在最终 requirements 后发送；
+   0027 已按原厂顺序补回，并使用 firmware-negotiated capture size。
 
 ### Test15 结果后的固定决策
 
@@ -523,10 +530,39 @@ Stage 0--8。比较对象固定为当前 Test15 完整补丁树与小米 Android
   `encoder rc timestamp disable=1`、VBR `work mode=2`，随后按 staged 门禁预期以
   `-EACCES` 返回；10 秒后 runtime PM 为 `suspended`。这证明新增属性已实际封包并
   被当前启动路径发送，同时没有破坏既有 VBR 模式或释放流程。
-- 若 Test15 Stage 9 通过：RC timestamp 是关键缺项，先验证长序列和输出码流，再
-  移除 staged 门禁。
-- 若仍在首个 ETB 后复位：不要重跑 Stage 0--8；下一步只在以下两项之间做可区分的
-  Test16：先将 IRIS1 encoder input/output alloc_len 收敛到原厂/firmware
+- Test15 Stage 9 实机失败并导致整机卡死重启。实时日志确认
+  `encoder rc timestamp disable=1` 确实在本次会话发送，因此该遗漏不是复位根因。
+  本次远程日志最后成功显示 persist0 的 `SET_BUFFERS queued`，但 Stage 4/5 已在同一
+  内核路径独立证明该操作及释放安全；日志在突然复位前没有完整送出，不能据此把
+  persist0 误判为新的边界。Test13 已捕获到首个 ETB 入队后中断，Stage 0--8 仍然
+  有效，禁止再次重复。
+- Test15 已在首个 ETB 后复位：不要重跑 Stage 0--8；下一步只在以下两项之间做
+  可区分诊断：先将 IRIS1 encoder input/output alloc_len 收敛到原厂/firmware
   requirements，并逐项打印实际 IOMMU domain、SG DMA 地址和长度；如果仍失败，
   再单独试验原厂的双向 DMA mapping 与显式 partial cache sync，不能把两类变化混在
   同一次编译里。
+
+## 0027：阶段诊断结束后的产品路径
+
+0024 已把 raw input 收敛为原厂 layout、compressed capture 收敛为 firmware
+requirement；0018/0024 已把 IRIS1 source DMA 固定为双向并在 ETB/FTB 前验证完整
+32-bit IOVA range、alignment 和 payload。重新逐行核对原厂
+`msm_vidc.c::start_streaming()` 后，确认此前“原厂不发送 0x20100c”的判断错误：原厂
+在最终 `GET_BUFFER_REQUIREMENTS` 后明确发送 `HAL_PARAM_BUFFER_SIZE_MINIMUM`，值取
+CAPTURE plane size，然后才 verify、登记 internal buffers、LOAD/START 和 qbuf。
+
+0027 因此完成以下收口：
+
+1. 最终 requirements 后发送同 wire `0x20100c`，type 为 OUTPUT，值为已收敛的
+   firmware capture requirement；
+2. 删除 Stage0--9 以及 `enc_test_stage`，完整路径固定为 internal buffers →
+   LOAD_RESOURCES → START → FTB → ETB；
+3. 删除可关闭的 vendor NV12 和 bidirectional 参数，使两项原厂平台契约在 IRIS1
+   上无条件生效；
+4. 保留唯一 `iris1_encoder` 总 gate 且默认 N，实机 Test16 明确开启后才运行完整路径；
+5. 自动测试先用 1 帧 H.264 探测，成功后才继续 H.264/HEVC/VP8 短流，任何失败立即
+   停止剩余 codec job。
+
+原厂 CAPTURE `static` alloc-mode 字段也已追完全部 set-buffer 调用：它没有导致普通
+encoder userspace capture DMA 逐个静态登记，FTB 仍直接携带 IOVA。因此当前没有仅凭
+该字段盲加重复 `SET_BUFFERS`。这项以后除非取得新的 wire 日志，不再重复检查。

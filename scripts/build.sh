@@ -68,7 +68,7 @@ scripts/kconfig/merge_config.sh -m .config \
 	"${config_fragment}" \
 	arch/arm64/configs/sm8150.config
 
-scripts/config --set-str LOCALVERSION "-sm8150-venus-test15"
+scripts/config --set-str LOCALVERSION "-sm8150-venus-test16"
 scripts/config --disable LOCALVERSION_AUTO
 scripts/config --module VIDEO_QCOM_VENUS
 scripts/config --enable SM_GCC_8150
@@ -120,9 +120,43 @@ install -m 0644 "${dtb}" \
 install -m 0644 .config "${artifact_dir}/kernel.config"
 install -m 0644 "${patch_manifest}" "${artifact_dir}/patches.sha256"
 install -m 0644 "${build_root}/scripts/venus-test-suite.sh" "${artifact_dir}/venus-test-suite.sh"
-install -m 0644 "${build_root}/docs/venus-test15.md" "${artifact_dir}/TESTING.md"
+install -m 0644 "${build_root}/docs/venus-test16.md" "${artifact_dir}/TESTING.md"
 install -m 0644 "${build_root}/docs/venus-sm8150-encoder-audit.md" \
 	"${artifact_dir}/ENCODER-AUDIT.md"
+install -m 0644 "${build_root}/docs/venus-sm8150-full-migration-audit.md" \
+	"${artifact_dir}/FULL-MIGRATION-AUDIT.md"
+install -m 0644 "${build_root}/docs/venus-sm8150-migration-status.md" \
+	"${artifact_dir}/MIGRATION-STATUS.md"
+install -m 0644 "${build_root}/docs/venus-sm8150-pending-hunk-ledger.md" \
+	"${artifact_dir}/PENDING-HUNK-LEDGER.md"
+install -m 0644 "${build_root}/docs/venus-sm8150-0019-hunk-ledger.md" \
+	"${artifact_dir}/0019-HUNK-LEDGER.md"
+install -m 0644 "${build_root}/docs/venus-sm8150-0020-hunk-ledger.md" \
+	"${artifact_dir}/0020-HUNK-LEDGER.md"
+install -m 0644 "${build_root}/docs/venus-sm8150-0021-hunk-ledger.md" \
+	"${artifact_dir}/0021-HUNK-LEDGER.md"
+install -m 0644 "${build_root}/docs/venus-sm8150-0022-hunk-ledger.md" \
+	"${artifact_dir}/0022-HUNK-LEDGER.md"
+install -m 0644 "${build_root}/docs/venus-sm8150-0023-hunk-ledger.md" \
+	"${artifact_dir}/0023-HUNK-LEDGER.md"
+install -m 0644 "${build_root}/docs/venus-sm8150-0024-hunk-ledger.md" \
+	"${artifact_dir}/0024-HUNK-LEDGER.md"
+install -m 0644 "${build_root}/docs/venus-sm8150-0026-hunk-ledger.md" \
+	"${artifact_dir}/0026-HUNK-LEDGER.md"
+install -m 0644 "${build_root}/docs/venus-sm8150-0027-hunk-ledger.md" \
+	"${artifact_dir}/0027-HUNK-LEDGER.md"
+install -m 0644 "${build_root}/docs/venus-sm8150-0028-hunk-ledger.md" \
+	"${artifact_dir}/0028-HUNK-LEDGER.md"
+install -m 0644 "${build_root}/docs/venus-sm8150-full-difference-matrix.md" \
+	"${artifact_dir}/FULL-DIFFERENCE-MATRIX.md"
+install -m 0644 "${build_root}/docs/venus-sm8150-test15-hunk-ledger.md" \
+	"${artifact_dir}/TEST15-HUNK-LEDGER.md"
+install -m 0644 "${build_root}/docs/venus-sm8150-test15-vs-base-full.diff" \
+	"${artifact_dir}/TEST15-VS-BASE-FULL.diff"
+install -m 0644 "${build_root}/docs/venus-sm8150-vendor-line-ledger.md" \
+	"${artifact_dir}/VENDOR-LINE-LEDGER.md"
+install -m 0644 "${build_root}/docs/venus-sm8150-current-line-ledger.md" \
+	"${artifact_dir}/CURRENT-LINE-LEDGER.md"
 
 kernel_release="$(make -s "${make_args[@]}" kernelrelease)"
 commit="$(git rev-parse HEAD)"
@@ -147,4 +181,21 @@ sha256sum \
 	venus-test-suite.sh \
 	TESTING.md \
 	ENCODER-AUDIT.md \
+	FULL-MIGRATION-AUDIT.md \
+	MIGRATION-STATUS.md \
+	PENDING-HUNK-LEDGER.md \
+	0019-HUNK-LEDGER.md \
+	0020-HUNK-LEDGER.md \
+	0021-HUNK-LEDGER.md \
+	0022-HUNK-LEDGER.md \
+	0023-HUNK-LEDGER.md \
+	0024-HUNK-LEDGER.md \
+	0026-HUNK-LEDGER.md \
+	0027-HUNK-LEDGER.md \
+	0028-HUNK-LEDGER.md \
+	FULL-DIFFERENCE-MATRIX.md \
+	TEST15-HUNK-LEDGER.md \
+	TEST15-VS-BASE-FULL.diff \
+	VENDOR-LINE-LEDGER.md \
+	CURRENT-LINE-LEDGER.md \
 	> SHA256SUMS

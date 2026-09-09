@@ -1,0 +1,764 @@
+From: Codex <codex@openai.com>
+Date: Wed, 9 Sep 2026 06:30:00 +0000
+Subject: [PATCH] media: venus: close SM8150 Main10 and encoder DMA gaps
+
+Mirror the remaining wire-visible SM8150/VPU5 behavior identified by the
+complete Xiaomi Q OSS line and function review.
+
+For decoder Main10, teach the HFI4 packetizer to emit variable-sized plane
+constraint packets, send the downstream P010 256-byte stride, 32/16-line,
+256-byte alignment constraints, and reserve the downstream 4 KiB UV plane
+gap. Keep format enumeration capability-stable while TRY/S/G_FMT enforce
+the known stream bit depth. Add low-volume ioctl and buffer diagnostics.
+
+Backport the capability parser payload-size fixes so mixed raw-format plane
+counts cannot desynchronize SYS_INIT parsing.
+
+For encoder bring-up, size linear NV12 exactly like the SM8150 downstream
+VENUS_BUFFER_SIZE macro and map raw input bidirectionally. Snapshot both
+policies at open so they cannot change beneath live VB2 mappings. Keep the
+existing safety gate and staged checkpoints. Parse the optional VPU5 EBD
+tail without raising the minimum accepted packet size, retain recon/UBWC
+statistics, and reproduce the vendor bucket weights exactly. Log CR/CF
+bandwidth inputs without changing the interconnect vote. RECON remains
+metadata-only and is deliberately not allocated as internal DMA.
+
+Invalidate requirements on format/lifecycle transitions and reset all
+per-stream diagnostics before STREAMON.
+
+---
+diff --git a/drivers/media/platform/qcom/venus/core.h b/drivers/media/platform/qcom/venus/core.h
+index b7d4f17c5751..d5dd7d534c34 100644
+--- a/drivers/media/platform/qcom/venus/core.h
++++ b/drivers/media/platform/qcom/venus/core.h
+@@ -491,6 +491,14 @@ enum venus_inst_modes {
+  * @drain_active:	Drain sequence is in progress
+  * @enc_pm_active: encoder stream owns a runtime-PM reference
+  * @enc_test_stage: snapshotted SM8150 encoder bring-up checkpoint
++ * @enc_vendor_nv12: use the downstream SM8150 linear NV12 allocation formula
++ * @enc_dma_bidirectional: map raw encoder buffers for firmware read/write
++ * @enc_ebd_count: number of encoder input-done messages seen in this instance
++ * @enc_recon_index: latest VPU5 reconstruction-buffer index
++ * @enc_ubwc_cr_q16: latest VPU5 UBWC compression ratio in Q16 format
++ * @enc_complexity_factor_q16: latest VPU5 complexity factor in Q16 format
++ * @enc_complexity_number: latest raw VPU5 complexity counter
++ * @enc_bw_diag_ebd_count: last encoder EBD included in the bandwidth log
+  * @flags:	bitmask flags describing current instance mode
+  * @dpb_ids:	DPB buffer ID's
+  */
+@@ -566,6 +574,14 @@ struct venus_inst {
+ 	bool drain_active;
+ 	bool enc_pm_active;
+ 	u8 enc_test_stage;
++	bool enc_vendor_nv12;
++	bool enc_dma_bidirectional;
++	u32 enc_ebd_count;
++	u32 enc_recon_index;
++	u32 enc_ubwc_cr_q16;
++	u32 enc_complexity_factor_q16;
++	u32 enc_complexity_number;
++	u32 enc_bw_diag_ebd_count;
+ 	enum venus_inst_modes flags;
+ 	struct ida dpb_ids;
+ };
+diff --git a/drivers/media/platform/qcom/venus/helpers.c b/drivers/media/platform/qcom/venus/helpers.c
+index d2d45cccfaa2..22d7afe3e14f 100644
+--- a/drivers/media/platform/qcom/venus/helpers.c
++++ b/drivers/media/platform/qcom/venus/helpers.c
+@@ -623,10 +623,11 @@ session_process_buf(struct venus_inst *inst, struct vb2_v4l2_buffer *vbuf)
+ 	if (IS_IRIS1(inst->core) &&
+ 	    inst->session_type == VIDC_SESSION_TYPE_ENC)
+ 		dev_info(inst->core->dev,
+-			 "venus-test13: queue %s tag=%u dma=%#x alloc=%u filled=%u offset=%u\n",
++			 "venus-migrate: queue %s tag=%u dma=%#x alloc=%u filled=%u offset=%u bidirectional=%u\n",
+ 			 fdata.buffer_type == HFI_BUFFER_INPUT ? "ETB" : "FTB",
+ 			 fdata.clnt_data, fdata.device_addr, fdata.alloc_len,
+-			 fdata.filled_len, fdata.offset);
++			 fdata.filled_len, fdata.offset,
++			 vb->vb2_queue->bidirectional);
+ 
+ 	ret = hfi_session_process_buf(inst, &fdata);
+ 	if (IS_IRIS1(inst->core) &&
+@@ -1471,28 +1472,42 @@ EXPORT_SYMBOL_GPL(venus_helper_set_work_route);
+ int venus_helper_set_format_constraints(struct venus_inst *inst)
+ {
+ 	const u32 ptype = HFI_PROPERTY_PARAM_UNCOMPRESSED_PLANE_ACTUAL_CONSTRAINTS_INFO;
+-	struct hfi_uncompressed_plane_actual_constraints_info pconstraint;
++	struct hfi_uncompressed_plane_actual_constraints_info pconstraint = {};
++	u32 stride_multiple;
++	int ret;
+ 
+-	if (!IS_V6(inst->core))
++	if (!IS_V6(inst->core) && !IS_IRIS1(inst->core))
+ 		return 0;
+ 
+ 	if (inst->opb_fmt == HFI_COLOR_FORMAT_NV12_UBWC ||
+ 	    inst->opb_fmt == HFI_COLOR_FORMAT_YUV420_TP10_UBWC)
+ 		return 0;
++	if (IS_IRIS1(inst->core) && inst->opb_fmt != HFI_COLOR_FORMAT_P010)
++		return 0;
++
++	/* SM8150/VPU5 requires 256-byte strides for linear P010 output. */
++	stride_multiple = IS_IRIS1(inst->core) ? 256 : 128;
+ 
+-	pconstraint.buffer_type = HFI_BUFFER_OUTPUT2;
++	pconstraint.buffer_type = IS_IRIS1(inst->core) ? inst->opb_buftype :
++							       HFI_BUFFER_OUTPUT2;
+ 	pconstraint.num_planes = 2;
+-	pconstraint.plane_format[0].stride_multiples = 128;
++	pconstraint.plane_format[0].stride_multiples = stride_multiple;
+ 	pconstraint.plane_format[0].max_stride = 8192;
+ 	pconstraint.plane_format[0].min_plane_buffer_height_multiple = 32;
+ 	pconstraint.plane_format[0].buffer_alignment = 256;
+ 
+-	pconstraint.plane_format[1].stride_multiples = 128;
++	pconstraint.plane_format[1].stride_multiples = stride_multiple;
+ 	pconstraint.plane_format[1].max_stride = 8192;
+ 	pconstraint.plane_format[1].min_plane_buffer_height_multiple = 16;
+ 	pconstraint.plane_format[1].buffer_alignment = 256;
+ 
+-	return hfi_session_set_property(inst, ptype, &pconstraint);
++	ret = hfi_session_set_property(inst, ptype, &pconstraint);
++	if (!ret && IS_IRIS1(inst->core))
++		dev_info(inst->core->dev_dec,
++			 "sm8150-venus: P010 constraints sent type=%#x planes=2 stride=%u heights=32/16 align=256\n",
++			 pconstraint.buffer_type, stride_multiple);
++
++	return ret;
+ }
+ EXPORT_SYMBOL_GPL(venus_helper_set_format_constraints);
+ 
+diff --git a/drivers/media/platform/qcom/venus/hfi_cmds.c b/drivers/media/platform/qcom/venus/hfi_cmds.c
+index 0c06232e0103..acd41b02ee92 100644
+--- a/drivers/media/platform/qcom/venus/hfi_cmds.c
++++ b/drivers/media/platform/qcom/venus/hfi_cmds.c
+@@ -1250,6 +1250,22 @@ pkt_session_set_property_4xx(struct hfi_session_set_property_pkt *pkt,
+ 	 * properties will be handled in the default case.
+ 	 */
+ 	switch (ptype) {
++	case HFI_PROPERTY_PARAM_UNCOMPRESSED_PLANE_ACTUAL_CONSTRAINTS_INFO: {
++		struct hfi_uncompressed_plane_actual_constraints_info *in = pdata;
++		struct hfi_uncompressed_plane_actual_constraints_info *info = prop_data;
++
++		if (!in->num_planes || in->num_planes > ARRAY_SIZE(info->plane_format))
++			return -EINVAL;
++
++		info->buffer_type = in->buffer_type;
++		info->num_planes = in->num_planes;
++		memcpy(info->plane_format, in->plane_format,
++		       in->num_planes * sizeof(info->plane_format[0]));
++		pkt->shdr.hdr.size += sizeof(u32) + sizeof(info->buffer_type) +
++				      sizeof(info->num_planes) +
++				      in->num_planes * sizeof(info->plane_format[0]);
++		break;
++	}
+ 	case HFI_PROPERTY_PARAM_BUFFER_COUNT_ACTUAL: {
+ 		struct hfi_buffer_count_actual *in = pdata;
+ 		struct hfi_buffer_count_actual_4xx *count = prop_data;
+diff --git a/drivers/media/platform/qcom/venus/hfi_msgs.c b/drivers/media/platform/qcom/venus/hfi_msgs.c
+index 67a345c3bb32..7a688bb42639 100644
+--- a/drivers/media/platform/qcom/venus/hfi_msgs.c
++++ b/drivers/media/platform/qcom/venus/hfi_msgs.c
+@@ -5,6 +5,7 @@
+  */
+ #include <linux/hash.h>
+ #include <linux/list.h>
++#include <linux/math64.h>
+ #include <linux/slab.h>
+ #include <linux/soc/qcom/smem.h>
+ #include <media/videobuf2-v4l2.h>
+@@ -545,10 +546,67 @@ static void hfi_session_etb_done(struct venus_core *core,
+ 				 struct venus_inst *inst, void *packet)
+ {
+ 	struct hfi_msg_session_empty_buffer_done_pkt *pkt = packet;
++	u32 hfi_flags = 0;
++
++	if (IS_IRIS1(core) && inst->session_type == VIDC_SESSION_TYPE_ENC &&
++	    pkt->shdr.hdr.size >= sizeof(*pkt) +
++				  sizeof(struct hfi_msg_session_empty_buffer_done_v4_tail)) {
++		const struct hfi_msg_session_empty_buffer_done_v4_tail *tail;
++		static const u16 ubwc_bucket_weights[] = {
++			32, 64, 96, 128, 160, 192, 256,
++		};
++		u64 weighted_sum = 0, sum = 0, numerator;
++		u32 cr_q16 = 0, cf_q16, frame_size;
++		u32 mbs_per_frame, picture_type = 0;
++		u32 ebd_count;
++		unsigned int i;
++
++		tail = (const void *)pkt->data;
++		hfi_flags = tail->flags;
++
++		for (i = 0; i < ARRAY_SIZE(tail->recon.ubwc.info); i++) {
++			u64 samples = tail->recon.ubwc.info[i];
++
++			sum += samples;
++			weighted_sum += ubwc_bucket_weights[i] * samples;
++		}
++
++		if (sum && weighted_sum) {
++			numerator = (256 * sum) << 16;
++			cr_q16 = div64_u64(numerator, weighted_sum);
++		}
++
++		mbs_per_frame = (ALIGN(max(inst->width, inst->out_width), 16) / 16) *
++				(ALIGN(max(inst->height, inst->out_height), 16) / 16);
++		frame_size = (mbs_per_frame / (32 * 8) * 3) / 2;
++		cf_q16 = frame_size ? tail->recon.complexity_number / frame_size :
++				      4 << 16;
++
++		WRITE_ONCE(inst->enc_recon_index, tail->recon.frame_index);
++		WRITE_ONCE(inst->enc_ubwc_cr_q16, cr_q16);
++		WRITE_ONCE(inst->enc_complexity_factor_q16, cf_q16);
++		WRITE_ONCE(inst->enc_complexity_number,
++			   tail->recon.complexity_number);
++		ebd_count = READ_ONCE(inst->enc_ebd_count) + 1;
++		WRITE_ONCE(inst->enc_ebd_count, ebd_count);
++
++		if (tail->is_sync_frame &&
++		    pkt->shdr.hdr.size >= sizeof(*pkt) + sizeof(*tail) +
++					  sizeof(picture_type))
++			picture_type = tail->data[0];
++
++		if (ebd_count <= 4 || !(ebd_count % 60))
++			dev_info(core->dev,
++				 "sm8150-venus: EBD count=%u tag=%u flags=%#x recon=%u cr_q16=%u cf_q16=%u complexity=%u sync=%u picture=%#x\n",
++				 ebd_count, pkt->input_tag, hfi_flags,
++				 tail->recon.frame_index, cr_q16, cf_q16,
++				 tail->recon.complexity_number,
++				 tail->is_sync_frame, picture_type);
++	}
+ 
+ 	inst->error = pkt->error_type;
+ 	inst->ops->buf_done(inst, HFI_BUFFER_INPUT, pkt->input_tag,
+-			    pkt->filled_len, pkt->offset, 0, 0, 0);
++			    pkt->filled_len, pkt->offset, 0, hfi_flags, 0);
+ }
+ 
+ static void hfi_session_ftb_done(struct venus_core *core,
+diff --git a/drivers/media/platform/qcom/venus/hfi_msgs.h b/drivers/media/platform/qcom/venus/hfi_msgs.h
+index 8c2e17b0d36f..895ab2904899 100644
+--- a/drivers/media/platform/qcom/venus/hfi_msgs.h
++++ b/drivers/media/platform/qcom/venus/hfi_msgs.h
+@@ -159,6 +159,28 @@ struct hfi_msg_session_empty_buffer_done_pkt {
+ 	u32 data[];
+ };
+ 
++/*
++ * VPU5/HFI4 appends encoder reconstruction statistics to EBD messages.  Keep
++ * this as a tail structure so older firmware messages remain valid and the
++ * common EBD prefix above stays the minimum accepted packet size.
++ */
++struct hfi_ubwc_cr_stats_info {
++	u32 info[7];
++};
++
++struct hfi_frame_cr_stats {
++	u32 frame_index;
++	struct hfi_ubwc_cr_stats_info ubwc;
++	u32 complexity_number;
++};
++
++struct hfi_msg_session_empty_buffer_done_v4_tail {
++	u32 flags;
++	struct hfi_frame_cr_stats recon;
++	u32 is_sync_frame;
++	u32 data[];
++};
++
+ struct hfi_msg_session_fbd_compressed_pkt {
+ 	struct hfi_session_hdr_pkt shdr;
+ 	u32 time_stamp_hi;
+diff --git a/drivers/media/platform/qcom/venus/hfi_parser.c b/drivers/media/platform/qcom/venus/hfi_parser.c
+index 6ded5c4710e3..423d8ad9e923 100644
+--- a/drivers/media/platform/qcom/venus/hfi_parser.c
++++ b/drivers/media/platform/qcom/venus/hfi_parser.c
+@@ -85,7 +85,7 @@ parse_alloc_mode(struct venus_core *core, u32 codecs, u32 domain, void *data)
+ 		type++;
+ 	}
+ 
+-	return sizeof(*mode);
++	return mode->num_entries * sizeof(u32) + sizeof(*mode);
+ }
+ 
+ static void fill_profile_level(struct hfi_plat_caps *cap, const void *data,
+@@ -146,7 +146,7 @@ parse_caps(struct venus_core *core, u32 codecs, u32 domain, void *data)
+ 	for_each_codec(core->caps, ARRAY_SIZE(core->caps), codecs, domain,
+ 		       fill_caps, caps_arr, num_caps);
+ 
+-	return sizeof(*caps);
++	return num_caps * sizeof(*cap) + sizeof(u32);
+ }
+ 
+ static void fill_raw_fmts(struct hfi_plat_caps *cap, const void *fmts,
+@@ -171,7 +171,7 @@ parse_raw_formats(struct venus_core *core, u32 codecs, u32 domain, void *data)
+ 	u32 entries = fmt->format_entries;
+ 	unsigned int i = 0;
+ 	u32 num_planes = 0;
+-	u32 size;
++	u32 size = 2 * sizeof(u32);
+ 
+ 	while (entries) {
+ 		num_planes = pinfo->num_planes;
+@@ -186,6 +186,7 @@ parse_raw_formats(struct venus_core *core, u32 codecs, u32 domain, void *data)
+ 		if (pinfo->num_planes > MAX_PLANES)
+ 			break;
+ 
++		size += sizeof(*constr) * num_planes + 2 * sizeof(u32);
+ 		pinfo = (void *)pinfo + sizeof(*constr) * num_planes +
+ 			2 * sizeof(u32);
+ 		entries--;
+@@ -193,9 +194,6 @@ parse_raw_formats(struct venus_core *core, u32 codecs, u32 domain, void *data)
+ 
+ 	for_each_codec(core->caps, ARRAY_SIZE(core->caps), codecs, domain,
+ 		       fill_raw_fmts, rawfmts, i);
+-	size = fmt->format_entries * (sizeof(*constr) * num_planes + 2 * sizeof(u32))
+-		+ 2 * sizeof(u32);
+-
+ 	return size;
+ }
+ 
+diff --git a/drivers/media/platform/qcom/venus/pm_helpers.c b/drivers/media/platform/qcom/venus/pm_helpers.c
+index 9440b8b66fc3..adce713019c4 100644
+--- a/drivers/media/platform/qcom/venus/pm_helpers.c
++++ b/drivers/media/platform/qcom/venus/pm_helpers.c
+@@ -235,6 +235,18 @@ static int load_scale_bw(struct venus_core *core)
+ 		mbs_to_bw(inst, mbs_per_sec, &avg, &peak);
+ 		total_avg += avg;
+ 		total_peak += peak;
++
++		if (IS_IRIS1(core) &&
++		    inst->session_type == VIDC_SESSION_TYPE_ENC &&
++		    READ_ONCE(inst->enc_ebd_count) != inst->enc_bw_diag_ebd_count) {
++			inst->enc_bw_diag_ebd_count = READ_ONCE(inst->enc_ebd_count);
++			dev_info(core->dev,
++				 "sm8150-venus: bandwidth diagnostic ebd=%u mbs=%u table_avg=%u table_peak=%u cr_q16=%u cf_q16=%u complexity=%u (vote unchanged)\n",
++				 inst->enc_bw_diag_ebd_count, mbs_per_sec, avg, peak,
++				 READ_ONCE(inst->enc_ubwc_cr_q16),
++				 READ_ONCE(inst->enc_complexity_factor_q16),
++				 READ_ONCE(inst->enc_complexity_number));
++		}
+ 	}
+ 
+ 	/*
+diff --git a/drivers/media/platform/qcom/venus/vdec.c b/drivers/media/platform/qcom/venus/vdec.c
+index 07fccdd11859..d754e4f26e17 100644
+--- a/drivers/media/platform/qcom/venus/vdec.c
++++ b/drivers/media/platform/qcom/venus/vdec.c
+@@ -125,6 +125,62 @@ static bool vdec_fmt_is_10bit(u32 pixfmt)
+ 	       pixfmt == V4L2_PIX_FMT_QC10C;
+ }
+ 
++static u32 vdec_get_framesz(struct venus_inst *inst, u32 pixfmt,
++			    u32 width, u32 height)
++{
++	u32 size = venus_helper_get_framesz(pixfmt, width, height);
++
++	/* SM8150 downstream VENUS_BUFFER_SIZE reserves a 4 KiB UV gap. */
++	if (IS_IRIS1(inst->core) && pixfmt == V4L2_PIX_FMT_P010 && size)
++		size += SZ_4K;
++
++	return size;
++}
++
++static u32 vdec_get_framesz_raw(struct venus_inst *inst, u32 hfi_fmt,
++				u32 width, u32 height)
++{
++	u32 size = venus_helper_get_framesz_raw(hfi_fmt, width, height);
++
++	if (IS_IRIS1(inst->core) && hfi_fmt == HFI_COLOR_FORMAT_P010 && size)
++		size += SZ_4K;
++
++	return size;
++}
++
++static bool vdec_format_is_valid(struct venus_inst *inst,
++				 const struct venus_format *fmt, u32 type,
++				 bool match_bit_depth)
++{
++	if (fmt->type != type)
++		return false;
++
++	if (V4L2_TYPE_IS_OUTPUT(type)) {
++		if (!venus_helper_check_codec(inst, fmt->pixfmt))
++			return false;
++	} else if (!venus_helper_check_format(inst, fmt->pixfmt)) {
++		return false;
++	}
++
++	/*
++	 * ENUM_FMT must remain stable before the compressed stream header has
++	 * established inst->bit_depth.  TRY/S/G_FMT, however, must never select
++	 * an 8-bit capture format for a 10-bit stream (or vice versa).
++	 */
++	if (!match_bit_depth || !V4L2_TYPE_IS_CAPTURE(type))
++		return true;
++
++	if (vdec_fmt_is_8bit(fmt->pixfmt) &&
++	    inst->bit_depth == VIDC_BITDEPTH_10)
++		return false;
++
++	if (vdec_fmt_is_10bit(fmt->pixfmt) &&
++	    inst->bit_depth != VIDC_BITDEPTH_10)
++		return false;
++
++	return true;
++}
++
+ static const struct venus_format *
+ find_format(struct venus_inst *inst, u32 pixfmt, u32 type)
+ {
+@@ -137,27 +193,9 @@ find_format(struct venus_inst *inst, u32 pixfmt, u32 type)
+ 			break;
+ 	}
+ 
+-	if (i == size || fmt[i].type != type)
++	if (i == size || !vdec_format_is_valid(inst, &fmt[i], type, true))
+ 		return NULL;
+ 
+-	if (type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE &&
+-	    !venus_helper_check_codec(inst, fmt[i].pixfmt))
+-		return NULL;
+-
+-	if (V4L2_TYPE_IS_CAPTURE(type) &&
+-	    !venus_helper_check_format(inst, fmt[i].pixfmt))
+-		return NULL;
+-
+-	if (V4L2_TYPE_IS_CAPTURE(type)) {
+-		if (vdec_fmt_is_8bit(fmt[i].pixfmt) &&
+-		    inst->bit_depth == VIDC_BITDEPTH_10)
+-			return NULL;
+-
+-		if (vdec_fmt_is_10bit(fmt[i].pixfmt) &&
+-		    inst->bit_depth != VIDC_BITDEPTH_10)
+-			return NULL;
+-	}
+-
+ 	return &fmt[i];
+ }
+ 
+@@ -172,16 +210,7 @@ find_format_by_index(struct venus_inst *inst, unsigned int index, u32 type)
+ 		return NULL;
+ 
+ 	for (i = 0; i < size; i++) {
+-		bool valid = false;
+-
+-		if (fmt[i].type != type)
+-			continue;
+-
+-		if (V4L2_TYPE_IS_OUTPUT(type)) {
+-			valid = venus_helper_check_codec(inst, fmt[i].pixfmt);
+-		} else {
+-			valid = venus_helper_check_format(inst, fmt[i].pixfmt);
+-		}
++		bool valid = vdec_format_is_valid(inst, &fmt[i], type, false);
+ 
+ 		if (k == index && valid)
+ 			break;
+@@ -240,8 +269,8 @@ vdec_try_fmt_common(struct venus_inst *inst, struct v4l2_format *f)
+ 	pixmp->num_planes = fmt->num_planes;
+ 	pixmp->flags = 0;
+ 
+-	szimage = venus_helper_get_framesz(pixmp->pixelformat, pixmp->width,
+-					   pixmp->height);
++	szimage = vdec_get_framesz(inst, pixmp->pixelformat, pixmp->width,
++				 pixmp->height);
+ 
+ 	if (f->type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) {
+ 		unsigned int stride = pixmp->width;
+@@ -269,8 +298,18 @@ vdec_try_fmt_common(struct venus_inst *inst, struct v4l2_format *f)
+ static int vdec_try_fmt(struct file *file, void *fh, struct v4l2_format *f)
+ {
+ 	struct venus_inst *inst = to_inst(file);
++	struct v4l2_pix_format_mplane *pixmp = &f->fmt.pix_mp;
+ 
+-	vdec_try_fmt_common(inst, f);
++	if (!vdec_try_fmt_common(inst, f))
++		return -EINVAL;
++	if (IS_IRIS1(inst->core) &&
++	    f->type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE &&
++	    inst->bit_depth == VIDC_BITDEPTH_10)
++		dev_info(inst->core->dev_dec,
++			 "venus-migrate: TRY_FMT capture fmt=%#x %ux%u stride=%u size=%u\n",
++			 pixmp->pixelformat, pixmp->width, pixmp->height,
++			 pixmp->plane_fmt[0].bytesperline,
++			 pixmp->plane_fmt[0].sizeimage);
+ 
+ 	return 0;
+ }
+@@ -341,7 +380,17 @@ static int vdec_g_fmt(struct file *file, void *fh, struct v4l2_format *f)
+ 		pixmp->height = inst->out_height;
+ 	}
+ 
+-	vdec_try_fmt_common(inst, f);
++	if (!vdec_try_fmt_common(inst, f))
++		return -EINVAL;
++
++	if (IS_IRIS1(inst->core) &&
++	    f->type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE &&
++	    inst->bit_depth == VIDC_BITDEPTH_10)
++		dev_info(inst->core->dev_dec,
++			 "venus-migrate: G_FMT capture fmt=%#x %ux%u stride=%u size=%u\n",
++			 pixmp->pixelformat, pixmp->width, pixmp->height,
++			 pixmp->plane_fmt[0].bytesperline,
++			 pixmp->plane_fmt[0].sizeimage);
+ 
+ 	return 0;
+ }
+@@ -364,6 +413,8 @@ static int vdec_s_fmt(struct file *file, void *fh, struct v4l2_format *f)
+ 	orig_pixmp = *pixmp;
+ 
+ 	fmt = vdec_try_fmt_common(inst, f);
++	if (!fmt)
++		return -EINVAL;
+ 
+ 	if (f->type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) {
+ 		pixfmt_out = pixmp->pixelformat;
+@@ -417,7 +468,15 @@ static int vdec_s_fmt(struct file *file, void *fh, struct v4l2_format *f)
+ 	} else if (f->type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) {
+ 		inst->fmt_cap = fmt;
+ 		inst->output2_buf_size =
+-			venus_helper_get_framesz(pixfmt_cap, orig_pixmp.width, orig_pixmp.height);
++			vdec_get_framesz(inst, pixfmt_cap, orig_pixmp.width,
++					   orig_pixmp.height);
++		if (IS_IRIS1(inst->core) &&
++		    inst->bit_depth == VIDC_BITDEPTH_10)
++			dev_info(inst->core->dev_dec,
++				 "venus-migrate: S_FMT capture requested=%#x selected=%#x stride=%u size=%u\n",
++				 orig_pixmp.pixelformat, pixmp->pixelformat,
++				 pixmp->plane_fmt[0].bytesperline,
++				 pixmp->plane_fmt[0].sizeimage);
+ 	}
+ 
+ 	return 0;
+@@ -819,10 +878,9 @@ static int vdec_output_conf(struct venus_inst *inst)
+ 	if (ret)
+ 		return ret;
+ 
+-	inst->output_buf_size =
+-			venus_helper_get_framesz_raw(out_fmt, width, height);
+-	inst->output2_buf_size =
+-			venus_helper_get_framesz_raw(out2_fmt, width, height);
++	inst->output_buf_size = vdec_get_framesz_raw(inst, out_fmt, width, height);
++	inst->output2_buf_size = vdec_get_framesz_raw(inst, out2_fmt, width,
++						     height);
+ 
+ 	if (is_ubwc_fmt(out_fmt)) {
+ 		inst->opb_buftype = HFI_BUFFER_OUTPUT2;
+@@ -1025,9 +1083,8 @@ static int vdec_queue_setup(struct vb2_queue *q,
+ 	switch (q->type) {
+ 	case V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE:
+ 		*num_planes = inst->fmt_out->num_planes;
+-		sizes[0] = venus_helper_get_framesz(inst->fmt_out->pixfmt,
+-						    inst->out_width,
+-						    inst->out_height);
++		sizes[0] = vdec_get_framesz(inst, inst->fmt_out->pixfmt,
++					     inst->out_width, inst->out_height);
+ 		sizes[0] = max(sizes[0], inst->input_buf_size);
+ 		inst->input_buf_size = sizes[0];
+ 		*num_buffers = max(*num_buffers, in_num);
+@@ -1036,12 +1093,16 @@ static int vdec_queue_setup(struct vb2_queue *q,
+ 		break;
+ 	case V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE:
+ 		*num_planes = inst->fmt_cap->num_planes;
+-		sizes[0] = venus_helper_get_framesz(inst->fmt_cap->pixfmt,
+-						    inst->width,
+-						    inst->height);
++		sizes[0] = vdec_get_framesz(inst, inst->fmt_cap->pixfmt,
++					     inst->width, inst->height);
+ 		inst->output_buf_size = sizes[0];
+ 		*num_buffers = max(*num_buffers, out_num);
+ 		inst->num_output_bufs = *num_buffers;
++		if (IS_IRIS1(core) && inst->bit_depth == VIDC_BITDEPTH_10)
++			dev_info(core->dev_dec,
++				 "venus-migrate: REQBUFS capture count=%u planes=%u size=%u fmt=%#x\n",
++				 *num_buffers, *num_planes, sizes[0],
++				 inst->fmt_cap->pixfmt);
+ 
+ 		mutex_lock(&inst->lock);
+ 		if (inst->codec_state == VENUS_DEC_STATE_CAPTURE_SETUP)
+@@ -1398,10 +1459,25 @@ static void vdec_session_release(struct venus_inst *inst)
+ static int vdec_buf_init(struct vb2_buffer *vb)
+ {
+ 	struct venus_inst *inst = vb2_get_drv_priv(vb->vb2_queue);
++	struct vb2_v4l2_buffer *vbuf = to_vb2_v4l2_buffer(vb);
++	struct venus_buffer *buf = to_venus_buffer(vbuf);
++	int ret;
+ 
+ 	inst->buf_count++;
+ 
+-	return venus_helper_vb2_buf_init(vb);
++	ret = venus_helper_vb2_buf_init(vb);
++	if (ret) {
++		inst->buf_count--;
++		return ret;
++	}
++
++	if (IS_IRIS1(inst->core) && V4L2_TYPE_IS_CAPTURE(vb->type) &&
++	    inst->bit_depth == VIDC_BITDEPTH_10)
++		dev_info(inst->core->dev_dec,
++			 "venus-migrate: capture buffer index=%u length=%lu dma=%pad\n",
++			 vb->index, vb2_plane_size(vb, 0), &buf->dma_addr);
++
++	return 0;
+ }
+ 
+ static void vdec_buf_cleanup(struct vb2_buffer *vb)
+diff --git a/drivers/media/platform/qcom/venus/venc.c b/drivers/media/platform/qcom/venus/venc.c
+index 37dd4cc41cf1..9ea3a3890fb6 100644
+--- a/drivers/media/platform/qcom/venus/venc.c
++++ b/drivers/media/platform/qcom/venus/venc.c
+@@ -35,6 +35,18 @@ module_param_named(iris1_encoder_stage, venus_iris1_encoder_stage, uint, 0644);
+ MODULE_PARM_DESC(iris1_encoder_stage,
+ 		 "SM8150 encoder checkpoint: 0=protocol, 1=scratch, 2=scratch1, 3=scratch2, 4=persist, 5=all internal, 6=load, 7=start, 8=capture DMA, 9=full DMA (default: 0)");
+ 
++static bool venus_iris1_encoder_vendor_nv12 = true;
++module_param_named(iris1_encoder_vendor_nv12,
++		   venus_iris1_encoder_vendor_nv12, bool, 0644);
++MODULE_PARM_DESC(iris1_encoder_vendor_nv12,
++		 "Use the SM8150 downstream NV12 allocation formula (default: on)");
++
++static bool venus_iris1_encoder_bidirectional = true;
++module_param_named(iris1_encoder_bidirectional,
++		   venus_iris1_encoder_bidirectional, bool, 0644);
++MODULE_PARM_DESC(iris1_encoder_bidirectional,
++		 "Map SM8150 encoder raw-input buffers bidirectionally (default: on)");
++
+ /*
+  * Three resons to keep MPLANE formats (despite that the number of planes
+  * currently is one):
+@@ -183,6 +195,26 @@ static int venc_enum_fmt(struct file *file, void *fh, struct v4l2_fmtdesc *f)
+ 	return 0;
+ }
+ 
++static u32 venc_get_framesz(struct venus_inst *inst, u32 pixfmt,
++			    u32 width, u32 height)
++{
++	u32 y_stride, uv_stride, y_scanlines, uv_scanlines;
++
++	if (!IS_IRIS1(inst->core) ||
++	    !inst->enc_vendor_nv12 ||
++	    pixfmt != V4L2_PIX_FMT_NV12)
++		return venus_helper_get_framesz(pixfmt, width, height);
++
++	y_stride = ALIGN(width, 128);
++	uv_stride = ALIGN(width, 128);
++	y_scanlines = ALIGN(height, 32);
++	uv_scanlines = ALIGN((height + 1) >> 1, 16);
++
++	/* Exact COLOR_FMT_NV12 VENUS_BUFFER_SIZE() from SM8150 Q OSS. */
++	return ALIGN(y_stride * y_scanlines + uv_stride * uv_scanlines + SZ_4K,
++		     SZ_4K);
++}
++
+ static const struct venus_format *
+ venc_try_fmt_common(struct venus_inst *inst, struct v4l2_format *f)
+ {
+@@ -223,9 +255,8 @@ venc_try_fmt_common(struct venus_inst *inst, struct v4l2_format *f)
+ 	pixmp->num_planes = fmt->num_planes;
+ 	pixmp->flags = 0;
+ 
+-	sizeimage = venus_helper_get_framesz(pixmp->pixelformat,
+-					     pixmp->width,
+-					     pixmp->height);
++	sizeimage = venc_get_framesz(inst, pixmp->pixelformat,
++				     pixmp->width, pixmp->height);
+ 	pfmt[0].sizeimage = max(ALIGN(pfmt[0].sizeimage, SZ_4K), sizeimage);
+ 
+ 	if (f->type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE)
+@@ -309,6 +340,9 @@ static int venc_s_fmt(struct file *file, void *fh, struct v4l2_format *f)
+ 		inst->output_buf_size = pixmp->plane_fmt[0].sizeimage;
+ 	}
+ 
++	/* Any negotiated geometry/format change invalidates firmware bufreqs. */
++	inst->bufreq_cache_valid = false;
++
+ 	return 0;
+ }
+ 
+@@ -1248,10 +1282,13 @@ static int venc_queue_setup(struct vb2_queue *q,
+ 		*num_buffers = max(*num_buffers, num);
+ 		inst->num_input_bufs = *num_buffers;
+ 
+-		sizes[0] = venus_helper_get_framesz(inst->fmt_out->pixfmt,
+-						    inst->out_width,
+-						    inst->out_height);
++		sizes[0] = venc_get_framesz(inst, inst->fmt_out->pixfmt,
++					     inst->out_width, inst->out_height);
+ 		inst->input_buf_size = sizes[0];
++		if (IS_IRIS1(core))
++			dev_info(core->dev,
++				 "venus-migrate: encoder raw input size=%u vendor_nv12=%u\n",
++				 sizes[0], inst->enc_vendor_nv12);
+ 		break;
+ 	case V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE:
+ 		*num_planes = inst->fmt_cap->num_planes;
+@@ -1277,10 +1314,25 @@ static int venc_queue_setup(struct vb2_queue *q,
+ static int venc_buf_init(struct vb2_buffer *vb)
+ {
+ 	struct venus_inst *inst = vb2_get_drv_priv(vb->vb2_queue);
++	struct vb2_v4l2_buffer *vbuf = to_vb2_v4l2_buffer(vb);
++	struct venus_buffer *buf = to_venus_buffer(vbuf);
++	int ret;
+ 
+ 	inst->buf_count++;
+ 
+-	return venus_helper_vb2_buf_init(vb);
++	ret = venus_helper_vb2_buf_init(vb);
++	if (ret) {
++		inst->buf_count--;
++		return ret;
++	}
++
++	if (IS_IRIS1(inst->core) && V4L2_TYPE_IS_OUTPUT(vb->type))
++		dev_info(inst->core->dev,
++			 "venus-migrate: encoder input buffer index=%u length=%lu dma=%pad bidirectional=%u\n",
++			 vb->index, vb2_plane_size(vb, 0), &buf->dma_addr,
++			 vb->vb2_queue->bidirectional);
++
++	return 0;
+ }
+ 
+ static void venc_release_session(struct venus_inst *inst)
+@@ -1475,6 +1527,12 @@ static int venc_start_streaming(struct vb2_queue *q, unsigned int count)
+ 
+ 	venus_helper_init_instance(inst);
+ 	inst->bufreq_cache_valid = false;
++	inst->enc_ebd_count = 0;
++	inst->enc_recon_index = 0;
++	inst->enc_ubwc_cr_q16 = 0;
++	inst->enc_complexity_factor_q16 = 0;
++	inst->enc_complexity_number = 0;
++	inst->enc_bw_diag_ebd_count = 0;
+ 
+ 	inst->sequence_cap = 0;
+ 	inst->sequence_out = 0;
+@@ -1742,8 +1800,13 @@ static int m2m_queue_init(void *priv, struct vb2_queue *src_vq,
+ 	src_vq->min_queued_buffers = 1;
+ 	src_vq->dev = inst->core->dev;
+ 	src_vq->lock = &inst->ctx_q_lock;
+-	if (inst->core->res->hfi_version == HFI_VERSION_1XX)
++	if (inst->core->res->hfi_version == HFI_VERSION_1XX ||
++	    (IS_IRIS1(inst->core) && inst->enc_dma_bidirectional))
+ 		src_vq->bidirectional = 1;
++	if (IS_IRIS1(inst->core))
++		dev_info(inst->core->dev,
++			 "venus-migrate: encoder source DMA bidirectional=%u\n",
++			 src_vq->bidirectional);
+ 	ret = vb2_queue_init(src_vq);
+ 	if (ret)
+ 		return ret;
+@@ -1798,6 +1861,12 @@ static int venc_open(struct file *file)
+ 	inst->clk_data.core_id = VIDC_CORE_ID_DEFAULT;
+ 	inst->core_acquired = false;
+ 	inst->nonblock = file->f_flags & O_NONBLOCK;
++	if (IS_IRIS1(core)) {
++		inst->enc_vendor_nv12 =
++			READ_ONCE(venus_iris1_encoder_vendor_nv12);
++		inst->enc_dma_bidirectional =
++			READ_ONCE(venus_iris1_encoder_bidirectional);
++	}
+ 
+ 	if (inst->enc_state == VENUS_ENC_STATE_DEINIT)
+ 		inst->enc_state = VENUS_ENC_STATE_INIT;
+
