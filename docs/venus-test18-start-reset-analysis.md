@@ -23,11 +23,10 @@ There was no START_DONE, FTB, ETB, EBD, FBD, SMMU fault, NoC report, watchdog
 message or kernel panic after it. Test18 therefore reset/hung while firmware was
 processing START. It did **not** reach the first frame.
 
-## Confirmed Test18 regression
+## Initial diagnosis corrected by Test20
 
-Test18 moved BUFFER_COUNT_ACTUAL from STREAMON to REQBUFS to resemble Xiaomi's
-call site, but did not move encoder control programming with it. This copied one
-operation without copying the lifecycle that makes its inputs final.
+Test18 moved BUFFER_COUNT_ACTUAL from STREAMON to REQBUFS and also suppressed
+several property packets. The first analysis blamed the following count change.
 
 The external OUTPUT count was committed early as:
 
@@ -41,15 +40,15 @@ After properties, route, mode and core selection, firmware reported:
 type=0x2 size=36864 actual=4 min=4 host=0 align=256
 ```
 
-Thus firmware required four output buffers at START while the host-min field
-previously sent for that same type was two. Test17 programmed final counts after
-the controls and reached START_DONE. The per-REQBUFS Test18 change is invalid in
-the mainline Venus lifecycle and must be reverted.
+Test20 later proved that this was not an invalid wire request. Xiaomi also sends
+OUTPUT actual 4/host-min 2, then preserves driver-owned external counts when a
+later firmware table reports min 4. It does not send a second 4/4 count. The
+original conclusion that this mismatch caused Test18 START failure was wrong.
 
-Test18 also removed several default property packets. Because Test18 stopped at
-START while Test17's fuller property set reached START_DONE, those removals are
-not proven safe. The next candidate restores the known START-capable property
-set while retaining zero-initialized packet storage and the fixed CAVLC word.
+Test20 reached START_DONE after restoring the fuller property set and fixing its
+QP-range enable mask. The property suppression combination, rather than the
+vendor-style 4/2 count, remains the supported explanation for Test18's START
+regression.
 
 ## Original post-START problem still open
 
@@ -69,10 +68,11 @@ internal buffers only. It deliberately leaves the already-working HFI queue and
 decoder mappings unchanged. This is a source-supported candidate for the
 Test17 post-ETB reset, not a hardware success claim.
 
-Modern mainline VB2 can attach that allocation attribute to its MMAP buffers,
-which is the path used by the current FFmpeg admission test. Its imported
-DMABUF attachment API does not propagate a queue-local DMA attribute, so
-DMABUF import is explicitly not claimed by this patch.
+Patch 0033 attached that attribute to mainline VB2 coherent MMAP allocations.
+Test20 proved this still reset at the first ETB. The later ownership audit found
+that this was not equivalent to Xiaomi: the vendor uses streaming dma-bufs and
+explicit cache maintenance, while VB2 intentionally skips prepare/finish sync
+for coherent allocations. Patch 0035 corrects that distinction.
 
 ## Deliberately excluded
 
@@ -88,9 +88,9 @@ DMABUF import is explicitly not claimed by this patch.
 
 ## Next candidate acceptance
 
-Before frame submission, logs must show final counts of INPUT 16/host-min 3 and
-OUTPUT 4/host-min 4, followed by START_DONE. Encoder source, capture and internal
-buffers must report `upstream-hint=1`. Only then is an FTB/ETB attempt meaningful.
+Before frame submission, logs must show count requests INPUT 16/host-min 3 and
+OUTPUT 4/host-min 2, followed by the post-count table and START_DONE. Test21
+external MMAP buffers must report `bidi=1 nc=1 up=1`.
 Functional success still requires EBD, non-empty FBD, software-decodable H.264,
 orderly STOP/RELEASE/END and runtime PM returning to suspended.
 

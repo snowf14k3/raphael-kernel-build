@@ -32,3 +32,4 @@
 0032-media-venus-align-SM8150-encoder-command-sequence.patch
 0033-media-venus-fix-SM8150-final-counts-and-cache-mappings.patch
 0034-media-venus-fix-SM8150-HFI4-QP-range-enable.patch
+0035-media-venus-match-SM8150-streaming-DMA-contract.patch

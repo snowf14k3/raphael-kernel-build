@@ -1,6 +1,6 @@
 # SM8150 Venus 全量迁移主报告
 
-> 本文是 `Test20 + 0001--0034` 候选树的权威总账。旧的 `venus-sm8150-full-migration-audit.md`
+> 本文是 `Test21 + 0001--0035` 候选树的权威总账。旧的 `venus-sm8150-full-migration-audit.md`
 > 和 `venus-sm8150-encoder-audit.md` 保留历史过程，但不得用其中的阶段性判断覆盖本文。
 > “已实现”只表示代码已进入候选补丁；没有实机证据时一律写成“待实机”，不宣称修复。
 > 0027 已删除 Stage0--9，补回原厂 output-size minimum，并固定原厂 raw layout 与 DMA
@@ -13,7 +13,7 @@
 下，尽可能完整地支持 SM8150 固件实际提供的编解码能力。当前优先阻断项是：
 
 1. HEVC Main10/P010 已到达首个 capture completion，但 FFmpeg/mpv 判定为 invalid frame；
-2. Test19 encoder 在 QP_RANGE_V2 属性后关机；0022 把 I/P/B enable 从固定 7 改成复制未赋值字段，0032 清零后稳定为 0。0034 已恢复 mask=7，待 Test20；
+2. Test20 encoder 已到 START_DONE 和首 ETB，随后 EBD/FBD 前复位；0035 已把 upstream-cache MMAP 从错误 coherent allocation 改为带 ownership sync 的 streaming DMA，待 Test21；
 3. 0019 已移植 SM8150 动态 DDR/LLCC 模型，但尚未用实机 ICC/长序列/多实例验证；
 4. Test16 VP8 在 source-change 后因 split-output count 契约偏差收到
    `HFI_ERR_SESSION_BAD_POINTER`；0030 已按原厂语义修正，待 Test17。
@@ -24,7 +24,7 @@
 | 角色 | 路径/提交 | 本报告用途 |
 |---|---|---|
 | Linux 固定基线 | `F:\linux\linux-raphael`，`58f3df07833f2382fe2fbc28f996c4c85817c1f6` | 主线 V4L2/VB2/PM 架构基线 |
-| 当前候选源码 | `F:\linux\test15-analysis`，基线 + `patches/series` 0001--0034 | 本报告逐行反查对象 |
+| 当前候选源码 | `F:\linux\test15-analysis`，基线 + `patches/series` 0001--0035 | 本报告逐行反查对象 |
 | 构建与证据库 | `F:\linux\raphael-kernel-build`，基准提交 `3403ed0d17c1d9c4b9834539eab789343b9b4693` 后工作区 | 补丁、生成器、测试和报告 |
 | 小米原厂 | `F:\linux\vendor-sm8150-reference`，`192eca8550f95c2eec58a474793d1d93fc1b3b67` | SM8150/VPU5/HFI4 主参考 |
 | 原厂源码树 | `drivers/media/platform/msm/vidc`，tree `1e66319e3b0a9e1ad7f59d624b4d58f5c0c67fc4` | 42 文件完整覆盖 |
@@ -899,16 +899,16 @@ Windows 外部 SSH 保存的完整 `dmesg -w` 推翻了“Test18 又死于首 ET
 LOAD_RESOURCES_DONE 均成功；驱动发出 START command 36 后不再收到任何消息。日志中没有
 START_DONE、FTB、ETB、EBD 或 FBD。因此 Test18 死于固件处理 START，尚未进入首帧。
 
-日志还给出直接矛盾：REQBUFS 时 OUTPUT `actual=4 host-min=2` 已提交；设置 properties、
-route、mode 和 core 后，最终 firmware table 对同一 OUTPUT 要求 `min=4`。原厂在 REQBUFS
-提交 count，但它的 controls 生命周期也在此前完成；mainline Venus 把 controls 延后到
-STREAMON。0032 只移动 count 而没有移动整套生命周期，造成 Test18 回归。
+日志还显示 OUTPUT wire request 为 `actual=4 host-min=2`，后续 firmware table 报告
+`min=4`。当时把它判断为直接矛盾；Test20 与原厂 `msm_comm_try_get_bufreqs()` 复核已经
+纠正：原厂保留 driver-owned external counts，并不会把后续 firmware min 4 再发回去。
+因此 Test18 的 START 回归来自 0032 的属性抑制组合，不能再归因于 4/2 count。
 
 0033 的处置是：
 
 1. 删除 `venc_queue_setup()` 的 count HFI 命令；
 2. 在 STREAMON 完成 controls/route/mode/core 后查询最终表；
-3. 按该表提交 INPUT 16/host-min 3、OUTPUT 4/host-min 4；
+3. 提交原厂等价的 INPUT 16/host-min 3、OUTPUT 4/host-min 2 request；
 4. 再查询一次，供 internal buffer 分配和 START 使用；
 5. 恢复 Test17 已实机到达 START_DONE 的属性集合，但保留 0032 的 packet/payload 清零；
 6. 移植原厂 `DMA_ATTR_IOMMU_USE_UPSTREAM_HINT` 到 `IOMMU_USE_UPSTREAM_HINT`，再到
@@ -944,3 +944,28 @@ payload 已重新逐字段核对；没有第二个“复制未赋值 caller 字�
 0001--0034 从固定基线重放后的 tree 为
 `8d686dfc4db955497790cda1db53aed60602677e`。0034 已通过严格 checkpatch
 0/0/0、apply/diff check、脚本语法/self-test 和全部 IRIS1 宿主测试。
+
+## 19. Test20 首 ETB 复位与 0035（2026-09-10）
+
+Test20 已证明 0034 的 QP mask 修复有效：完整属性序列通过，随后完成两次 requirements、
+16/3 与 4/2 count request、内部 0x6/0x7/0x8/0x4、LOAD_DONE、START_DONE 和四个 FTB。
+首个 ETB 为 64 bytes，地址 `0xdfbf0000`、allocation 24,576、filled 18,432、offset 0；
+固件未返回 EBD/FBD，机器随即复位。
+
+完整反查确认 ETB 16 dword 布局和每一字段与小米 VPU5 相同；128x96 NV12 size/stride、
+IOVA 范围、route 2、mode 2、MVS0、internal actual count、LLCC、最大带宽和 SM8150 v2
+533 MHz 实际 rate 均有对应依据。type 0x9 是 RECON 统计 bookkeeping，原厂也不为它发送
+SET_BUFFERS；CVP/CDSP 是独立 FastCVPD queue，不能只开 boot bit；旧芯片 threshold restore
+也不适用于 IRIS1。
+
+剩余直接差异位于 buffer ownership：原厂用 streaming dma-buf、upstream hint，并在
+QBUF/DQBUF 显式 cache maintenance；0033 却把 cacheable upstream PTE 叠加到 VB2 coherent
+MMAP allocation，VB2 因此不会执行 prepare/finish sync。这不是等价 DMA 合同。0035 强制
+IRIS1 encoder MMAP 使用 VB2 non-coherent allocation，让 QBUF/DQBUF 分别执行 device/CPU
+sync，并在 buffer init 时拒绝任何 `bidi=1 nc=1 up=1` 不完整的映射。完整证据与排除矩阵
+固定在 `venus-test20-etb-reset-analysis.md`。
+
+0001--0035 从固定基线重放后的 tree 为
+`ba695d2fed72c98f1b792c28ae5c0ebc1043e63d`。0035 已通过严格 checkpatch
+0/0/0、apply/diff check、脚本语法/self-test、编译后的 64-byte ETB/128x96 raw-layout
+向量以及全部 IRIS1 宿主测试。

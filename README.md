@@ -3,7 +3,7 @@
 这个仓库只做一件事：编译包含 SM8150 Venus 适配及运行修正的
 Redmi K20 Pro（Raphael）Linux 测试内核。
 
-当前实机冻结点是 **Test19**，下一构建标识为 **Test20**，目前包含候选补丁 0001--0034。
+当前实机冻结点是 **Test20**，下一构建标识为 **Test21**，目前包含候选补丁 0001--0035。
 Test16 已实机通过 H.264 小分辨率/720p/1080p/reopen 和 HEVC Main8；VP8 在
 source-change 后被固件以 `HFI_ERR_SESSION_BAD_POINTER (0x1003)` 拒绝，旧脚本因此
 没有执行后续 codec。Test15 的历史编码验证为：
@@ -19,7 +19,7 @@ HEVC Main/Main10 profile 控件；同时接入原厂 VIDSC0/VIDSC1 LLCC 系统�
 补齐 HFI 4xx FRAME_QP，并校正 H.264 Baseline/自动 level 默认参数。test10
 进一步修正 all-layer 码率、VUI 和 level 封包，并让编码会话在 STREAMON 到完整
 STREAMOFF 期间持续持有电源。编码属性和 buffer requirements 按原厂顺序只
-设置/读取一次，HFI4 分开发送 VB2 actual 与原厂 host-min=4，并跳过 VPU5 不支持
+设置/读取一次，HFI4 分开发送 VB2 actual 与固件 minimum，并跳过 VPU5 不支持
 的 MAX_BITRATE 属性。进入硬件前还有资源完整性检查及默认关闭的协议门，
 避免桌面或 RDP 误触发尚未实机确认的编码路径。test11 根据实机
 函数图定位并修复 Baseline Profile 与默认 8×8 Transform 冲突导致编码节点
@@ -59,7 +59,7 @@ DPB 与 client-facing OPB 的 actual count，并记录每个 DPB FTB；待 Test1
 Test18 完整日志证明这与 mainline 的 control 生命周期不兼容：OUTPUT 先提交
 `actual=4 host-min=2`，properties 后固件最终要求 `min=4`，会话收到
 LOAD_RESOURCES_DONE 后在 START 内停止，尚未发送 FTB/ETB。0033 删除提前 count，改在
-controls/route/mode/core 后提交最终 INPUT 16/3 与 OUTPUT 4/4，并恢复 Test17 已到达
+controls/route/mode/core 后提交 INPUT 16/3 与 OUTPUT 4/2，并恢复 Test17 已到达
 START_DONE 的属性集合，同时保留 HFI 包体清零。0033 还移植原厂
 `DMA_ATTR_IOMMU_USE_UPSTREAM_HINT` 到 ARM LPAE MAIR 0xf4 的链路，只用于 IRIS1 encoder
 MMAP 和 internal buffers，以处理 Test17 独立的首 ETB 后复位边界。详细证据见
@@ -72,6 +72,14 @@ LOAD 或 START。复核发现 0022 把上下游原本固定为 7 的 I/P/B enabl
 并逐项复核同一 H.264 启动序列的其余 payload 字段。详细证据见
 `docs/venus-test19-property-reset-analysis.md` 与
 `docs/venus-sm8150-0034-hunk-ledger.md`。
+
+Test20 已通过全部属性、count、internal buffers、LOAD、START_DONE 和四个 FTB，随后在
+首个 64-byte ETB 后、EBD/FBD 前复位。逐字段审计确认 ETB、128x96 NV12 layout、IOVA、
+route/mode/core、内部 buffer、时钟和带宽均对齐；剩余直接差异是 DMA coherency：0033
+把 upstream-cache PTE 用在 coherent MMAP allocation 上，而原厂使用 streaming dma-buf
+并在 QBUF/DQBUF 做 cache maintenance。0035 强制 IRIS1 encoder MMAP 走 VB2
+non-coherent/streaming allocation 和同步，并在分配时强制检查 `bidi=1 nc=1 up=1`。
+完整排除矩阵见 `docs/venus-test20-etb-reset-analysis.md` 和 0035 ledger。
 
 同一补丁系列还限制 Raphael 面板的高频亮度更新：test14 恢复 LP 命令并将请求
 合并为最多 4 Hz，直接 sysfs 压力测试已不再闪屏。GNOME 亮度/音量弹窗仍可触发
@@ -105,7 +113,7 @@ hunk ledger 接续覆盖；
 早期原厂、postmarketOS 对照依据保留在 [test4 说明](docs/venus-test4.md)。
 
 源码仍来自 `snowf14k3/linux` 的 `raphael-7.1` 分支，构建时会应用本仓库
-`patches/series` 中的三十四个补丁（原厂时序、队列校验、诊断、VPU5 会话配置、
+`patches/series` 中的三十五个补丁（原厂时序、队列校验、诊断、VPU5 会话配置、
 HFI 4xx 会话属性、两轮 10-bit 格式协商、SM8150 系统缓存/编码参数，以及
 编码会话生命周期加固）。
 补丁基于源码提交 `58f3df07833f2382fe2fbc28f996c4c85817c1f6`；
@@ -130,8 +138,8 @@ HFI 4xx 会话属性、两轮 10-bit 格式协商、SM8150 系统缓存/编码�
 - `sm8150-xiaomi-raphael.dtb`：包含 Venus 节点的设备树。
 - `kernel.config`：本次实际使用的内核配置。
 - `build-info.txt`：内核版本、源码提交、构建仓库提交及补丁清单 SHA256。
-- `patches.sha256`：三十四个补丁各自的 SHA256。
-- `venus-test-suite.sh`：安装并启动 test20 后，一次运行的实机测试脚本；任一 codec
+- `patches.sha256`：三十五个补丁各自的 SHA256。
+- `venus-test-suite.sh`：安装并启动 test21 后，一次运行的实机测试脚本；任一 codec
   失败立即停止，避免固件事件/日志风暴；硬编码由
   唯一总 gate 默认关闭；显式设置 `VENUS_TEST_ENCODER=1` 后先测 1 帧 H.264，再测
   30 帧 H.264/HEVC/VP8，每项要求非空且可软件解码，失败即停止剩余 codec job。

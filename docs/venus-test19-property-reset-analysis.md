@@ -70,8 +70,8 @@ neither has yet received Test19 hardware evidence beyond queue allocation.
 ## Test20 acceptance
 
 The next capture must show the new QP diagnostic with `enable=7`, then advance
-past property `0x2005009`. It must subsequently show final INPUT 16/3 and
-OUTPUT 4/4 counts, refreshed requirements, internal upstream-hint buffers,
+past property `0x2005009`. It must subsequently show INPUT 16/3 and OUTPUT 4/2
+count requests, refreshed requirements, internal upstream-hint buffers,
 LOAD_RESOURCES_DONE and START_DONE before any FTB/ETB claim is made.
 
 Functional encoding still requires EBD, a non-empty FBD, software-decodable

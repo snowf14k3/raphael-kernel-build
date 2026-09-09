@@ -1,0 +1,98 @@
+# Test20 SM8150 encoder first-ETB reset analysis
+
+## Exact captured boundary
+
+The external Windows `dmesg -w` capture contains 138 lines beginning at
+`TEST20_ENCODER_FULL_BEGIN`. Test20 completed all of the following:
+
+- QP range `min=0x010101 max=0x333333 layer=0xff enable=7`;
+- the full H.264 property sequence, route 2, work mode 2 and core mask;
+- the pre-count requirements query;
+- INPUT count request 16/host-min 3 and OUTPUT request 4/host-min 2;
+- the post-count requirements query;
+- internal types 0x6, 0x7, 0x8 and 0x4 with upstream hint;
+- LOAD_RESOURCES_DONE and START_DONE;
+- four output FTB commands.
+
+The final complete operation was the first input ETB:
+
+```text
+queue ETB tag=0 dma=0xdfbf0000 alloc=24576 filled=18432 offset=0
+command ... EMPTY_BUFFER bytes=64
+```
+
+The following diagnostic was truncated at `ret=` as the machine reset. No HFI
+response, EBD, FBD, SMMU report, NoC report, watchdog line or panic reached the
+external log. Test20 therefore resets when hardware first consumes the raw
+input buffer, after START and FTB setup.
+
+## Corrections to earlier count conclusions
+
+Test20 proves the actual first post-control firmware table is INPUT min 3 and
+OUTPUT min 2. The host then sends 16/3 and 4/2. A second query reports OUTPUT
+actual/min 4/4.
+
+Xiaomi's driver also sends the queue-time firmware minimum in
+`BUFFER_COUNT_ACTUAL`, then deliberately preserves its driver-owned external
+counts when it processes the later requirements response. It does not resend
+4/4. Therefore 4/2 is the vendor-equivalent wire request; the earlier Test19
+documents that demanded a second 4/4 command were wrong. Patch 0035 renames the
+diagnostic but does not add a non-vendor count command.
+
+## ETB wire audit
+
+The current encoder ETB is exactly 64 bytes and matches Xiaomi field-for-field:
+
+1. size, command type and session ID;
+2. view ID zero;
+3. timestamp high/low;
+4. flags, mark target and mark data;
+5. allocation 24,576, filled length 18,432 and offset zero;
+6. input tag and 32-bit IOVA;
+7. zero extradata address and zero final extension word.
+
+The 128x96 linear NV12 allocation also matches `VENUS_BUFFER_SIZE`: 128-byte
+stride, 96 Y scanlines, 48 UV scanlines, 4 KiB tail padding and 24,576 bytes
+after page alignment. The effective payload is 18,432 bytes. Patch 0035 adds a
+compiled exact-dword ETB test and the missing 128x96 raw-layout vector.
+
+## Actual DMA mismatch
+
+Xiaomi maps all video dma-bufs with:
+
+- DMA_BIDIRECTIONAL;
+- `DMA_ATTR_IOMMU_USE_UPSTREAM_HINT` when LLCC is present;
+- streaming DMA ownership;
+- explicit clean/invalidate before QBUF and invalidate after DQBUF.
+
+Test20 had bidirectional IOVA permissions and the 0xf4 upstream PTE, but VB2
+still allocated MMAP buffers through `dma_alloc_attrs()`, its coherent path.
+VB2's prepare/finish functions intentionally skip cache synchronization for
+such buffers. Applying a cacheable upstream IOMMU attribute to a coherent DMA
+allocation breaks the allocation's coherency contract and is not equivalent to
+Xiaomi's streaming dma-buf mapping.
+
+Patch 0035 forces only IRIS1 encoder MMAP queues through VB2's non-coherent
+allocation path. That path creates a contiguous IOVA with the same upstream
+attribute and calls `dma_sync_sgtable_for_device()` before hardware ownership
+and `dma_sync_sgtable_for_cpu()` after it. A runtime admission guard rejects an
+MMAP buffer if non-coherent allocation or upstream mapping is missing.
+
+## Other first-frame candidates rechecked
+
+| Candidate | Result |
+|---|---|
+| route/mode/core | route 2, mode 2 and MVS0/core ID 1 match Xiaomi VPU5 VBR H.264 |
+| clocks | 533 MHz is the SM8150 v2 provider rate; Xiaomi's nominal 480 MHz request rounds upward to this v2 entry |
+| bandwidth | first-16-input turbo vote is 6,533,000 kB/s, matching Xiaomi's maximum range |
+| internal type 0x9 | this is RECON metadata/bookkeeping; Xiaomi does not allocate or SET_BUFFERS a DMA object for it |
+| internal 0x6/0x7/0x8/0x4 | firmware actual counts, sizes, page rounding and SET_BUFFERS order match |
+| register presets | Xiaomi SM8150 has no reg-set entries; threshold restore is guarded for older hardware version 0x3.43 |
+| CVP/CDSP queue | global Android CVP service uses a separate queue and FastCVPD; ordinary encoder ETB remains on CPU HFI queue; setting boot bit 1 without that service is an unsafe half-port |
+| external IOVA | all recorded ranges fit below 0xe0000000, are aligned and do not overlap |
+| FTB order | four FTBs before the first ETB matches the deferred-buffer startup order |
+| HFI response parser | no response reached the message queue, so EBD/FBD parsing is not the reset origin |
+
+The streaming/coherency mismatch is the remaining direct source-level
+difference at the exact Test20 boundary. This is still a candidate until real
+hardware returns EBD/FBD; the audit does not claim encoding success in advance.

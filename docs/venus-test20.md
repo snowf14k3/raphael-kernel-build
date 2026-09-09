@@ -48,7 +48,7 @@ The capture must contain, in order:
 
 1. `encoder QP range ... enable=7`;
 2. property `0x2005009` followed by later commands;
-3. final count INPUT 16/3 and OUTPUT 4/4;
+3. count requests INPUT 16/3 and OUTPUT 4/2, then the post-count table;
 4. internal buffers with `upstream-hint=1`;
 5. LOAD_RESOURCES_DONE and START_DONE;
 6. FTB/ETB, EBD and a non-empty FBD;

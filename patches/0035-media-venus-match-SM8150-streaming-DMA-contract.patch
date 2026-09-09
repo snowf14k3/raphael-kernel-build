@@ -1,0 +1,137 @@
+From: Codex <codex@openai.com>
+Date: Thu, 10 Sep 2026 23:30:00 +0800
+Subject: [PATCH] media: venus: match SM8150 streaming DMA contract
+
+Test20 reached START_DONE, queued four FTBs, and reset after the first
+encoder ETB. The 64-byte ETB packet and its populated fields match the
+Xiaomi VPU5 packet. The IOVAs, sizes, route, mode, core, internal buffers,
+clocks, and bandwidth vote also pass the recorded contracts.
+
+The remaining memory contract did not match. Xiaomi maps video dma-bufs as
+streaming DMA with the upstream-cache hint. It performs explicit cache
+maintenance at QBUF and DQBUF. Patch 0033 applied the cacheable IOMMU hint
+to VB2 coherent MMAP allocations. That combination no longer has coherent
+DMA semantics and performs no VB2 prepare or finish synchronization.
+
+Force IRIS1 encoder MMAP queues through VB2's non-coherent allocation path.
+It allocates a contiguous IOVA with the upstream hint and performs the
+required DMA synchronization around ownership transfers. Reject an encoder
+MMAP buffer if that contract is not active, and log the allocation mode.
+Imported DMABUF behavior is unchanged.
+
+Also order the ETB assignments like its wire structure and Xiaomi's
+packetizer. The packet bytes do not change, but the exact layout becomes
+mechanically auditable. Rename count diagnostics to reflect that INPUT 16/3
+and OUTPUT 4/2 are vendor-style requests. The post-count firmware table may
+report OUTPUT min 4 without another wire count command.
+
+Signed-off-by: Codex <codex@openai.com>
+---
+diff --git a/Documentation/core-api/dma-attributes.rst b/Documentation/core-api/dma-attributes.rst
+index a664d03bdb03..d8fac18b3f81 100644
+--- a/Documentation/core-api/dma-attributes.rst
++++ b/Documentation/core-api/dma-attributes.rst
+@@ -186,4 +186,6 @@ DMA_ATTR_IOMMU_USE_UPSTREAM_HINT
+ This attribute requests the IOMMU page-table memory type that forwards cache
+ allocation policy to the upstream interconnect. It is intended for integrated
+ devices whose system-cache contract requires the upstream transaction hint.
+-Architectures without such a memory type may ignore the attribute.
++Architectures without such a memory type may ignore the attribute. The
++attribute does not make a mapping coherent; streaming mappings must still use
++the DMA API synchronization required by their direction and ownership.
+diff --git a/drivers/media/platform/qcom/venus/hfi_cmds.c b/drivers/media/platform/qcom/venus/hfi_cmds.c
+index 4741d2d3471d..fadd1922766b 100644
+--- a/drivers/media/platform/qcom/venus/hfi_cmds.c
++++ b/drivers/media/platform/qcom/venus/hfi_cmds.c
+@@ -323,9 +323,9 @@ int pkt_session_etb_encoder(
+ 	pkt->flags = in_frame->flags;
+ 	pkt->mark_target = in_frame->mark_target;
+ 	pkt->mark_data = in_frame->mark_data;
+-	pkt->offset = in_frame->offset;
+ 	pkt->alloc_len = in_frame->alloc_len;
+ 	pkt->filled_len = in_frame->filled_len;
++	pkt->offset = in_frame->offset;
+ 	pkt->input_tag = in_frame->clnt_data;
+ 	pkt->packet_buffer = in_frame->device_addr;
+ 	pkt->extradata_buffer = in_frame->extradata_addr;
+diff --git a/drivers/media/platform/qcom/venus/venc.c b/drivers/media/platform/qcom/venus/venc.c
+index 7954af607b8d..4fd92e6ef5e0 100644
+--- a/drivers/media/platform/qcom/venus/venc.c
++++ b/drivers/media/platform/qcom/venus/venc.c
+@@ -1486,7 +1486,7 @@ static int venc_iris1_set_buffer_count(struct venus_inst *inst, u32 type,
+ 		return ret;
+ 
+ 	dev_info(inst->core->dev,
+-		 "venus-sm8150: encoder final count type=%#x actual=%u host-min=%u committed\n",
++		 "venus-sm8150: encoder count request type=%#x actual=%u host-min=%u committed\n",
+ 		 type, count, actual.count_min_host);
+ 
+ 	return 0;
+@@ -1503,6 +1503,16 @@ static int venc_queue_setup(struct vb2_queue *q,
+ 	enum hfi_version ver = core->res->hfi_version;
+ 	int ret, pm_ret;
+ 
++	/*
++	 * Downstream maps encoder dma-bufs as streaming, bidirectional memory,
++	 * applies the upstream cache hint, and performs cache maintenance at
++	 * QBUF/DQBUF.  Coherent MMAP allocations cannot safely use that cacheable
++	 * IOMMU attribute, so make VB2 use its non-coherent allocation path.  VB2
++	 * then performs the matching sync in its prepare/finish callbacks.
++	 */
++	if (IS_IRIS1(core) && q->memory == VB2_MEMORY_MMAP)
++		q->non_coherent_mem = 1;
++
+ 	if (*num_planes) {
+ 		if (q->type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE &&
+ 		    *num_planes != inst->fmt_out->num_planes)
+@@ -1625,6 +1635,15 @@ static int venc_buf_init(struct vb2_buffer *vb)
+ 	struct venus_buffer *buf = to_venus_buffer(vbuf);
+ 	int ret;
+ 
++	if (IS_IRIS1(inst->core) && vb->vb2_queue->memory == VB2_MEMORY_MMAP &&
++	    (!vb->vb2_queue->non_coherent_mem ||
++	     !(vb->vb2_queue->dma_attrs &
++	       DMA_ATTR_IOMMU_USE_UPSTREAM_HINT))) {
++		dev_err(inst->core->dev,
++			"unsafe IRIS1 encoder MMAP cache contract\n");
++		return -EINVAL;
++	}
++
+ 	inst->buf_count++;
+ 
+ 	ret = venus_helper_vb2_buf_init(vb);
+@@ -1632,12 +1651,15 @@ static int venc_buf_init(struct vb2_buffer *vb)
+ 		inst->buf_count--;
+ 		return ret;
+ 	}
+-
+-	if (IS_IRIS1(inst->core) && V4L2_TYPE_IS_OUTPUT(vb->type))
++	if (IS_IRIS1(inst->core))
+ 		dev_info(inst->core->dev,
+-			 "venus-sm8150: encoder input buffer index=%u length=%lu dma=%pad bidirectional=%u\n",
++			 "venus-sm8150: enc %s buf=%u len=%lu dma=%pad bidi=%u nc=%u up=%u\n",
++			 V4L2_TYPE_IS_OUTPUT(vb->type) ? "input" : "bitstream",
+ 			 vb->index, vb2_plane_size(vb, 0), &buf->dma_addr,
+-			 vb->vb2_queue->bidirectional);
++			 vb->vb2_queue->bidirectional,
++			 vb->vb2_queue->non_coherent_mem,
++			 !!(vb->vb2_queue->dma_attrs &
++			    DMA_ATTR_IOMMU_USE_UPSTREAM_HINT));
+ 
+ 	return 0;
+ }
+@@ -1955,10 +1977,12 @@ static int venc_start_streaming(struct vb2_queue *q, unsigned int count)
+ 
+ 	if (IS_IRIS1(inst->core)) {
+ 		/*
+-		 * Both final counts are now reflected in the refreshed table.
++		 * Cache the firmware table after the vendor-style count requests.
++		 * External counts stay owned by VB2; this refreshed copy supplies
++		 * internal sizes/counts and validates the negotiated allocations.
+ 		 */
+ 		dev_info(inst->core->dev,
+-			 "venus-sm8150: final encoder buffer requirements cached\n");
++			 "venus-sm8150: post-count encoder requirements cached\n");
+ 
+ 		/*
+ 		 * Downstream names wire property 0x20100c BUFFER_SIZE_MINIMUM and

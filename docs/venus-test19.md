@@ -17,7 +17,7 @@ The same log proves Test18 committed OUTPUT count too early with
 
 - removes encoder count commits from mainline `REQBUFS`;
 - queries requirements after controls, route, work mode and core selection;
-- commits final INPUT 16/3 and OUTPUT 4/4 counts at STREAMON;
+- commits vendor-style INPUT 16/3 and OUTPUT 4/2 count requests at STREAMON;
 - refreshes internal requirements before SET_BUFFERS and LOAD/START;
 - restores the Test17 property sequence already observed to reach START_DONE;
 - retains Test18 HFI packet zeroing and the fixed CAVLC payload;
@@ -68,8 +68,8 @@ phone resets.
 Before `START`, required logs are:
 
 ```text
-encoder final count type=0x1 actual=16 host-min=3 committed
-encoder final count type=0x2 actual=4 host-min=4 committed
+encoder count request type=0x1 actual=16 host-min=3 committed
+encoder count request type=0x2 actual=4 host-min=2 committed
 upstream-hint=1
 ```
 

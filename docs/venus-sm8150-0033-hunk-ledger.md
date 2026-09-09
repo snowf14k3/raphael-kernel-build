@@ -18,10 +18,10 @@ of Test18 property suppression and premature REQBUFS count submission.
 | 5 | `io-pgtable-arm.c` | Selects the already-defined index 3 MAIR value 0xf4 for stage-1 non-coherent mappings, matching Xiaomi's upstream attribute. |
 | 6 | DMA trace formatting | Makes the new mapping attribute observable in standard DMA trace events. |
 | 7 | encoder VB2 MMAP queues | Adds the attribute to both IRIS1 source and capture queues; preserves the proven bidirectional directions. |
-| 8 | encoder internal buffers | Adds the same attribute to IRIS1 encoder scratch/persistent/recon allocations and logs the active state. |
+| 8 | encoder internal buffers | Adds the same attribute to IRIS1 encoder scratch/persistent allocations and logs the active state; RECON remains bookkeeping only. |
 | 9 | HFI and decoder exclusion | Does not change HFI ring or decoder allocations, protecting the already-working boot/H.264/Main8 paths. |
 | 10 | `venc_queue_setup()` | Removes Test18 per-REQBUFS count commands because mainline controls are not final at that point. |
-| 11 | `venc_start_streaming()` | Queries the post-control table, commits INPUT and OUTPUT with their final minima, invalidates and refreshes the table before internal allocation. |
+| 11 | `venc_start_streaming()` | Queries the post-control table, commits vendor-style INPUT 16/3 and OUTPUT 4/2 requests, then refreshes internal requirements. |
 | 12 | property sequence | Restores the Test17 packet set that reached START_DONE; keeps Test18 zero-initialized local/HFI packet storage and the CAVLC word fix. |
 | 13 | CVP exclusion | Does not set VIDC_CTRL_INIT bit 1 without Xiaomi's separate CDSP queue and FastCVPD handoff. |
 | 14 | DMABUF exclusion | Does not claim imported DMABUF support: modern vb2 attachment mapping cannot carry the queue-local allocation attribute. Test19 targets MMAP. |
@@ -38,3 +38,11 @@ Validation fields are filled after strict replay:
 - checkpatch strict: 0 errors, 0 warnings, 0 checks across 525 checked lines
 - host/source tests: all IRIS1 numeric, HFI, PM, format, encoder and panel invariants pass
 - replay tree: `ff4095f00d7995c4ac0adb5797663c4796c5982f`
+
+## Test20 correction
+
+The 4/2 count request is vendor-equivalent; Xiaomi does not resend the later
+firmware-reported 4/4 minimum. The 0033 cache attribute itself was incomplete
+for FFmpeg MMAP: it made the IOMMU PTE upstream-cacheable while VB2 still used
+coherent allocation and therefore skipped ownership synchronization. Patch
+0035 supersedes that MMAP portion with VB2 streaming/non-coherent allocation.

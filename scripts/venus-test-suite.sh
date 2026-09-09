@@ -8,7 +8,7 @@ frame_hashes() {
 }
 if [[ "${1:-}" == --plan ]]; then
 	printf '%s\n' \
-		'Preflight: test20 kernel, SM8150 Venus nodes, idle devices, tools, free space.' \
+		'Preflight: test21 kernel, SM8150 Venus nodes, idle devices, tools, free space.' \
 		'A: PM held on; H.264, HEVC Main8, VP8, VP9 Profile0 and MPEG2 decode.' \
 		'B: HEVC Main10 and VP9 Profile2 P010 paths are compared to software hashes.' \
 		'C: PM auto; observe suspended, decode, repeat for two cycles.' \
@@ -36,8 +36,8 @@ if [[ "${1:-}" == --self-test ]]; then
 fi
 [[ $# -eq 0 ]] || { echo 'Usage: sudo bash venus-test-suite.sh [--plan|--self-test]' >&2; exit 2; }
 [[ $EUID -eq 0 ]] || { echo '请使用 sudo bash venus-test-suite.sh。' >&2; exit 2; }
-[[ "$(uname -r)" == *sm8150-venus-test20* ]] || {
-	echo '当前不是 test20 内核，未开始测试，也未修改设备设置。' >&2; exit 2;
+[[ "$(uname -r)" == *sm8150-venus-test21* ]] || {
+	echo '当前不是 test21 内核，未开始测试，也未修改设备设置。' >&2; exit 2;
 }
 scope="${VENUS_TEST_SCOPE:-decoder}"
 [[ "$scope" == decoder || "$scope" == encoder || "$scope" == all ]] || {
@@ -337,10 +337,18 @@ elif grep -q 'h264_v4l2m2m' "$run_root/encoders.txt"; then
 	set_knob "$encoder_protocol_gate" Y || {
 		record hw-encode FAIL 'cannot unlock encoder gate'; stop_batch;
 	}
-	printf '<6>TEST20_ENCODER_FULL_BEGIN\n' > /dev/kmsg
-	logger -t venus-test20-host 'ENCODER_FULL_BEGIN'
+	printf '<6>TEST21_ENCODER_FULL_BEGIN\n' > /dev/kmsg
+	logger -t venus-test21-host 'ENCODER_FULL_BEGIN'
 	sync
 	encode_codec_case encode-h264-one h264_v4l2m2m h264 h264 h264 1 128x96 || stop_batch
+	encoder_dma_log="$(dmesg | awk '/TEST21_ENCODER_FULL_BEGIN/{show=1} show')"
+	grep -q 'venus-sm8150: enc input .*bidi=1 nc=1 up=1' <<<"$encoder_dma_log" || {
+		record encode-dma FAIL 'input MMAP is not bidi=1/nc=1/up=1'; stop_batch;
+	}
+	grep -q 'venus-sm8150: enc bitstream .*bidi=1 nc=1 up=1' <<<"$encoder_dma_log" || {
+		record encode-dma FAIL 'bitstream MMAP is not bidi=1/nc=1/up=1'; stop_batch;
+	}
+	record encode-dma PASS 'both MMAP queues use streaming upstream-cache DMA'
 	encode_codec_case encode-h264 h264_v4l2m2m h264 h264 h264 30 320x240 || stop_batch
 	if grep -q 'hevc_v4l2m2m' "$run_root/encoders.txt"; then
 		encode_codec_case encode-hevc hevc_v4l2m2m hevc hevc hevc 30 320x240 || stop_batch

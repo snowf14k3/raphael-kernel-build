@@ -41,6 +41,7 @@ def function(source, name):
 
 def validate_protocol_sources(driver):
     cmds = (driver / "hfi_cmds.c").read_text(encoding="utf-8")
+    command_header = (driver / "hfi_cmds.h").read_text(encoding="utf-8")
     helper = (driver / "hfi_helper.h").read_text(encoding="utf-8")
     messages = (driver / "hfi_msgs.c").read_text(encoding="utf-8")
     message_header = (driver / "hfi_msgs.h").read_text(encoding="utf-8")
@@ -110,8 +111,35 @@ def validate_protocol_sources(driver):
         raise RuntimeError("HFI4 packetizer copies unset QP-range enable bits")
 
     encoder_etb = function(cmds, "pkt_session_etb_encoder")
-    if "pkt->data = 0" not in encoder_etb:
-        raise RuntimeError("VPU5 encoder ETB leaves its reserved word uninitialized")
+    etb_struct = re.search(
+        r"struct hfi_session_empty_buffer_uncompressed_plane0_pkt\s*"
+        r"\{(.*?)\};", command_header, re.DOTALL)
+    if not etb_struct:
+        raise RuntimeError("VPU5 encoder ETB structure is missing")
+    etb_fields = re.findall(
+        r"(?:struct hfi_session_hdr_pkt|u32)\s+([A-Za-z0-9_]+)\s*;",
+        etb_struct.group(1))
+    expected_etb_fields = [
+        "shdr", "view_id", "time_stamp_hi", "time_stamp_lo", "flags",
+        "mark_target", "mark_data", "alloc_len", "filled_len", "offset",
+        "input_tag", "packet_buffer", "extradata_buffer", "data",
+    ]
+    if etb_fields != expected_etb_fields:
+        raise RuntimeError(
+            f"VPU5 encoder ETB wire fields differ: {etb_fields}")
+    etb_assignments = [
+        "pkt->shdr.hdr.size = sizeof(*pkt)",
+        "pkt->shdr.hdr.pkt_type = HFI_CMD_SESSION_EMPTY_BUFFER",
+        "pkt->shdr.session_id = hash32_ptr(cookie)",
+        "pkt->view_id = 0", "pkt->time_stamp_hi", "pkt->time_stamp_lo",
+        "pkt->flags", "pkt->mark_target", "pkt->mark_data",
+        "pkt->alloc_len", "pkt->filled_len", "pkt->offset",
+        "pkt->input_tag", "pkt->packet_buffer", "pkt->extradata_buffer",
+        "pkt->data = 0",
+    ]
+    positions = [encoder_etb.find(item) for item in etb_assignments]
+    if min(positions) < 0 or positions != sorted(positions):
+        raise RuntimeError("VPU5 encoder ETB fields are not assigned in wire order")
 
     if "#define HFI_BUFFER_TYPE_MAX\t\t\t12" not in helper or \
        "internal recon requirement" not in helper:
@@ -345,6 +373,8 @@ def validate_encoder_sources(driver):
     iommu_header = (kernel / "include/linux/iommu.h").read_text(encoding="utf-8")
     dma_iommu = (kernel / "drivers/iommu/dma-iommu.c").read_text(encoding="utf-8")
     io_pgtable = (kernel / "drivers/iommu/io-pgtable-arm.c").read_text(encoding="utf-8")
+    vb2_contig = (kernel / "drivers/media/common/videobuf2/"
+                  "videobuf2-dma-contig.c").read_text(encoding="utf-8")
 
     for required in (
             "hfi_bufreq_get_hold_count(const struct hfi_buffer_requirements *req",
@@ -761,7 +791,7 @@ def validate_encoder_sources(driver):
     set_encoder_count = function(encoder, "venc_iris1_set_buffer_count")
     for required in ("HFI_PROPERTY_PARAM_BUFFER_COUNT_ACTUAL",
                      "hfi_bufreq_get_count_min(req",
-                     "encoder final count type=%#x"):
+                     "encoder count request type=%#x"):
         if required not in set_encoder_count:
             raise RuntimeError(
                 f"VPU5 final encoder count is incomplete: {required}")
@@ -769,6 +799,26 @@ def validate_encoder_sources(driver):
     if "venc_iris1_set_buffer_count" in queue_setup:
         raise RuntimeError(
             "VPU5 encoder count is still committed before STREAMON controls")
+    for required in ("q->memory == VB2_MEMORY_MMAP",
+                     "q->non_coherent_mem = 1"):
+        if required not in queue_setup:
+            raise RuntimeError(
+                f"IRIS1 MMAP does not use streaming DMA memory: {required}")
+    vb2_prepare = function(vb2_contig, "vb2_dc_prepare")
+    vb2_finish = function(vb2_contig, "vb2_dc_finish")
+    if "dma_sync_sgtable_for_device" not in vb2_prepare or \
+       "dma_sync_sgtable_for_cpu" not in vb2_finish:
+        raise RuntimeError(
+            "VB2 non-coherent memory lacks QBUF/DQBUF DMA synchronization")
+    buf_init = function(encoder, "venc_buf_init")
+    for required in ("memory == VB2_MEMORY_MMAP",
+                     "!vb->vb2_queue->non_coherent_mem",
+                     "DMA_ATTR_IOMMU_USE_UPSTREAM_HINT",
+                     "unsafe IRIS1 encoder MMAP cache contract",
+                     "bidi=%u", "nc=%u", "up=%u"):
+        if required not in buf_init:
+            raise RuntimeError(
+                f"IRIS1 encoder MMAP admission guard is incomplete: {required}")
 
     intbufs = function(helpers, "intbufs_set_buffer")
     for required in ("i < bufreq.count_actual",
@@ -1237,6 +1287,7 @@ def main():
         subprocess.run([str(executable)], check=True)
 
     encoder_source = (driver / "venc.c").read_text(encoding="utf-8")
+    command_source = (driver / "hfi_cmds.c").read_text(encoding="utf-8")
     raw_layout_functions = "\n\n".join((
         function(encoder_source, "venc_get_framesz"),
         function(encoder_source, "venc_get_stride"),
@@ -1251,6 +1302,22 @@ def main():
         executable = target / (
             "iris1-raw-layout.exe" if os.name == "nt" else "iris1-raw-layout")
         source.write_text(raw_layout_harness, encoding="utf-8")
+        subprocess.run([args.cc, "-std=gnu11", "-O1", "-g", "-Wall", "-Wextra",
+                        "-Werror", str(source), "-o", str(executable)], check=True)
+        subprocess.run([str(executable)], check=True)
+
+    encoder_etb = function(command_source, "pkt_session_etb_encoder")
+    encoder_etb_harness = (
+        repo / "tests/iris1-encoder-etb.c").read_text(encoding="utf-8")
+    encoder_etb_harness = encoder_etb_harness.replace(
+        "/* ACTUAL_DRIVER_FUNCTION */", encoder_etb)
+    with tempfile.TemporaryDirectory(prefix="venus-iris1-encoder-etb-") as directory:
+        target = Path(directory)
+        source = target / "iris1-encoder-etb.c"
+        executable = target / (
+            "iris1-encoder-etb.exe" if os.name == "nt" else
+            "iris1-encoder-etb")
+        source.write_text(encoder_etb_harness, encoding="utf-8")
         subprocess.run([args.cc, "-std=gnu11", "-O1", "-g", "-Wall", "-Wextra",
                         "-Werror", str(source), "-o", str(executable)], check=True)
         subprocess.run([str(executable)], check=True)
