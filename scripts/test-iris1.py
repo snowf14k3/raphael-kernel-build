@@ -370,6 +370,7 @@ def validate_encoder_sources(driver):
     decoder_controls = (driver / "vdec_ctrls.c").read_text(encoding="utf-8")
     hfi4_caps = (driver / "hfi_platform_v4.c").read_text(encoding="utf-8")
     dma_mapping = (kernel / "include/linux/dma-mapping.h").read_text(encoding="utf-8")
+    dma_api = (kernel / "kernel/dma/mapping.c").read_text(encoding="utf-8")
     iommu_header = (kernel / "include/linux/iommu.h").read_text(encoding="utf-8")
     dma_iommu = (kernel / "drivers/iommu/dma-iommu.c").read_text(encoding="utf-8")
     io_pgtable = (kernel / "drivers/iommu/io-pgtable-arm.c").read_text(encoding="utf-8")
@@ -1031,6 +1032,8 @@ def validate_encoder_sources(driver):
 
     for body, required in (
             (dma_mapping, "#define DMA_ATTR_IOMMU_USE_UPSTREAM_HINT"),
+            (dma_api, "DMA_ATTR_ALLOC_SINGLE_PAGES |"),
+            (dma_api, "DMA_ATTR_IOMMU_USE_UPSTREAM_HINT"),
             (iommu_header, "#define IOMMU_USE_UPSTREAM_HINT"),
             (dma_iommu, "prot |= IOMMU_USE_UPSTREAM_HINT"),
             (io_pgtable, "ARM_LPAE_MAIR_ATTR_INC_OWBRWA\t0xf4"),

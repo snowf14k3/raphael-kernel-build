@@ -54,7 +54,7 @@ scripts/kconfig/merge_config.sh -m .config \
 	"${config_fragment}" \
 	arch/arm64/configs/sm8150.config
 
-scripts/config --set-str LOCALVERSION "-sm8150-venus-test21"
+scripts/config --set-str LOCALVERSION "-sm8150-venus-test22"
 scripts/config --disable LOCALVERSION_AUTO
 scripts/config --module VIDEO_QCOM_VENUS
 scripts/config --enable SM_GCC_8150
@@ -105,7 +105,7 @@ install -m 0644 "${dtb}" \
 install -m 0644 .config "${artifact_dir}/kernel.config"
 install -m 0644 "${patch_manifest}" "${artifact_dir}/patches.sha256"
 install -m 0644 "${build_root}/scripts/venus-test-suite.sh" "${artifact_dir}/venus-test-suite.sh"
-install -m 0644 "${build_root}/docs/venus-test21.md" "${artifact_dir}/TESTING.md"
+install -m 0644 "${build_root}/docs/venus-test22.md" "${artifact_dir}/TESTING.md"
 install -m 0644 "${build_root}/docs/venus-sm8150-encoder-audit.md" \
 	"${artifact_dir}/ENCODER-AUDIT.md"
 install -m 0644 "${build_root}/docs/venus-sm8150-full-migration-audit.md" \
@@ -146,12 +146,16 @@ install -m 0644 "${build_root}/docs/venus-sm8150-0034-hunk-ledger.md" \
 	"${artifact_dir}/0034-HUNK-LEDGER.md"
 install -m 0644 "${build_root}/docs/venus-sm8150-0035-hunk-ledger.md" \
 	"${artifact_dir}/0035-HUNK-LEDGER.md"
+install -m 0644 "${build_root}/docs/venus-sm8150-0036-hunk-ledger.md" \
+	"${artifact_dir}/0036-HUNK-LEDGER.md"
 install -m 0644 "${build_root}/docs/venus-test18-start-reset-analysis.md" \
 	"${artifact_dir}/TEST18-START-RESET.md"
 install -m 0644 "${build_root}/docs/venus-test19-property-reset-analysis.md" \
 	"${artifact_dir}/TEST19-PROPERTY-RESET.md"
 install -m 0644 "${build_root}/docs/venus-test20-etb-reset-analysis.md" \
 	"${artifact_dir}/TEST20-ETB-RESET.md"
+install -m 0644 "${build_root}/docs/venus-test21-dma-allocation-failure.md" \
+	"${artifact_dir}/TEST21-DMA-ALLOC-FAILURE.md"
 install -m 0644 "${build_root}/docs/venus-sm8150-encoder-full-path-audit-test17.md" \
 	"${artifact_dir}/TEST17-FULL-ENCODER-AUDIT.md"
 install -m 0644 "${build_root}/docs/venus-test16-encoder-reset-analysis.md" \
@@ -209,9 +213,11 @@ sha256sum \
 	0033-HUNK-LEDGER.md \
 	0034-HUNK-LEDGER.md \
 	0035-HUNK-LEDGER.md \
+	0036-HUNK-LEDGER.md \
 	TEST18-START-RESET.md \
 	TEST19-PROPERTY-RESET.md \
 	TEST20-ETB-RESET.md \
+	TEST21-DMA-ALLOC-FAILURE.md \
 	TEST17-FULL-ENCODER-AUDIT.md \
 	TEST16-ENCODER-RESET.md \
 	FULL-DIFFERENCE-MATRIX.md \

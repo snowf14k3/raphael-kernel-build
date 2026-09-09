@@ -95,7 +95,12 @@ $currentFiles = @(
     'drivers/media/platform/qcom/venus/pm_helpers.c',
     'drivers/media/platform/qcom/venus/pm_helpers.h',
     'drivers/media/platform/qcom/venus/venc.c',
-    'drivers/media/platform/qcom/venus/venc_ctrls.c'
+    'drivers/media/platform/qcom/venus/venc_ctrls.c',
+    'include/linux/dma-map-ops.h',
+    'include/linux/dma-mapping.h',
+    'include/linux/iommu.h',
+    'include/media/videobuf2-core.h',
+    'kernel/dma/mapping.c'
 )
 
 $vendorFiles = @(
@@ -219,6 +224,19 @@ Save-GitGrep '15-private-deferred-current' $CurrentRepo ':' `
     'EOPNOTSUPP|ENOTSUPP|not supported|TODO|secure|CVP|TME|HEIC|extradata|metadata|DMABUF' $currentVenusPaths
 Save-GitGrep '15-private-deferred-vendor' $VendorRepo 'HEAD' `
     'EOPNOTSUPP|ENOTSUPP|not supported|TODO|secure|CVP|TME|HEIC|extradata|metadata|DMABUF' $vendorVidcPaths
+
+Save-GitGrep '16-dma-public-api-current' $CurrentRepo ':' `
+    'dma_alloc_noncontiguous|DMA_ATTR_ALLOC_SINGLE_PAGES|DMA_ATTR_IOMMU_USE_UPSTREAM_HINT|WARN_ON_ONCE\(attrs' @(
+        'kernel/dma/mapping.c',
+        'include/linux/dma-mapping.h',
+        'include/linux/dma-map-ops.h',
+        'drivers/iommu/dma-iommu.c',
+        'drivers/media/common/videobuf2/videobuf2-dma-contig.c')
+Save-GitGrep '16-dma-public-api-vendor' $VendorRepo 'HEAD' `
+    'dma_buf_map_attachment|dma_map_attrs|DMA_ATTR_IOMMU_USE_UPSTREAM_HINT|DMA_ATTR_SKIP_CPU_SYNC|cache_operations' @(
+        'drivers/media/platform/msm/vidc/msm_smem.c',
+        'drivers/media/platform/msm/vidc/msm_vidc_common.c',
+        'drivers/iommu/dma-iommu.c')
 
 $manifest = @(
     "captured_utc=$([DateTime]::UtcNow.ToString('o'))",

@@ -29,3 +29,10 @@ Validation fields:
 - checkpatch strict: 0 errors, 0 warnings, 0 checks across 89 checked lines
 - host/source tests: all IRIS1 tests pass, including compiled 64-byte ETB and 128x96 layout vectors
 - replay tree: `ba695d2fed72c98f1b792c28ae5c0ebc1043e63d`
+
+## Test21 correction
+
+Test21 did not exercise the streaming mapping. The public
+`dma_alloc_noncontiguous()` wrapper rejected the upstream attribute before
+calling iommu-dma. Patch 0036 supplies the missing exact allowlist entry; the
+0035 hardware-boundary claim remains untested until Test22.

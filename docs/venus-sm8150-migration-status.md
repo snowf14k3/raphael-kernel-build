@@ -1,6 +1,6 @@
 # SM8150 Venus 全量迁移主报告
 
-> 本文是 `Test21 + 0001--0035` 候选树的权威总账。旧的 `venus-sm8150-full-migration-audit.md`
+> 本文是 `Test22 + 0001--0036` 候选树的权威总账。旧的 `venus-sm8150-full-migration-audit.md`
 > 和 `venus-sm8150-encoder-audit.md` 保留历史过程，但不得用其中的阶段性判断覆盖本文。
 > “已实现”只表示代码已进入候选补丁；没有实机证据时一律写成“待实机”，不宣称修复。
 > 0027 已删除 Stage0--9，补回原厂 output-size minimum，并固定原厂 raw layout 与 DMA
@@ -13,7 +13,7 @@
 下，尽可能完整地支持 SM8150 固件实际提供的编解码能力。当前优先阻断项是：
 
 1. HEVC Main10/P010 已到达首个 capture completion，但 FFmpeg/mpv 判定为 invalid frame；
-2. Test20 encoder 已到 START_DONE 和首 ETB，随后 EBD/FBD 前复位；0035 已把 upstream-cache MMAP 从错误 coherent allocation 改为带 ownership sync 的 streaming DMA，待 Test21；
+2. Test21 在 `dma_alloc_noncontiguous()` attr allowlist 安全失败，未进入硬件；0036 已允许 upstream hint 到达 iommu-dma，待 Test22；
 3. 0019 已移植 SM8150 动态 DDR/LLCC 模型，但尚未用实机 ICC/长序列/多实例验证；
 4. Test16 VP8 在 source-change 后因 split-output count 契约偏差收到
    `HFI_ERR_SESSION_BAD_POINTER`；0030 已按原厂语义修正，待 Test17。
@@ -24,7 +24,7 @@
 | 角色 | 路径/提交 | 本报告用途 |
 |---|---|---|
 | Linux 固定基线 | `F:\linux\linux-raphael`，`58f3df07833f2382fe2fbc28f996c4c85817c1f6` | 主线 V4L2/VB2/PM 架构基线 |
-| 当前候选源码 | `F:\linux\test15-analysis`，基线 + `patches/series` 0001--0035 | 本报告逐行反查对象 |
+| 当前候选源码 | `F:\linux\test15-analysis`，基线 + `patches/series` 0001--0036 | 本报告逐行反查对象 |
 | 构建与证据库 | `F:\linux\raphael-kernel-build`，基准提交 `3403ed0d17c1d9c4b9834539eab789343b9b4693` 后工作区 | 补丁、生成器、测试和报告 |
 | 小米原厂 | `F:\linux\vendor-sm8150-reference`，`192eca8550f95c2eec58a474793d1d93fc1b3b67` | SM8150/VPU5/HFI4 主参考 |
 | 原厂源码树 | `drivers/media/platform/msm/vidc`，tree `1e66319e3b0a9e1ad7f59d624b4d58f5c0c67fc4` | 42 文件完整覆盖 |
@@ -969,3 +969,17 @@ sync，并在 buffer init 时拒绝任何 `bidi=1 nc=1 up=1` 不完整的映射�
 `ba695d2fed72c98f1b792c28ae5c0ebc1043e63d`。0035 已通过严格 checkpatch
 0/0/0、apply/diff check、脚本语法/self-test、编译后的 64-byte ETB/128x96 raw-layout
 向量以及全部 IRIS1 宿主测试。
+
+## 20. Test21 DMA API 入口拒绝与 0036（2026-09-10）
+
+Test21 没有进入 encoder hardware。SESSION_INIT 后第一次 24,576-byte input MMAP
+allocation 调用 `dma_alloc_noncontiguous()`，公共 wrapper 在
+`kernel/dma/mapping.c:805` 因 attrs 含 upstream hint 触发 WARN 并返回 NULL。FFmpeg
+安全报告 `encode-h264-one FAIL`，设备没有复位，后续属性/LOAD/START/ETB 全部未执行。
+
+0035 的 IOMMU 和 streaming ownership 设计因此尚未实机触达。0036 只扩展该 API 的
+精确 allowlist，使 `DMA_ATTR_IOMMU_USE_UPSTREAM_HINT` 与原有
+`DMA_ATTR_ALLOC_SINGLE_PAGES` 可用于 non-contiguous allocation；其他属性仍拒绝。审计
+证据包新增公共 DMA wrapper、四个相邻 include/API 文件和第 16 组双向检查。
+
+0001--0036 重放 tree 为 `6b1605c9fce99ee6550c6f9b44aba66335d88a07`。
