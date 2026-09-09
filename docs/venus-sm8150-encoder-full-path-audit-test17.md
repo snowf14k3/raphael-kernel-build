@@ -206,3 +206,18 @@ one 128x96 H.264 frame while a remote kernel log is already running. Required su
 FFmpeg's exit code alone: at least one matching EBD, one non-empty FBD, a software-decodable Annex-B
 output, orderly STOP/RELEASE/END, and parent/child runtime PM returning to `suspended`. A reset remains
 a failed Test18, not permission to claim stability.
+
+## Test18 correction
+
+This document froze the pre-Test18 audit, but the full Test18 external log now
+changes two classifications. Test18 did not reach an ETB: it stopped after the
+START command and before START_DONE/FTB. It also proved that moving count to
+REQBUFS was invalid in the mainline lifecycle because OUTPUT was committed with
+host-min 2 before controls and the final firmware table required min 4.
+
+The previously deferred `DMA_ATTR_IOMMU_USE_UPSTREAM_HINT` is now promoted to a
+source-backed correctness candidate for the separate Test17 post-ETB boundary.
+Patch 0033 implements its exact DMA-to-IOMMU-to-MAIR 0xf4 semantics for IRIS1
+encoder MMAP and internal allocations. The remaining CVP/CDSP and non-fatal
+fault items stay excluded. See `venus-test18-start-reset-analysis.md` and the
+0033 hunk ledger for the current decision.

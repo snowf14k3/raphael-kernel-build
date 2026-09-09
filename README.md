@@ -3,7 +3,7 @@
 这个仓库只做一件事：编译包含 SM8150 Venus 适配及运行修正的
 Redmi K20 Pro（Raphael）Linux 测试内核。
 
-当前实机冻结点是 **test16**，下一构建标识为 **test17**，目前包含候选补丁 0001--0031。
+当前实机冻结点是 **Test18**，下一构建标识为 **Test19**，目前包含候选补丁 0001--0033。
 Test16 已实机通过 H.264 小分辨率/720p/1080p/reopen 和 HEVC Main8；VP8 在
 source-change 后被固件以 `HFI_ERR_SESSION_BAD_POINTER (0x1003)` 拒绝，旧脚本因此
 没有执行后续 codec。Test15 的历史编码验证为：
@@ -55,6 +55,17 @@ DPB 与 client-facing OPB 的 actual count，并记录每个 DPB FTB；待 Test1
 `docs/venus-test16-encoder-reset-analysis.md` 与
 `docs/venus-sm8150-0031-hunk-ledger.md`。
 
+0032 尝试把 encoder count 移到 REQBUFS 并减少默认属性包。Windows 外部 SSH 保存的
+Test18 完整日志证明这与 mainline 的 control 生命周期不兼容：OUTPUT 先提交
+`actual=4 host-min=2`，properties 后固件最终要求 `min=4`，会话收到
+LOAD_RESOURCES_DONE 后在 START 内停止，尚未发送 FTB/ETB。0033 删除提前 count，改在
+controls/route/mode/core 后提交最终 INPUT 16/3 与 OUTPUT 4/4，并恢复 Test17 已到达
+START_DONE 的属性集合，同时保留 HFI 包体清零。0033 还移植原厂
+`DMA_ATTR_IOMMU_USE_UPSTREAM_HINT` 到 ARM LPAE MAIR 0xf4 的链路，只用于 IRIS1 encoder
+MMAP 和 internal buffers，以处理 Test17 独立的首 ETB 后复位边界。详细证据见
+`docs/venus-test18-start-reset-analysis.md` 与
+`docs/venus-sm8150-0033-hunk-ledger.md`。
+
 同一补丁系列还限制 Raphael 面板的高频亮度更新：test14 恢复 LP 命令并将请求
 合并为最多 4 Hz，直接 sysfs 压力测试已不再闪屏。GNOME 亮度/音量弹窗仍可触发
 GPU IOVA fault，卸载 Venus 后同样复现，已确认是独立的 Adreno/合成器问题。
@@ -81,12 +92,13 @@ Actions 不再安装、恢复或保存 ccache；当前 ARM runner 的冷缓存�
 [`venus-sm8150-test15-vs-base-full.diff`](docs/venus-sm8150-test15-vs-base-full.diff)；小米
 原厂 42 文件、39,111 行的连续覆盖和迁移判定见
 [原厂逐行台账](docs/venus-sm8150-vendor-line-ledger.md)，当前候选 Venus 36 文件、
-22,143 行、524 函数、3,079 区间的反向连续覆盖见
-[当前逐行台账](docs/venus-sm8150-current-line-ledger.md)；
+22,143 行、524 函数、3,079 区间的 0032 冻结反向覆盖见
+[当前逐行台账](docs/venus-sm8150-current-line-ledger.md)；0033 的全部新增/回退行由独立
+hunk ledger 接续覆盖；
 早期原厂、postmarketOS 对照依据保留在 [test4 说明](docs/venus-test4.md)。
 
 源码仍来自 `snowf14k3/linux` 的 `raphael-7.1` 分支，构建时会应用本仓库
-`patches/series` 中的三十一个补丁（原厂时序、队列校验、诊断、VPU5 会话配置、
+`patches/series` 中的三十三个补丁（原厂时序、队列校验、诊断、VPU5 会话配置、
 HFI 4xx 会话属性、两轮 10-bit 格式协商、SM8150 系统缓存/编码参数，以及
 编码会话生命周期加固）。
 补丁基于源码提交 `58f3df07833f2382fe2fbc28f996c4c85817c1f6`；
@@ -111,8 +123,8 @@ HFI 4xx 会话属性、两轮 10-bit 格式协商、SM8150 系统缓存/编码�
 - `sm8150-xiaomi-raphael.dtb`：包含 Venus 节点的设备树。
 - `kernel.config`：本次实际使用的内核配置。
 - `build-info.txt`：内核版本、源码提交、构建仓库提交及补丁清单 SHA256。
-- `patches.sha256`：三十一个补丁各自的 SHA256。
-- `venus-test-suite.sh`：安装并启动 test17 后，一次运行的实机测试脚本；任一 codec
+- `patches.sha256`：三十三个补丁各自的 SHA256。
+- `venus-test-suite.sh`：安装并启动 test19 后，一次运行的实机测试脚本；任一 codec
   失败立即停止，避免固件事件/日志风暴；硬编码由
   唯一总 gate 默认关闭；显式设置 `VENUS_TEST_ENCODER=1` 后先测 1 帧 H.264，再测
   30 帧 H.264/HEVC/VP8，每项要求非空且可软件解码，失败即停止剩余 codec job。

@@ -322,6 +322,7 @@ def validate_format_sources(driver):
 
 
 def validate_encoder_sources(driver):
+    kernel = driver.parents[4]
     core_header = (driver / "core.h").read_text(encoding="utf-8")
     core_source = (driver / "core.c").read_text(encoding="utf-8")
     pm = (driver / "pm_helpers.c").read_text(encoding="utf-8")
@@ -331,10 +332,15 @@ def validate_encoder_sources(driver):
     hfi = (driver / "hfi.c").read_text(encoding="utf-8")
     venus = (driver / "hfi_venus.c").read_text(encoding="utf-8")
     helpers = (driver / "helpers.c").read_text(encoding="utf-8")
+    decoder = (driver / "vdec.c").read_text(encoding="utf-8")
     encoder = (driver / "venc.c").read_text(encoding="utf-8")
     controls = (driver / "venc_ctrls.c").read_text(encoding="utf-8")
     decoder_controls = (driver / "vdec_ctrls.c").read_text(encoding="utf-8")
     hfi4_caps = (driver / "hfi_platform_v4.c").read_text(encoding="utf-8")
+    dma_mapping = (kernel / "include/linux/dma-mapping.h").read_text(encoding="utf-8")
+    iommu_header = (kernel / "include/linux/iommu.h").read_text(encoding="utf-8")
+    dma_iommu = (kernel / "drivers/iommu/dma-iommu.c").read_text(encoding="utf-8")
+    io_pgtable = (kernel / "drivers/iommu/io-pgtable-arm.c").read_text(encoding="utf-8")
 
     for required in (
             "hfi_bufreq_get_hold_count(const struct hfi_buffer_requirements *req",
@@ -601,31 +607,29 @@ def validate_encoder_sources(driver):
         if required not in profile_level:
             raise RuntimeError(f"SM8150 automatic H.264 level is incomplete: {required}")
     properties = function(encoder, "venc_set_properties")
-    for required in ("venc_iris1_default_frame_qp(inst)",
-                     "venc_iris1_default_qp_range(inst)",
-                     "venc_iris1_default_profile_level(inst)",
-                     "HFI_PROPERTY_CONFIG_VENC_FRAME_QP",
+    for required in ("!ctr->rc_enable", "HFI_PROPERTY_CONFIG_VENC_FRAME_QP",
                      "IS_IRIS1(inst->core) ? HFI_LAYER_ID_ALL : 0",
                      "HFI_PROPERTY_PARAM_VENC_DISABLE_RC_TIMESTAMP",
                      "en.enable = ctr->rc_enable",
                      "venus-sm8150: encoder rc timestamp disable=%u",
-                     "rate_control != HFI_RATE_CONTROL_OFF",
+                     "HFI_PROPERTY_PARAM_VENC_BITRATE_SAVINGS",
+                     "HFI_PROPERTY_PARAM_NAL_STREAM_FORMAT_SELECT",
+                     "HFI_NAL_FORMAT_STARTCODES",
                      "!IS_IRIS1(inst->core) || ctr->ltr_count",
                      "ltr_mode.ltr_mode = HFI_LTR_MODE_MANUAL",
                      "ltr_mode.trust_mode = 1",
-                     "VPU5 sends VUI timing only through its explicit private control"):
+                     "VPU5 downstream leaves VUI timing disabled"):
         if required not in properties:
             raise RuntimeError(f"SM8150 encoder property setup is incomplete: {required}")
 
     rate_control = properties.find("HFI_PROPERTY_PARAM_VENC_RATE_CONTROL")
     timestamp_control = properties.find(
         "HFI_PROPERTY_PARAM_VENC_DISABLE_RC_TIMESTAMP")
-    target_bitrate = properties.find("HFI_PROPERTY_CONFIG_VENC_TARGET_BITRATE",
-                                     timestamp_control)
-    if min(rate_control, timestamp_control, target_bitrate) < 0 or not \
-       rate_control < timestamp_control < target_bitrate:
+    bitrate_savings = properties.find("HFI_PROPERTY_PARAM_VENC_BITRATE_SAVINGS")
+    if min(rate_control, timestamp_control, bitrate_savings) < 0 or not \
+       rate_control < timestamp_control < bitrate_savings:
         raise RuntimeError(
-            "VPU5 timestamp RC must follow rate control before target bitrate")
+            "VPU5 timestamp RC must follow rate control before bitrate savings")
 
     max_bitrate_guard = properties.find("if (!IS_IRIS1(inst->core))")
     max_bitrate = properties.find("HFI_PROPERTY_CONFIG_VENC_MAX_BITRATE")
@@ -702,7 +706,6 @@ def validate_encoder_sources(driver):
                      "sizes[0] = iris1_req.size",
                      "hfi_bufreq_get_count_min(&iris1_req, ver)",
                      "hfi_bufreq_get_count_min_host(&iris1_req, ver)",
-                     "venc_iris1_set_buffer_count(inst, type, *num_buffers",
                      "firmware-defined"):
         if required not in queue_setup:
             raise RuntimeError(
@@ -754,11 +757,14 @@ def validate_encoder_sources(driver):
     set_encoder_count = function(encoder, "venc_iris1_set_buffer_count")
     for required in ("HFI_PROPERTY_PARAM_BUFFER_COUNT_ACTUAL",
                      "hfi_bufreq_get_count_min(req",
-                     "inst->bufreq_cache_valid = false",
-                     "encoder queue count type=%#x"):
+                     "encoder final count type=%#x"):
         if required not in set_encoder_count:
             raise RuntimeError(
-                f"VPU5 per-REQBUFS encoder count is incomplete: {required}")
+                f"VPU5 final encoder count is incomplete: {required}")
+    queue_setup = function(encoder, "venc_queue_setup")
+    if "venc_iris1_set_buffer_count" in queue_setup:
+        raise RuntimeError(
+            "VPU5 encoder count is still committed before STREAMON controls")
 
     intbufs = function(helpers, "intbufs_set_buffer")
     for required in ("i < bufreq.count_actual",
@@ -839,6 +845,12 @@ def validate_encoder_sources(driver):
     start_core = start.find("venus_pm_acquire_core(inst)")
     start_preflight = start.find("venc_iris1_preflight(inst)")
     start_requirements = start.find("venus_helper_cache_bufreqs(inst)")
+    start_input_count = start.find(
+        "venc_iris1_set_buffer_count(inst, HFI_BUFFER_INPUT")
+    start_output_count = start.find(
+        "venc_iris1_set_buffer_count(inst, HFI_BUFFER_OUTPUT")
+    final_requirements = start.find("venus_helper_cache_bufreqs(inst)",
+                                    start_requirements + 1)
     output_size = start.find("venus_helper_set_bufsize(inst, inst->output_buf_size")
     output_type = start.find("HFI_BUFFER_OUTPUT", output_size)
     start_verify = start.find("venc_verify_conf(inst)")
@@ -846,12 +858,13 @@ def validate_encoder_sources(driver):
     start_pin = start.find("inst->enc_pm_active = true")
     ordered = (start_get, start_rotation, start_properties, start_route,
                start_mode, start_core, start_preflight, start_requirements,
+               start_input_count, start_output_count, final_requirements,
                output_size, output_type, start_verify,
                start_hw, start_pin)
     if min(ordered) < 0 or list(ordered) != sorted(ordered):
         raise RuntimeError("IRIS1 encoder setup/DMA/PM ordering differs from audited sequence")
-    if start.count("venus_helper_cache_bufreqs(inst)") != 1:
-        raise RuntimeError("VPU5 STREAMON must query final requirements exactly once")
+    if start.count("venus_helper_cache_bufreqs(inst)") != 2:
+        raise RuntimeError("VPU5 STREAMON must refresh requirements after final counts")
     generic_counts = start.find("venus_helper_set_num_bufs")
     generic_else = start.rfind("} else {", 0, generic_counts)
     if generic_counts < 0 or generic_else < 0 or generic_else < output_size:
@@ -949,6 +962,9 @@ def validate_encoder_sources(driver):
     for required in ("IS_IRIS1(inst->core)",
                      "src_vq->bidirectional = 1",
                      "dst_vq->bidirectional = 1",
+                     "src_vq->dma_attrs |= DMA_ATTR_IOMMU_USE_UPSTREAM_HINT",
+                     "dst_vq->dma_attrs |= DMA_ATTR_IOMMU_USE_UPSTREAM_HINT",
+                     "upstream-hint=%u",
                      "encoder capture DMA bidirectional"):
         if required not in queue_init:
             raise RuntimeError(f"SM8150 encoder DMA direction is incomplete: {required}")
@@ -958,6 +974,27 @@ def validate_encoder_sources(driver):
         if forbidden in encoder or forbidden in core_header:
             raise RuntimeError(
                 f"Required SM8150 DMA/layout policy is still optional: {forbidden}")
+
+    for body, required in (
+            (dma_mapping, "#define DMA_ATTR_IOMMU_USE_UPSTREAM_HINT"),
+            (iommu_header, "#define IOMMU_USE_UPSTREAM_HINT"),
+            (dma_iommu, "prot |= IOMMU_USE_UPSTREAM_HINT"),
+            (io_pgtable, "ARM_LPAE_MAIR_ATTR_INC_OWBRWA\t0xf4"),
+            (io_pgtable, "else if (prot & IOMMU_USE_UPSTREAM_HINT)"),
+            (io_pgtable, "ARM_LPAE_MAIR_ATTR_IDX_INC_OCACHE")):
+        if required not in body:
+            raise RuntimeError(
+                f"SM8150 upstream-cache DMA contract is incomplete: {required}")
+    if "DMA_ATTR_IOMMU_USE_UPSTREAM_HINT" in function(venus, "venus_alloc"):
+        raise RuntimeError("Working HFI queue mapping was changed by the encoder-only fix")
+    if "DMA_ATTR_IOMMU_USE_UPSTREAM_HINT" in function(decoder, "m2m_queue_init"):
+        raise RuntimeError("Working decoder mappings were changed by the encoder-only fix")
+    intbufs = function(helpers, "intbufs_set_buffer")
+    for required in ("inst->session_type == VIDC_SESSION_TYPE_ENC",
+                     "buf->attrs |= DMA_ATTR_IOMMU_USE_UPSTREAM_HINT"):
+        if required not in intbufs:
+            raise RuntimeError(
+                f"SM8150 encoder internal mapping lacks upstream hint: {required}")
 
     for required in ("iris1_ebd_count", "iris1_recon_index",
                      "iris1_ubwc_cr_q16", "iris1_complexity_factor_q16",

@@ -1,0 +1,615 @@
+From: Codex <codex@openai.com>
+Date: Thu, 10 Sep 2026 18:30:00 +0800
+Subject: [PATCH] media: venus: fix SM8150 final counts and cache mappings
+
+The externally captured Test18 log ends immediately after the encoder START
+command. LOAD_RESOURCES_DONE was received, but START_DONE and all FTB/ETB
+traffic are absent. OUTPUT count was committed during REQBUFS with
+host-min 2. The post-control firmware requirements then changed the minimum
+to 4.
+Mainline programs controls later than Xiaomi's driver, so copying only the
+downstream REQBUFS count call creates an invalid lifecycle.
+
+Query final requirements after all encoder controls, route, work mode and
+core selection. Commit both external counts from that table, then refresh
+internal requirements before LOAD/START. Restore the Test17 property
+sequence that reached START_DONE, while retaining zeroed HFI packets.
+
+Test17 also reset after the first ETB. Xiaomi maps Venus buffers with
+DMA_ATTR_IOMMU_USE_UPSTREAM_HINT when system cache is present. Carry that
+attribute through iommu-dma and select the existing ARM
+LPAE 0xf4 MAIR entry. Apply it only to IRIS1 encoder external MMAP buffers
+and internal buffers, leaving the working decoder and HFI queues unchanged.
+
+Signed-off-by: Codex <codex@openai.com>
+---
+diff --git a/Documentation/core-api/dma-attributes.rst b/Documentation/core-api/dma-attributes.rst
+index 123c8468d58f..a664d03bdb03 100644
+--- a/Documentation/core-api/dma-attributes.rst
++++ b/Documentation/core-api/dma-attributes.rst
+@@ -179,3 +179,11 @@ interface when building their uAPIs, when possible.
+ 
+ It must never be used in an in-kernel driver that only works with
+ kernel memory.
++
++DMA_ATTR_IOMMU_USE_UPSTREAM_HINT
++--------------------------------
++
++This attribute requests the IOMMU page-table memory type that forwards cache
++allocation policy to the upstream interconnect. It is intended for integrated
++devices whose system-cache contract requires the upstream transaction hint.
++Architectures without such a memory type may ignore the attribute.
+diff --git a/drivers/iommu/dma-iommu.c b/drivers/iommu/dma-iommu.c
+index 381b60d9e7ce..32daeaca81e5 100644
+--- a/drivers/iommu/dma-iommu.c
++++ b/drivers/iommu/dma-iommu.c
+@@ -744,6 +744,8 @@ static int dma_info_to_prot(enum dma_data_direction dir, bool coherent,
+ 
+ 	if (attrs & DMA_ATTR_PRIVILEGED)
+ 		prot |= IOMMU_PRIV;
++	if (attrs & DMA_ATTR_IOMMU_USE_UPSTREAM_HINT)
++		prot |= IOMMU_USE_UPSTREAM_HINT;
+ 
+ 	switch (dir) {
+ 	case DMA_BIDIRECTIONAL:
+diff --git a/drivers/iommu/io-pgtable-arm.c b/drivers/iommu/io-pgtable-arm.c
+index 0208e5897c29..e029acbf46df 100644
+--- a/drivers/iommu/io-pgtable-arm.c
++++ b/drivers/iommu/io-pgtable-arm.c
+@@ -521,6 +521,9 @@ static arm_lpae_iopte arm_lpae_prot_to_pte(struct arm_lpae_io_pgtable *data,
+ 		else if (prot & IOMMU_CACHE)
+ 			pte |= (ARM_LPAE_MAIR_ATTR_IDX_CACHE
+ 				<< ARM_LPAE_PTE_ATTRINDX_SHIFT);
++		else if (prot & IOMMU_USE_UPSTREAM_HINT)
++			pte |= (ARM_LPAE_MAIR_ATTR_IDX_INC_OCACHE
++				<< ARM_LPAE_PTE_ATTRINDX_SHIFT);
+ 	}
+ 
+ 	/*
+diff --git a/drivers/media/platform/qcom/venus/helpers.c b/drivers/media/platform/qcom/venus/helpers.c
+index 3ff7aee72445..4bf325dca722 100644
+--- a/drivers/media/platform/qcom/venus/helpers.c
++++ b/drivers/media/platform/qcom/venus/helpers.c
+@@ -293,6 +293,9 @@ static int intbufs_set_buffer(struct venus_inst *inst, u32 type)
+ 			buf->size = bufreq.size;
+ 		buf->attrs = DMA_ATTR_WRITE_COMBINE |
+ 			     DMA_ATTR_NO_KERNEL_MAPPING;
++		if (IS_IRIS1(inst->core) &&
++		    inst->session_type == VIDC_SESSION_TYPE_ENC)
++			buf->attrs |= DMA_ATTR_IOMMU_USE_UPSTREAM_HINT;
+ 		buf->va = dma_alloc_attrs(dev, buf->size, &buf->da, GFP_KERNEL,
+ 					  buf->attrs);
+ 		if (!buf->va) {
+@@ -316,8 +319,10 @@ static int intbufs_set_buffer(struct venus_inst *inst, u32 type)
+ 		if (IS_IRIS1(inst->core) &&
+ 		    inst->session_type == VIDC_SESSION_TYPE_ENC)
+ 			dev_info(dev,
+-				 "venus-sm8150: SET_BUFFERS begin type=%#x index=%u req=%u size=%zu dma=%pad\n",
+-				 type, i, bufreq.size, buf->size, &buf->da);
++				 "venus-sm8150: SET_BUFFERS begin type=%#x index=%u req=%u size=%zu dma=%pad upstream-hint=%u\n",
++				 type, i, bufreq.size, buf->size, &buf->da,
++					 !!(buf->attrs &
++					    DMA_ATTR_IOMMU_USE_UPSTREAM_HINT));
+ 		ret = hfi_session_set_buffers(inst, &bd);
+ 		if (ret) {
+ 			dev_err(dev, "set session buffers failed\n");
+diff --git a/drivers/media/platform/qcom/venus/venc.c b/drivers/media/platform/qcom/venus/venc.c
+index 3192c90da86d..880682b7e9b6 100644
+--- a/drivers/media/platform/qcom/venus/venc.c
++++ b/drivers/media/platform/qcom/venus/venc.c
+@@ -23,7 +23,7 @@
+ #include "pm_helpers.h"
+ 
+ #define NUM_B_FRAMES_MAX	4
+-#define VENUS_IRIS1_DEFAULT_P_FRAMES	29
++#define VENUS_IRIS1_AUTO_QP	127
+ #define VENUS_IRIS1_CBR_MB_LIMIT \
+ 	(((1280 + 15) / 16) * ((720 + 15) / 16) * 30)
+ 
+@@ -783,51 +783,6 @@ static u32 venc_pack_qp(u32 qp_i, u32 qp_p, u32 qp_b)
+ 	return qp_i | (qp_p << 8) | (qp_b << 16);
+ }
+ 
+-static bool venc_iris1_default_frame_qp(struct venus_inst *inst)
+-{
+-	struct venc_controls *ctr = &inst->controls.enc;
+-
+-	if (inst->fmt_cap->pixfmt == V4L2_PIX_FMT_HEVC)
+-		return ctr->hevc_i_qp == 26 && ctr->hevc_p_qp == 28 &&
+-		       ctr->hevc_b_qp == 30;
+-
+-	return ctr->h264_i_qp == 26 && ctr->h264_p_qp == 28 &&
+-	       ctr->h264_b_qp == 30;
+-}
+-
+-static bool venc_iris1_default_qp_range(struct venus_inst *inst)
+-{
+-	struct venc_controls *ctr = &inst->controls.enc;
+-
+-	if (inst->fmt_cap->pixfmt == V4L2_PIX_FMT_HEVC)
+-		return ctr->hevc_i_min_qp == 1 && ctr->hevc_p_min_qp == 1 &&
+-		       ctr->hevc_b_min_qp == 1 && ctr->hevc_i_max_qp == 63 &&
+-		       ctr->hevc_p_max_qp == 63 && ctr->hevc_b_max_qp == 63;
+-	if (inst->fmt_cap->pixfmt == V4L2_PIX_FMT_VP8)
+-		return ctr->vp8_min_qp == 1 && ctr->vp8_max_qp == 128;
+-
+-	return ctr->h264_i_min_qp == 1 && ctr->h264_p_min_qp == 1 &&
+-	       ctr->h264_b_min_qp == 1 && ctr->h264_i_max_qp == 51 &&
+-	       ctr->h264_p_max_qp == 51 && ctr->h264_b_max_qp == 51;
+-}
+-
+-static bool venc_iris1_default_profile_level(struct venus_inst *inst)
+-{
+-	struct venc_controls *ctr = &inst->controls.enc;
+-
+-	if (inst->fmt_cap->pixfmt == V4L2_PIX_FMT_H264)
+-		return ctr->profile.h264 == V4L2_MPEG_VIDEO_H264_PROFILE_BASELINE &&
+-		       ctr->level.h264 == V4L2_MPEG_VIDEO_H264_LEVEL_5_1;
+-	if (inst->fmt_cap->pixfmt == V4L2_PIX_FMT_HEVC)
+-		return ctr->profile.hevc == V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN &&
+-		       ctr->level.hevc == V4L2_MPEG_VIDEO_HEVC_LEVEL_1 &&
+-		       ctr->hevc_tier == V4L2_MPEG_VIDEO_HEVC_TIER_MAIN;
+-	if (inst->fmt_cap->pixfmt == V4L2_PIX_FMT_VP8)
+-		return ctr->profile.vp8 == V4L2_MPEG_VIDEO_VP8_PROFILE_0;
+-
+-	return false;
+-}
+-
+ static int venc_iris1_h264_sar(struct venus_inst *inst)
+ {
+ 	static const struct hfi_aspect_ratio sar[] = {
+@@ -942,14 +897,8 @@ static int venc_iris1_internal_config(struct venus_inst *inst, u32 rate_control)
+ 			return ret;
+ 	}
+ 
+-	/* Vendor sends this optional control only when userspace changes it. */
+-	if (ctr->base_priority_id) {
+-		ptype = HFI_PROPERTY_CONFIG_VENC_BASELAYER_PRIORITYID;
+-		return hfi_session_set_property(inst, ptype,
+-						&ctr->base_priority_id);
+-	}
+-
+-	return 0;
++	ptype = HFI_PROPERTY_CONFIG_VENC_BASELAYER_PRIORITYID;
++	return hfi_session_set_property(inst, ptype, &ctr->base_priority_id);
+ }
+ 
+ static int venc_set_properties(struct venus_inst *inst, bool set_work)
+@@ -962,6 +911,7 @@ static int venc_set_properties(struct venus_inst *inst, bool set_work)
+ 	struct hfi_quantization quant = {};
+ 	struct hfi_quantization_range quant_range = {};
+ 	struct hfi_quantization_range_v2 quant_range_v2 = {};
++	struct hfi_nal_stream_format_select nal_format = {};
+ 	struct hfi_enable en = {};
+ 	struct hfi_ltr_mode ltr_mode = {};
+ 	struct hfi_intra_refresh intra_refresh = {};
+@@ -993,31 +943,27 @@ static int venc_set_properties(struct venus_inst *inst, bool set_work)
+ 		struct hfi_h264_db_control deblock = {};
+ 		struct hfi_h264_8x8_transform h264_transform = {};
+ 
+-		/* VPU5 sends VUI timing only through its explicit private control. */
++		ptype = HFI_PROPERTY_PARAM_VENC_H264_VUI_TIMING_INFO;
++		/* VPU5 downstream leaves VUI timing disabled by default. */
+ 		if (!IS_IRIS1(inst->core)) {
+-			ptype = HFI_PROPERTY_PARAM_VENC_H264_VUI_TIMING_INFO;
+ 			info.enable = 1;
+ 			info.fixed_framerate = 1;
+ 			info.time_scale = NSEC_PER_SEC;
+-
+-			ret = hfi_session_set_property(inst, ptype, &info);
+-			if (ret)
+-				return ret;
+ 		}
+ 
++		ret = hfi_session_set_property(inst, ptype, &info);
++		if (ret)
++			return ret;
++
+ 		ptype = HFI_PROPERTY_PARAM_VENC_H264_ENTROPY_CONTROL;
+ 		entropy.entropy_mode = venc_v4l2_to_hfi(
+ 					  V4L2_CID_MPEG_VIDEO_H264_ENTROPY_MODE,
+ 					  ctr->h264_entropy_mode);
+ 		entropy.cabac_model = HFI_H264_CABAC_MODEL_0;
+ 
+-		if (!IS_IRIS1(inst->core) ||
+-		    ctr->h264_entropy_mode !=
+-			V4L2_MPEG_VIDEO_H264_ENTROPY_MODE_CAVLC) {
+-			ret = hfi_session_set_property(inst, ptype, &entropy);
+-			if (ret)
+-				return ret;
+-		}
++		ret = hfi_session_set_property(inst, ptype, &entropy);
++		if (ret)
++			return ret;
+ 
+ 		ptype = HFI_PROPERTY_PARAM_VENC_H264_DEBLOCK_CONTROL;
+ 		deblock.mode = venc_v4l2_to_hfi(
+@@ -1026,14 +972,9 @@ static int venc_set_properties(struct venus_inst *inst, bool set_work)
+ 		deblock.slice_alpha_offset = ctr->h264_loop_filter_alpha;
+ 		deblock.slice_beta_offset = ctr->h264_loop_filter_beta;
+ 
+-		if (!IS_IRIS1(inst->core) ||
+-		    ctr->h264_loop_filter_mode !=
+-			V4L2_MPEG_VIDEO_H264_LOOP_FILTER_MODE_DISABLED ||
+-		    ctr->h264_loop_filter_alpha || ctr->h264_loop_filter_beta) {
+-			ret = hfi_session_set_property(inst, ptype, &deblock);
+-			if (ret)
+-				return ret;
+-		}
++		ret = hfi_session_set_property(inst, ptype, &deblock);
++		if (ret)
++			return ret;
+ 
+ 		ptype = HFI_PROPERTY_PARAM_VENC_H264_TRANSFORM_8X8;
+ 		h264_transform.enable_type = 0;
+@@ -1041,12 +982,9 @@ static int venc_set_properties(struct venus_inst *inst, bool set_work)
+ 		    ctr->profile.h264 == V4L2_MPEG_VIDEO_H264_PROFILE_CONSTRAINED_HIGH)
+ 			h264_transform.enable_type = ctr->h264_8x8_transform;
+ 
+-		if (!IS_IRIS1(inst->core) || h264_transform.enable_type) {
+-			ret = hfi_session_set_property(inst, ptype,
+-						       &h264_transform);
+-			if (ret)
+-				return ret;
+-		}
++		ret = hfi_session_set_property(inst, ptype, &h264_transform);
++		if (ret)
++			return ret;
+ 
+ 		ret = venc_iris1_h264_sar(inst);
+ 		if (ret)
+@@ -1077,9 +1015,8 @@ static int venc_set_properties(struct venus_inst *inst, bool set_work)
+ 		}
+ 	}
+ 
+-	if (!IS_IRIS1(inst->core) &&
+-	    (inst->fmt_cap->pixfmt == V4L2_PIX_FMT_H264 ||
+-	     inst->fmt_cap->pixfmt == V4L2_PIX_FMT_HEVC)) {
++	if (inst->fmt_cap->pixfmt == V4L2_PIX_FMT_H264 ||
++	    inst->fmt_cap->pixfmt == V4L2_PIX_FMT_HEVC) {
+ 		/* IDR periodicity, n:
+ 		 * n = 0 - only the first I-frame is IDR frame
+ 		 * n = 1 - all I-frames will be IDR frames
+@@ -1092,8 +1029,7 @@ static int venc_set_properties(struct venus_inst *inst, bool set_work)
+ 			return ret;
+ 	}
+ 
+-	if (!IS_IRIS1(inst->core) &&
+-	    inst->fmt_cap->pixfmt == V4L2_PIX_FMT_HEVC &&
++	if (inst->fmt_cap->pixfmt == V4L2_PIX_FMT_HEVC &&
+ 	    ctr->profile.hevc == V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN_10) {
+ 		struct hfi_hdr10_pq_sei hdr10 = {};
+ 		unsigned int c;
+@@ -1136,13 +1072,9 @@ static int venc_set_properties(struct venus_inst *inst, bool set_work)
+ 	intra_period.pframes = ctr->num_p_frames;
+ 	intra_period.bframes = ctr->num_b_frames;
+ 
+-	if (!IS_IRIS1(inst->core) ||
+-	    ctr->num_p_frames != VENUS_IRIS1_DEFAULT_P_FRAMES ||
+-	    ctr->num_b_frames) {
+-		ret = hfi_session_set_property(inst, ptype, &intra_period);
+-		if (ret)
+-			return ret;
+-	}
++	ret = hfi_session_set_property(inst, ptype, &intra_period);
++	if (ret)
++		return ret;
+ 
+ 	if (!ctr->rc_enable)
+ 		rate_control = HFI_RATE_CONTROL_OFF;
+@@ -1156,18 +1088,16 @@ static int venc_set_properties(struct venus_inst *inst, bool set_work)
+ 		rate_control = HFI_RATE_CONTROL_CQ;
+ 
+ 	ptype = HFI_PROPERTY_PARAM_VENC_RATE_CONTROL;
+-	if (!IS_IRIS1(inst->core) || rate_control != HFI_RATE_CONTROL_OFF) {
+-		ret = hfi_session_set_property(inst, ptype, &rate_control);
+-		if (ret)
+-			return ret;
+-	}
++	ret = hfi_session_set_property(inst, ptype, &rate_control);
++	if (ret)
++		return ret;
+ 
+ 	/*
+ 	 * Downstream keeps timestamp based rate control as a separate VPU5
+ 	 * property.  FRAME_RC_ENABLE maps directly to "disable RC timestamp";
+ 	 * without it firmware first observes the mismatch when consuming ETB.
+ 	 */
+-	if (IS_IRIS1(inst->core) && ctr->rc_enable) {
++	if (IS_IRIS1(inst->core)) {
+ 		en.enable = ctr->rc_enable;
+ 		ptype = HFI_PROPERTY_PARAM_VENC_DISABLE_RC_TIMESTAMP;
+ 		ret = hfi_session_set_property(inst, ptype, &en);
+@@ -1179,7 +1109,27 @@ static int venc_set_properties(struct venus_inst *inst, bool set_work)
+ 			 en.enable);
+ 	}
+ 
+-	/* VPU5 firmware defaults to bitrate savings and Annex-B start codes. */
++	/* Downstream forces this on for every non-VBR rate-control mode. */
++	if (IS_IRIS1(inst->core) &&
++	    rate_control != HFI_RATE_CONTROL_VBR_VFR &&
++	    rate_control != HFI_RATE_CONTROL_VBR_CFR) {
++		en.enable = 1;
++		ptype = HFI_PROPERTY_PARAM_VENC_BITRATE_SAVINGS;
++		ret = hfi_session_set_property(inst, ptype, &en);
++		if (ret)
++			return ret;
++	}
++
++	/* VPU5 downstream explicitly selects Annex-B start codes. */
++	if (IS_IRIS1(inst->core) &&
++	    (inst->fmt_cap->pixfmt == V4L2_PIX_FMT_H264 ||
++	     inst->fmt_cap->pixfmt == V4L2_PIX_FMT_HEVC)) {
++		nal_format.format = HFI_NAL_FORMAT_STARTCODES;
++		ptype = HFI_PROPERTY_PARAM_NAL_STREAM_FORMAT_SELECT;
++		ret = hfi_session_set_property(inst, ptype, &nal_format);
++		if (ret)
++			return ret;
++	}
+ 
+ 	if (rate_control == HFI_RATE_CONTROL_CQ && ctr->const_quality) {
+ 		struct hfi_heic_frame_quality quality = {};
+@@ -1191,8 +1141,7 @@ static int venc_set_properties(struct venus_inst *inst, bool set_work)
+ 			return ret;
+ 	}
+ 
+-	if (!ctr->layer_bitrate &&
+-	    (!IS_IRIS1(inst->core) || rate_control != HFI_RATE_CONTROL_OFF)) {
++	if (!ctr->layer_bitrate) {
+ 		if (!ctr->bitrate)
+ 			bitrate = 64000;
+ 		else
+@@ -1223,10 +1172,8 @@ static int venc_set_properties(struct venus_inst *inst, bool set_work)
+ 		}
+ 	}
+ 
+-	if ((inst->fmt_cap->pixfmt == V4L2_PIX_FMT_H264 ||
+-	     inst->fmt_cap->pixfmt == V4L2_PIX_FMT_HEVC) &&
+-	    (!IS_IRIS1(inst->core) ||
+-	     ctr->header_mode == V4L2_MPEG_VIDEO_HEADER_MODE_SEPARATE)) {
++	if (inst->fmt_cap->pixfmt == V4L2_PIX_FMT_H264 ||
++	    inst->fmt_cap->pixfmt == V4L2_PIX_FMT_HEVC) {
+ 		ptype = HFI_PROPERTY_CONFIG_VENC_SYNC_FRAME_SEQUENCE_HEADER;
+ 		if (ctr->header_mode == V4L2_MPEG_VIDEO_HEADER_MODE_SEPARATE)
+ 			en.enable = 0;
+@@ -1238,12 +1185,15 @@ static int venc_set_properties(struct venus_inst *inst, bool set_work)
+ 			return ret;
+ 	}
+ 
+-	/* VPU5 defaults are left untouched unless userspace changes frame QP. */
+-	if (!IS_IRIS1(inst->core) ||
+-	    (!ctr->rc_enable && !venc_iris1_default_frame_qp(inst))) {
++	/* VPU5 lets firmware choose the initial QP while rate control is active. */
++	if (!IS_IRIS1(inst->core) || !ctr->rc_enable) {
+ 		ptype = IS_IRIS1(inst->core) ? HFI_PROPERTY_CONFIG_VENC_FRAME_QP :
+ 						 HFI_PROPERTY_PARAM_VENC_SESSION_QP;
+-		if (inst->fmt_cap->pixfmt == V4L2_PIX_FMT_HEVC) {
++		if (IS_IRIS1(inst->core) && !ctr->rc_enable) {
++			quant.qp_i = VENUS_IRIS1_AUTO_QP;
++			quant.qp_p = VENUS_IRIS1_AUTO_QP;
++			quant.qp_b = VENUS_IRIS1_AUTO_QP;
++		} else if (inst->fmt_cap->pixfmt == V4L2_PIX_FMT_HEVC) {
+ 			quant.qp_i = ctr->hevc_i_qp;
+ 			quant.qp_p = ctr->hevc_p_qp;
+ 			quant.qp_b = ctr->hevc_b_qp;
+@@ -1259,13 +1209,18 @@ static int venc_set_properties(struct venus_inst *inst, bool set_work)
+ 			return ret;
+ 	}
+ 
+-	if (IS_IRIS1(inst->core) && venc_iris1_default_qp_range(inst)) {
+-		ret = 0;
+-	} else if (inst->core->res->hfi_version == HFI_VERSION_4XX ||
++	if (inst->core->res->hfi_version == HFI_VERSION_4XX ||
+ 	    inst->core->res->hfi_version == HFI_VERSION_6XX) {
+ 		ptype = HFI_PROPERTY_PARAM_VENC_SESSION_QP_RANGE_V2;
+ 
+-		if (inst->fmt_cap->pixfmt == V4L2_PIX_FMT_HEVC) {
++		if (IS_IRIS1(inst->core) && !ctr->rc_enable) {
++			quant_range_v2.min_qp.qp_packed =
++				venc_pack_qp(VENUS_IRIS1_AUTO_QP,
++					     VENUS_IRIS1_AUTO_QP,
++					     VENUS_IRIS1_AUTO_QP);
++			quant_range_v2.max_qp.qp_packed =
++				quant_range_v2.min_qp.qp_packed;
++		} else if (inst->fmt_cap->pixfmt == V4L2_PIX_FMT_HEVC) {
+ 			quant_range_v2.min_qp.qp_packed =
+ 				venc_pack_qp(ctr->hevc_i_min_qp,
+ 					     ctr->hevc_p_min_qp,
+@@ -1357,17 +1312,13 @@ static int venc_set_properties(struct venus_inst *inst, bool set_work)
+ 		break;
+ 	}
+ 
+-	if (!IS_IRIS1(inst->core) ||
+-	    !venc_iris1_default_profile_level(inst)) {
+-		ret = venus_helper_set_profile_level(inst, profile, level,
+-						     ctr->hevc_tier);
+-		if (ret)
+-			return ret;
+-	}
++	ret = venus_helper_set_profile_level(inst, profile, level,
++					     ctr->hevc_tier);
++	if (ret)
++		return ret;
+ 
+-	if ((inst->fmt_cap->pixfmt == V4L2_PIX_FMT_H264 ||
+-	     inst->fmt_cap->pixfmt == V4L2_PIX_FMT_HEVC) &&
+-	    (!IS_IRIS1(inst->core) || ctr->aud_enable)) {
++	if (inst->fmt_cap->pixfmt == V4L2_PIX_FMT_H264 ||
++	    inst->fmt_cap->pixfmt == V4L2_PIX_FMT_HEVC) {
+ 		struct hfi_enable en = {};
+ 
+ 		ptype = HFI_PROPERTY_PARAM_VENC_H264_GENERATE_AUDNAL;
+@@ -1380,8 +1331,7 @@ static int venc_set_properties(struct venus_inst *inst, bool set_work)
+ 			return ret;
+ 	}
+ 
+-	if ((!IS_IRIS1(inst->core) || ctr->intra_refresh_period) &&
+-	    (inst->fmt_cap->pixfmt == V4L2_PIX_FMT_H264 ||
++	if ((inst->fmt_cap->pixfmt == V4L2_PIX_FMT_H264 ||
+ 	     inst->fmt_cap->pixfmt == V4L2_PIX_FMT_HEVC) &&
+ 	    (rate_control == HFI_RATE_CONTROL_CBR_VFR ||
+ 	     rate_control == HFI_RATE_CONTROL_CBR_CFR)) {
+@@ -1529,10 +1479,8 @@ static int venc_iris1_set_buffer_count(struct venus_inst *inst, u32 type,
+ 	if (ret)
+ 		return ret;
+ 
+-	/* The next queue and STREAMON must observe the firmware's new table. */
+-	inst->bufreq_cache_valid = false;
+ 	dev_info(inst->core->dev,
+-		 "venus-sm8150: encoder queue count type=%#x actual=%u host-min=%u committed\n",
++		 "venus-sm8150: encoder final count type=%#x actual=%u host-min=%u committed\n",
+ 		 type, count, actual.count_min_host);
+ 
+ 	return 0;
+@@ -1657,16 +1605,6 @@ static int venc_queue_setup(struct vb2_queue *q,
+ 		break;
+ 	}
+ 
+-	if (!ret && IS_IRIS1(core)) {
+-		u32 type = V4L2_TYPE_IS_OUTPUT(q->type) ?
+-			HFI_BUFFER_INPUT : HFI_BUFFER_OUTPUT;
+-
+-		mutex_lock(&inst->lock);
+-		ret = venc_iris1_set_buffer_count(inst, type, *num_buffers,
+-						  &iris1_req);
+-		mutex_unlock(&inst->lock);
+-	}
+-
+ put_power:
+ 	pm_ret = venc_pm_put(inst, false);
+ 	if (!ret)
+@@ -1882,6 +1820,7 @@ static int venc_iris1_set_rotation(struct venus_inst *inst)
+ static int venc_start_streaming(struct vb2_queue *q, unsigned int count)
+ {
+ 	struct venus_inst *inst = vb2_get_drv_priv(q);
++	struct hfi_buffer_requirements input_req, output_req;
+ 	bool pm_ref = false;
+ 	int ret;
+ 
+@@ -1971,10 +1910,38 @@ static int venc_start_streaming(struct vb2_queue *q, unsigned int count)
+ 
+ 	if (IS_IRIS1(inst->core)) {
+ 		/*
+-		 * Both queue counts were committed during REQBUFS. Read the resulting
+-		 * firmware table after route, work mode and core selection, without
+-		 * mutating its minima.
++		 * Read the post-control firmware minima after route, work mode and
++		 * core selection. REQBUFS ran before these controls in the mainline
++		 * V4L2 lifecycle, so its earlier minima are not final.
++		 */
++		ret = venus_helper_cache_bufreqs(inst);
++		if (ret)
++			goto error;
++
++		/*
++		 * Mainline defers encoder controls until STREAMON, so the firmware
++		 * minima observed during REQBUFS are not final. Commit both external
++		 * counts only after properties, route, mode and core selection, then
++		 * refresh the internal requirements consumed below.
+ 		 */
++		ret = venus_helper_get_bufreq(inst, HFI_BUFFER_INPUT, &input_req);
++		if (ret)
++			goto error;
++		ret = venus_helper_get_bufreq(inst, HFI_BUFFER_OUTPUT, &output_req);
++		if (ret)
++			goto error;
++		ret = venc_iris1_set_buffer_count(inst, HFI_BUFFER_INPUT,
++						  inst->num_input_bufs,
++						  &input_req);
++		if (ret)
++			goto error;
++		ret = venc_iris1_set_buffer_count(inst, HFI_BUFFER_OUTPUT,
++						  inst->num_output_bufs,
++						  &output_req);
++		if (ret)
++			goto error;
++
++		inst->bufreq_cache_valid = false;
+ 		ret = venus_helper_cache_bufreqs(inst);
+ 		if (ret)
+ 			goto error;
+@@ -1982,9 +1949,7 @@ static int venc_start_streaming(struct vb2_queue *q, unsigned int count)
+ 
+ 	if (IS_IRIS1(inst->core)) {
+ 		/*
+-		 * queue_setup already committed each external buffer count. Query
+-		 * the resulting scratch/persistent requirements exactly once after
+-		 * route, work mode and core selection, like the downstream driver.
++		 * Both final counts are now reflected in the refreshed table.
+ 		 */
+ 		dev_info(inst->core->dev,
+ 			 "venus-sm8150: final encoder buffer requirements cached\n");
+@@ -2197,10 +2162,14 @@ static int m2m_queue_init(void *priv, struct vb2_queue *src_vq,
+ 	if (inst->core->res->hfi_version == HFI_VERSION_1XX ||
+ 	    IS_IRIS1(inst->core))
+ 		src_vq->bidirectional = 1;
++	if (IS_IRIS1(inst->core))
++		src_vq->dma_attrs |= DMA_ATTR_IOMMU_USE_UPSTREAM_HINT;
+ 	if (IS_IRIS1(inst->core))
+ 		dev_info(inst->core->dev,
+-			 "venus-sm8150: encoder source DMA bidirectional=%u\n",
+-			 src_vq->bidirectional);
++			 "venus-sm8150: encoder source DMA bidirectional=%u upstream-hint=%u\n",
++			 src_vq->bidirectional,
++				 !!(src_vq->dma_attrs &
++				    DMA_ATTR_IOMMU_USE_UPSTREAM_HINT));
+ 	ret = vb2_queue_init(src_vq);
+ 	if (ret)
+ 		return ret;
+@@ -2224,10 +2193,14 @@ static int m2m_queue_init(void *priv, struct vb2_queue *src_vq,
+ 	 */
+ 	if (IS_IRIS1(inst->core))
+ 		dst_vq->bidirectional = 1;
++	if (IS_IRIS1(inst->core))
++		dst_vq->dma_attrs |= DMA_ATTR_IOMMU_USE_UPSTREAM_HINT;
+ 	if (IS_IRIS1(inst->core))
+ 		dev_info(inst->core->dev,
+-			 "venus-sm8150: encoder capture DMA bidirectional=%u\n",
+-			 dst_vq->bidirectional);
++			 "venus-sm8150: encoder capture DMA bidirectional=%u upstream-hint=%u\n",
++			 dst_vq->bidirectional,
++				 !!(dst_vq->dma_attrs &
++				    DMA_ATTR_IOMMU_USE_UPSTREAM_HINT));
+ 	return vb2_queue_init(dst_vq);
+ }
+ 
+diff --git a/include/linux/dma-mapping.h b/include/linux/dma-mapping.h
+index db8ab24a54f4..9c9cdb0d64ef 100644
+--- a/include/linux/dma-mapping.h
++++ b/include/linux/dma-mapping.h
+@@ -103,6 +103,9 @@
+  */
+ #define DMA_ATTR_CC_SHARED	(1UL << 13)
+ 
++/* Use the upstream interconnect's cacheability attributes for this mapping. */
++#define DMA_ATTR_IOMMU_USE_UPSTREAM_HINT	BIT(14)
++
+ /*
+  * A dma_addr_t can hold any valid DMA or bus address for the platform.  It can
+  * be given to a device to use as a DMA source or target.  It is specific to a
+diff --git a/include/linux/iommu.h b/include/linux/iommu.h
+index e587d4ac4d33..96c985a96527 100644
+--- a/include/linux/iommu.h
++++ b/include/linux/iommu.h
+@@ -31,6 +31,7 @@
+  * if the IOMMU page table format is equivalent.
+  */
+ #define IOMMU_PRIV	(1 << 5)
++#define IOMMU_USE_UPSTREAM_HINT	BIT(6)
+ 
+ struct iommu_ops;
+ struct iommu_group;
+diff --git a/include/trace/events/dma.h b/include/trace/events/dma.h
+index 31c9ddf72c9d..331ec5f2297e 100644
+--- a/include/trace/events/dma.h
++++ b/include/trace/events/dma.h
+@@ -35,7 +35,8 @@ TRACE_DEFINE_ENUM(DMA_NONE);
+ 		{ DMA_ATTR_MMIO, "MMIO" }, \
+ 		{ DMA_ATTR_DEBUGGING_IGNORE_CACHELINES, "CACHELINES_OVERLAP" }, \
+ 		{ DMA_ATTR_REQUIRE_COHERENT, "REQUIRE_COHERENT" }, \
+-		{ DMA_ATTR_CC_SHARED, "CC_SHARED" })
++		{ DMA_ATTR_CC_SHARED, "CC_SHARED" }, \
++		{ DMA_ATTR_IOMMU_USE_UPSTREAM_HINT, "IOMMU_USE_UPSTREAM_HINT" })
+ 
+ DECLARE_EVENT_CLASS(dma_map,
+ 	TP_PROTO(struct device *dev, phys_addr_t phys_addr, dma_addr_t dma_addr,

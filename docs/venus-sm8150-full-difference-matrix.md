@@ -1,6 +1,6 @@
 # SM8150 Venus 全量差异与迁移矩阵（持续更新）
 
-> 这是当前唯一的“活”总账，状态基于 `patches/series` 0001--0032。
+> 这是当前唯一的“活”总账，状态基于 `patches/series` 0001--0033。
 > `venus-sm8150-full-migration-audit.md`、`venus-sm8150-encoder-audit.md` 和各 Test 文档
 > 是冻结的历史证据；其中与本文冲突的阶段性判断，以本文和对应 patch hunk ledger 为准。
 
@@ -9,7 +9,7 @@
 | 角色 | 固定身份 | 用途 |
 |---|---|---|
 | Linux 基线 | `F:\linux\linux-raphael` @ `58f3df07833f2382fe2fbc28f996c4c85817c1f6` | 所有迁移补丁的共同父状态 |
-| 当前候选 | `F:\linux\test15-analysis` + 0001--0032 | 实际修改和宿主测试对象 |
+| 当前候选 | `F:\linux\test15-analysis` + 0001--0033 | 实际修改和宿主测试对象 |
 | 小米 Android 10 原厂 | `F:\linux\vendor-sm8150-reference` @ `192eca8550f95c2eec58a474793d1d93fc1b3b67` | SM8150/VPU5/HFI4 主语义来源 |
 | 证据与发布仓 | `F:\linux\raphael-kernel-build` | series、patch、测试、逐行和逐 hunk 台账 |
 
@@ -19,13 +19,15 @@
 1. `venus-sm8150-vendor-line-ledger.md`：原厂 42 文件、39,111/39,111 行、686/686
    个函数的正向处置；
 2. `venus-sm8150-current-line-ledger.md`：当前 Venus 36 文件的反向处置；
-3. 0018--0032 的逐 hunk ledger：覆盖逐行台账冻结后新增的每个实际修改；
+3. 0018--0033 的逐 hunk ledger：覆盖逐行台账冻结后新增的每个实际修改；
 4. 可从固定基线严格重放的 `patches/series`。
 
 0001--0029 的冻结重放 tree 为 `d9941d094f9b306f4cfe5d65f4a69c7076d5d414`。
-0032 已对完整候选树通过 apply check、严格 checkpatch 和 `diff --check`。0001--0032
-从固定基线严格顺序重放的 tree 为 `065f0998c8b669e8c69db87d3947145834e95b9e`。未把
-panel、netfilter、litmus 等用户改动纳入 Venus 补丁。
+0001--0032 的 Test18 重放 tree 为
+`065f0998c8b669e8c69db87d3947145834e95b9e`。Test18 实机失败后新增 0033；其
+最终严格重放 tree 为 `ff4095f00d7995c4ac0adb5797663c4796c5982f`，patch SHA 与
+完整验证见 0033 hunk ledger。未把 panel、netfilter、litmus 等用户
+改动纳入 Venus 编码修复。
 
 ## 2. 状态词
 
@@ -39,7 +41,7 @@ panel、netfilter、litmus 等用户改动纳入 Venus 补丁。
 
 ## 3. 全量语义差异矩阵
 
-| 域 | 原厂 SM8150 语义 | 当前 0001--0032 状态 | 证据/补丁 | 后续组 |
+| 域 | 原厂 SM8150 语义 | 当前 0001--0033 状态 | 证据/补丁 | 后续组 |
 |---|---|---|---|---:|
 | 平台代际 | VPU5/IRIS1、HFI4 | 已对齐 | 0001、0004、0005；固件已启动 | — |
 | firmware | Raphael `.mbn`，VIDEO.IR.1.2 | 已实机加载并读出版本 | Test7+ 日志 | — |
@@ -62,10 +64,10 @@ panel、netfilter、litmus 等用户改动纳入 Venus 补丁。
 | decoder capture format | NV12、UBWC、P010 | Main10 可走真实 TP10-DPB/NV12-OPB 或原生 P010；待实机 | 0018/0023 | 4 |
 | encoder codec output | H264/HEVC/VP8 | 原厂支持三者；当前安全 gate 下只推进 H264 bring-up | capability 路径 | 3、4 |
 | encoder raw input | NV12/NV21/NV12 UBWC/TP10 UBWC/P010 | 已完整枚举、过滤、计算 layout 和约束；待首 ETB 实机 | 0021 | 3 |
-| encoder raw/capture DMA | 原厂对所有 video dma-buf 使用双向映射 | Test17 已证明 source/capture 都是双向，首 ETB 后仍复位；方向已排除，不再修改 | 0018、0024、0027、0031、Test17 | — |
+| encoder raw/capture DMA | 原厂对所有 video dma-buf 使用双向映射，并在 syscache 存在时使用 upstream hint/MAIR 0xf4 | 双向方向已实机证明；0033 为 IRIS1 encoder MMAP/internal buffer 增加原厂 cache mapping，待 Test19 | 0018、0024、0027、0031、0033、Test17/18 | 3 |
 | encoder internal buffers | scratch/persist/recon 按 firmware bufreq 顺序注册 | Stage0--8 已分段证明；0027 删除实验 stage，产品路径完整执行 | 0010--0018、0027 | — |
-| encoder load/start | per-REQBUFS count、final bufreq、output minimum、internal SET_BUFFER、LOAD/START、FTB/ETB | Test17 到首 ETB 后无 EBD/FBD并复位；0032 修正 count 时序、未初始化字段和默认属性重放，待 Test18 | Test17、0032、完整 encoder audit | 3 |
-| encoder controls | rotation/flip/SAR/tier/QP/VBV/latency/slice/base priority | 0022 映射标准 controls；0032 改为默认感知的发送模型并保留非默认值 | 0022、0032 | 7 |
+| encoder load/start | final count、final bufreq、output minimum、internal SET_BUFFER、LOAD/START、FTB/ETB | Test18 证实 REQBUFS 提交 OUTPUT host-min=2、最终固件 min=4，死于 START；0033 改为 controls 后提交最终 16/3、4/4 | Test17/18、0032/0033、完整 encoder audit | 3 |
+| encoder controls | rotation/flip/SAR/tier/QP/VBV/latency/slice/base priority | 0022 映射标准 controls；0033 撤销尚未证明安全的默认包抑制，恢复 Test17 已到 START_DONE 的属性集合，同时保留包体清零 | 0022、0032/0033 | 7 |
 | encoder QP | I/P/B 各自范围打包为 `0x00bbppii` | 已修复旧单 byte 复制错误，保留 layer/enable | 0022 hunk 011/019 | — |
 | rotation/flip | flip bits 1/2/4/6；90/270 交换 output size | 已迁移；vertical 原错误值 3 已修为 4 | 0022 hunk 009/014/023 | — |
 | H264 SAR | vendor width/height → aspect-ratio property | 用标准 V4L2 SAR controls 映射全部 IDC 与 extended SAR | 0022 hunk 002/010/016/018/026/033 | — |
@@ -100,6 +102,7 @@ panel、netfilter、litmus 等用户改动纳入 Venus 补丁。
 | L | 0030 | decoder split-output DPB/OPB actual 与 host-min 契约；针对 VP8 BAD_POINTER |
 | M | 0031 | encoder CAPTURE 双向 DMA；针对 Test16 首 ETB 后硬复位 |
 | N | 0032 | Test17 全链审计：HFI 零初始化、默认属性发送模型、逐 REQBUFS count 和单次 final bufreq |
+| O | 0033 | Test18 START 边界修正：controls 后最终 count、恢复已知 START 属性集、IRIS1 encoder upstream-cache mapping |
 
 0024 验证：2 文件、12 hunk、+127/-22；SHA256
 `6eff1ad2ec54a5ca03ce53a93567ff28498edd00dd1413f19a82e34732e837e4`；严格
@@ -113,14 +116,15 @@ checkpatch 为 0/0/0；全部 IRIS1 宿主测试通过；完整重放 tree 为
 
 ## 5. 剩余工作组
 
-Test17 已证明 0031 的 DMA direction 不是最后根因。0032 是完整审计后的一组协议/时序
-修正；当前主目标改为 Test18 H.264 encoder 准入，其他 decoder codec 暂后置：
+Test18 已证明 0032 的 per-REQBUFS count 生命周期不适用于 mainline：OUTPUT 先提交
+host-min=2，最终表却要求 min=4，并在 START 后无响应。0033 纠正该回归并补齐原厂
+upstream-cache 映射；当前主目标改为 Test19 H.264 encoder 准入：
 
 | 顺序 | 验证 | 完成判据 |
 |---:|---|---|
-| 1 | Test18 ARM64 构建 | 32 个 patch 应用、完整内核和模块构建、产物清单一致 |
+| 1 | Test19 ARM64 构建 | 33 个 patch 应用、完整内核和模块构建、产物清单一致 |
 | 2 | 已通过解码回归 | H.264 与 HEVC Main8 精确帧数/hash，PM 回 suspended |
-| 3 | H.264 encoder 实机准入 | encoder-only scope；单帧 EBD/FBD/非空/软解/PM，再继续 30/300 帧 |
+| 3 | H.264 encoder 实机准入 | 先确认最终 count=16/3、4/4 与 upstream-hint=1，再要求 START_DONE、EBD/FBD/非空/软解/PM |
 | 4 | 其他 codec | H.264 稳定后再执行 HEVC/VP8 encode；VP8/VP9/MPEG2 decode 单独修复 |
 | 5 | 最终默认策略 | 只有编码通过后，才决定删除总 gate 或改为默认 Y |
 
