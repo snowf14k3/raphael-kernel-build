@@ -53,7 +53,7 @@ scripts/kconfig/merge_config.sh -m .config \
     "${config_fragment}" \
     arch/arm64/configs/sm8150.config
 
-scripts/config --set-str LOCALVERSION "-raphael-mic-test"
+scripts/config --set-str LOCALVERSION "-raphael-dsi-flicker-test"
 scripts/config --disable LOCALVERSION_AUTO
 scripts/config --set-str SYSTEM_TRUSTED_KEYS ""
 scripts/config --set-str SYSTEM_REVOCATION_KEYS ""
@@ -71,7 +71,7 @@ test -s "${image_deb}"
 
 mkdir -p "${artifact_dir}"
 install -m 0644 "${image_deb}" \
-    "${artifact_dir}/linux-image-xiaomi-raphael-mic-test.deb"
+    "${artifact_dir}/linux-image-xiaomi-raphael-dsi-flicker-test.deb"
 install -m 0644 "${dtb}" \
     "${artifact_dir}/sm8150-xiaomi-raphael.dtb"
 install -m 0644 .config "${artifact_dir}/kernel.config"
@@ -85,7 +85,7 @@ printf 'kernel_release=%s\nsource_commit=%s\nsource_branch=%s\nbuild_commit=%s\n
 
 cd "${artifact_dir}"
 sha256sum \
-    linux-image-xiaomi-raphael-mic-test.deb \
+    linux-image-xiaomi-raphael-dsi-flicker-test.deb \
     sm8150-xiaomi-raphael.dtb \
     kernel.config \
     build-info.txt \

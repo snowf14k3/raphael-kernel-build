@@ -1,4 +1,4 @@
-name: Build Raphael microphone test kernel
+name: Build Raphael DSI brightness flicker test kernel
 
 on:
   workflow_dispatch:
@@ -7,7 +7,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: raphael-microphone-kernel
+  group: raphael-dsi-brightness-flicker-kernel
   cancel-in-progress: false
 
 jobs:
@@ -37,7 +37,7 @@ jobs:
       - name: Upload kernel artifacts
         uses: actions/upload-artifact@v7
         with:
-          name: raphael-microphone-test-kernel
+          name: raphael-dsi-brightness-flicker-test-kernel
           path: artifacts/*
           if-no-files-found: error
           retention-days: 14
