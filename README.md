@@ -2,7 +2,7 @@
 
 Patch-based kernel build workspace for Xiaomi Redmi K20 Pro / Mi 9T Pro (`raphael`, SM8150).
 
-This branch is dedicated to investigating and fixing microphone capture/recording on Raphael.
+This branch is dedicated to fixing DSI command-mode brightness-update flicker/tearing on Raphael while retaining the already validated microphone-routing patch.
 
 ## Kernel baseline
 
@@ -69,13 +69,13 @@ It currently runs manually with `workflow_dispatch` and builds on `ubuntu-24.04-
 The uploaded artifact is named:
 
 ```text
-raphael-microphone-test-kernel
+raphael-dsi-brightness-flicker-test-kernel
 ```
 
 It contains:
 
 ```text
-linux-image-xiaomi-raphael-mic-test.deb
+linux-image-xiaomi-raphael-dsi-flicker-test.deb
 sm8150-xiaomi-raphael.dtb
 kernel.config
 build-info.txt
@@ -85,6 +85,9 @@ SHA256SUMS
 
 ## Current target
 
-The current work focuses on the microphone capture path, including the Raphael sound-card device tree, WCD9340 codec routing, SLIMBus capture, Qualcomm QDSP6/AFE routing and the SM8150 ASoC machine driver.
+The current work focuses on brightness-update flicker/tearing on Raphael's command-mode DSI panel. The branch keeps the validated microphone-routing patch from `main` and adds two display fixes adapted from AKaNecoo's Raphael work:
 
-Keep unrelated kernel adaptations out of this branch unless they are required for microphone recording to work.
+- `1ed35ec50bfb8dc7c1a53684f3fab2107b266e83`: raise the SM8150 DPU `clk_inefficiency_factor` from 105 to 186 so command-mode frame writes receive more MDP clock headroom.
+- `c4a07b573474d1496f398c65f33c63ba52901f2a`: wait for an in-flight command-mode frame burst to drain before issuing DCS command DMA, with a bounded 70 ms wait.
+
+The test target is the DSI/MDP display path; unrelated kernel changes should stay out of this branch.
