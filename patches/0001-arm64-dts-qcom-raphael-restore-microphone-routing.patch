@@ -1,0 +1,18 @@
+diff --git a/arch/arm64/boot/dts/qcom/sm8150-xiaomi-raphael.dts b/arch/arm64/boot/dts/qcom/sm8150-xiaomi-raphael.dts
+index 347a5c72d..f0028d363 100644
+--- a/arch/arm64/boot/dts/qcom/sm8150-xiaomi-raphael.dts
++++ b/arch/arm64/boot/dts/qcom/sm8150-xiaomi-raphael.dts
+@@ -845,8 +845,11 @@ &quat_mi2s_sd0_active
+ 	model = "Raphael";
+ 
+ 	audio-routing = "RX_BIAS", "MCLK",
+-		"AMIC1", "MIC BIAS3",
+-		"AMIC3", "MIC BIAS4";
++		"AMIC1", "MIC BIAS1",
++		"AMIC2", "MIC BIAS2",
++		"AMIC3", "MIC BIAS3",
++		"AMIC4", "MIC BIAS1",
++		"AMIC5", "MIC BIAS4";
+ 
+ 	mm1-dai-link {
+ 		link-name = "MultiMedia1";
