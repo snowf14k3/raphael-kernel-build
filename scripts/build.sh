@@ -4,13 +4,18 @@ set -euo pipefail
 build_root="${GITHUB_WORKSPACE:?GITHUB_WORKSPACE is not set}"
 source_dir="${build_root}/linux-src"
 artifact_dir="${build_root}/artifacts"
-config_fragment="${build_root}/raphael.config"
+config_file="${build_root}/raphael.config"
+builddeb_patch="${build_root}/builddeb.patch"
 patch_dir="${build_root}/patches"
 patch_manifest="${build_root}/patches.sha256"
 expected_source_commit="ab4ce59a1826b18ba200b33f6a32d04d749a7ea5"
+upstream_build_config_commit="0b47a293ed6d4eaa74848bac5b8b4a37bd6f31c6"
 build_commit="$(git -C "${build_root}" rev-parse HEAD)"
 
 rm -rf "${source_dir}" "${artifact_dir}"
+
+test -s "${config_file}"
+test -s "${builddeb_patch}"
 
 git clone --depth 1 --branch "${KERNEL_BRANCH}" \
     "${KERNEL_REPOSITORY}" "${source_dir}"
@@ -21,6 +26,11 @@ if [[ "${source_commit}" != "${expected_source_commit}" ]]; then
     exit 1
 fi
 
+# Match GengWei1997/kernel-deb 7.1 packaging: install SM8150 DTBs into /boot.
+patch --dry-run "${source_dir}/scripts/package/builddeb" < "${builddeb_patch}"
+patch "${source_dir}/scripts/package/builddeb" < "${builddeb_patch}"
+
+# Apply the local Raphael test patch series on top of the known-good 7.1 source.
 mapfile -t patch_names < <(grep -Ev '^[[:space:]]*(#|$)' "${patch_dir}/series")
 : > "${patch_manifest}"
 
@@ -41,25 +51,32 @@ fi
 git -C "${source_dir}" diff --check
 git -C "${source_dir}" diff --stat
 
-curl --fail --location --silent --show-error \
-    -o "${config_fragment}" \
-    "https://raw.githubusercontent.com/GengWei1997/kernel-deb/b509d24efb86fea0842f940138be8bf2301626ff/uboot-raphael.config"
+# Keep the source tree clean, like the upstream kernel-deb build does before
+# generating the kernel release string.
+git -C "${source_dir}" config user.email "gw19970326@gmail.com"
+git -C "${source_dir}" config user.name "GengWei1997"
+git -C "${source_dir}" add -A
+git -C "${source_dir}" commit -m "build: apply Raphael test patches and SM8150 DTB packaging"
+patched_source_commit="$(git -C "${source_dir}" rev-parse HEAD)"
 
 cd "${source_dir}"
-make_args=(ARCH=arm64 LLVM=1 CC=clang)
 
-make "${make_args[@]}" defconfig
-scripts/kconfig/merge_config.sh -m .config \
-    "${config_fragment}" \
-    arch/arm64/configs/sm8150.config
+# Reproduce the known-good GengWei 7.1 configuration path. Do not merge
+# uboot-raphael.config or sm8150.config here: the released 7.1 kernel used
+# kernel-deb/7.1/raphael.config directly.
+install -m 0644 "${config_file}" arch/arm64/configs/raphael.config
+make_args=(ARCH=arm64 LLVM=-22)
+make -j"$(nproc)" "${make_args[@]}" defconfig raphael.config
 
-scripts/config --set-str LOCALVERSION "-raphael-dsi-flicker-test"
-scripts/config --disable LOCALVERSION_AUTO
-scripts/config --set-str SYSTEM_TRUSTED_KEYS ""
-scripts/config --set-str SYSTEM_REVOCATION_KEYS ""
-make "${make_args[@]}" olddefconfig
+# Sanity checks for the display/GPU configuration we specifically want to
+# reproduce from the working 7.1 build.
+grep -qx 'CONFIG_DRM_MSM=y' .config
+grep -qx 'CONFIG_DRM_PANEL_SAMSUNG_AMS639RQ08=y' .config
+grep -qx 'CONFIG_QCOM_LLCC=y' .config
+grep -qx 'CONFIG_SM_GPUCC_8150=y' .config
+grep -qx 'CONFIG_INTERCONNECT_QCOM_SM8150=y' .config
 
-make -j"$(nproc)" "${make_args[@]}" bindeb-pkg
+make -j"$(nproc)" "${make_args[@]}" deb-pkg
 
 dtb="${source_dir}/arch/arm64/boot/dts/qcom/sm8150-xiaomi-raphael.dtb"
 test -s "${dtb}"
@@ -68,6 +85,10 @@ image_deb="$(find "${build_root}" -maxdepth 1 -type f \
     -name 'linux-image-*.deb' ! -name '*dbg*' -print -quit)"
 test -n "${image_deb}"
 test -s "${image_deb}"
+
+# Verify the image package contains the Raphael DTB in the same /boot tree
+# expected by the rootfs/boot-image build.
+dpkg-deb -c "${image_deb}" | grep -q '/boot/dtbs/qcom/sm8150-xiaomi-raphael.dtb$'
 
 mkdir -p "${artifact_dir}"
 install -m 0644 "${image_deb}" \
@@ -78,9 +99,11 @@ install -m 0644 .config "${artifact_dir}/kernel.config"
 install -m 0644 "${patch_manifest}" "${artifact_dir}/patches.sha256"
 
 kernel_release="$(make -s "${make_args[@]}" kernelrelease)"
-printf 'kernel_release=%s\nsource_commit=%s\nsource_branch=%s\nbuild_commit=%s\npatch_count=%s\n' \
-    "${kernel_release}" "${source_commit}" "${KERNEL_BRANCH}" \
-    "${build_commit}" "${#patch_names[@]}" \
+clang_version="$(clang-22 --version | head -n1)"
+printf 'kernel_release=%s\nsource_commit=%s\npatched_source_commit=%s\nsource_branch=%s\nbuild_commit=%s\nupstream_build_config_commit=%s\npatch_count=%s\nclang=%s\n' \
+    "${kernel_release}" "${source_commit}" "${patched_source_commit}" \
+    "${KERNEL_BRANCH}" "${build_commit}" "${upstream_build_config_commit}" \
+    "${#patch_names[@]}" "${clang_version}" \
     > "${artifact_dir}/build-info.txt"
 
 cd "${artifact_dir}"

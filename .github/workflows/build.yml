@@ -24,9 +24,13 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            bc bison build-essential clang cpio debhelper dpkg-dev \
+            bc bison build-essential cpio debhelper dpkg-dev \
             dwarves fakeroot flex git kmod libdw-dev libelf-dev \
-            libssl-dev lld llvm python3 rsync xz-utils zstd
+            libssl-dev python3 rsync wget xz-utils zstd
+
+          wget -q https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 22
 
       - name: Build Raphael kernel
         env:
