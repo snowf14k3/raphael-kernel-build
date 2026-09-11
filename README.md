@@ -1,104 +1,74 @@
-# Raphael 内核构建
+# Raphael Venus 硬件编解码适配
 
-这是一个面向 Xiaomi Redmi K20 Pro / Mi 9T Pro（`raphael`，Qualcomm SM8150）的 Linux 内核补丁与构建仓库。
+这是 `raphael-kernel-build` 中用于 Xiaomi Redmi K20 Pro / Mi 9T Pro（`raphael`，SM8150）Qualcomm Venus 硬件编解码适配的独立开发分支。
 
-仓库采用“固定上游基线 + 独立补丁集 + 可复现构建”的方式维护 Raphael 适配。`main` 分支只保留已经整理并验证过的修复，不包含 bring-up 阶段使用的临时诊断补丁。
+本分支是从当前最新 `main` **全新创建**的，不恢复、复用或直接继承之前 Venus bring-up 阶段的实验补丁、测试脚本和诊断代码。后续 Venus 修改会重新从干净基线开始整理，并按功能拆分为可审查、可回退的独立 patch。
 
-## 内核基线
+## 分支基线
 
-当前构建基于 GengWei1997 的 Raphael Linux 7.1 内核：
+本分支继承 `main` 中已经验证的 Raphael 通用修复，包括：
+
+- 麦克风模拟路由修复；
+- SM8150 DPU command-mode 时钟余量调整；
+- DCS 与 command-mode burst 的串行化处理；
+- active DSI link clock 保持，修复部分设备亮度调节闪屏。
+
+内核源码仍固定基于：
 
 - 上游仓库：`https://github.com/GengWei1997/linux.git`
 - 上游分支：`raphael-7.1`
 - 固定提交：`ab4ce59a1826b18ba200b33f6a32d04d749a7ea5`
 
-`scripts/build.sh` 会在应用补丁前检查源码提交，避免上游分支移动后静默改变构建基线。
+## Venus 适配目标
 
-## 当前已完成的修复
+目标是在 SM8150 / Raphael 上逐步完善 Qualcomm Venus VPU 的硬件视频编解码支持，重点包括：
 
-### 1. Raphael 麦克风路由
+- 硬件 H.264 解码；
+- 硬件 HEVC / H.265 解码；
+- 对应编码路径的可用性验证；
+- V4L2 M2M buffer / DMA contract；
+- HFI4 / VPU5 session 初始化与属性协商；
+- firmware buffer requirement 与 userspace queue 的一致性；
+- runtime PM、时钟、电源域、IOMMU 和 system cache 等 SM8150 相关依赖；
+- FFmpeg、mpv、VLC 等用户空间通过 V4L2 硬件编解码路径进行实机验证。
 
-恢复设备树中的模拟麦克风路由，将 Raphael 的 AMIC 与对应 MIC BIAS 正确关联，修复部分环境下麦克风无法正常采集的问题。
+## 当前状态
 
-对应补丁：
+这个分支目前只是新的 Venus 适配起点。
 
-```text
-0001-arm64-dts-qcom-raphael-restore-microphone-routing.patch
-```
+**尚未加入任何新的 Venus 修复补丁。**
 
-### 2. 亮度调节时的 DSI 闪屏
+之前仓库历史中存在过一系列 Venus 测试和 bring-up 提交，但这些旧实验不会直接带入本分支。需要使用的逻辑会重新核对上游、下游 Android 内核和实机行为后，再整理成新的补丁。
 
-针对部分 Raphael 设备在快速调节屏幕亮度时出现闪屏、DSI 错误或 FIFO underflow 的问题，当前正式补丁集包含以下处理：
+## 开发原则
 
-1. 将 SM8150 DPU 的 command-mode 时钟冗余系数从 `105` 提高到 `186`，增加时钟余量；
-2. 在 DCS 传输前对正在进行的 command-mode burst 做有界等待，避免并发访问；
-3. 当 DSI 显示链路已经处于 active 状态时，不再在每次 DCS 传输中重复调整、启用和关闭 link clock。
+1. 每个阶段只引入必要的 Venus 修改；
+2. 不混入与视频编解码无关的调试代码；
+3. 每个 patch 都要求能够单独说明目的和行为变化；
+4. 优先保留完整的 kernel / dmesg / V4L2 测试证据；
+5. 解码与编码分开验证，避免一次引入过多变量；
+6. 经过实机验证后再进入稳定补丁集。
 
-其中第 3 项是实机测试中消除亮度调节闪屏的关键变化。
+## 补丁组织
 
-对应补丁：
-
-```text
-0002-drm-msm-dpu-raise-sm8150-cmd-panel-clk-inefficiency.patch
-0003-drm-msm-dsi-serialize-dcs-with-cmd-mode-bursts.patch
-0004-drm-msm-dsi-preserve-active-link-clocks-during-xfer.patch
-```
-
-之前调试阶段使用过的 `DSIERR#`、`DPUERR#`、`DPUCMD#`、FIFO 状态和 timeout 诊断补丁已经从正式补丁集中移除。
-
-> 亮度闪屏可能只在部分设备、面板批次或特定时序条件下出现，并非所有 Raphael 都一定能够复现。
-
-## 当前正式补丁顺序
-
-补丁应用顺序由 `patches/series` 定义：
+Venus 相关修改后续会继续使用编号 patch，并在 `patches/series` 中按顺序列出，例如：
 
 ```text
-0001-arm64-dts-qcom-raphael-restore-microphone-routing.patch
-0002-drm-msm-dpu-raise-sm8150-cmd-panel-clk-inefficiency.patch
-0003-drm-msm-dsi-serialize-dcs-with-cmd-mode-bursts.patch
-0004-drm-msm-dsi-preserve-active-link-clocks-during-xfer.patch
+0005-media-venus-....patch
+0006-media-venus-....patch
 ```
 
-## 构建与打包
+现有 `0001`～`0004` 为 `main` 继承的 Raphael 通用修复，不属于 Venus 本身。
 
-GitHub Actions 工作流位于：
+## 构建
+
+构建入口仍为：
 
 ```text
 .github/workflows/build.yml
+scripts/build.sh
 ```
 
-当前构建环境使用 LLVM/Clang 22，并沿用已验证的 Raphael 7.1 配置。
+构建环境使用 LLVM/Clang 22，输出 ARM64 Debian kernel image、headers、Raphael DTB、最终 config、补丁哈希和 `SHA256SUMS`。
 
-构建流程会：
-
-1. 获取固定的 `raphael-7.1` 内核源码；
-2. 验证源码 commit；
-3. 应用 SM8150 DTB 打包调整；
-4. 按 `patches/series` 顺序检查并应用补丁；
-5. 执行 `git diff --check`；
-6. 生成 ARM64 Debian 内核包；
-7. 校验并收集 kernel image、headers、Raphael DTB、最终 config、补丁哈希和 `SHA256SUMS`。
-
-Actions 构建产物名称：
-
-```text
-raphael-kernel-arm64
-```
-
-## 分支用途
-
-- `main`：当前已整理、已验证的 Raphael 通用修复与正式构建基线；
-- `raphael-dsi-brightness-flicker-fix`：DSI / 亮度闪屏修复开发与验证分支；
-- `raphael-mic-recording-fix`：麦克风采集与路由修复分支；
-- `raphael-venus-hwaccel`：全新的 Qualcomm Venus 硬件编解码适配分支。
-
-## 本地开发目录
-
-编译服务器上的主要工作目录：
-
-```text
-/home/snowflake/linux/raphael-linux
-/home/snowflake/linux/raphael-kernel-build
-```
-
-内核源码实验优先在 `raphael-linux` 中完成；确认后的修改再整理为独立 patch 放入本仓库，以保持构建过程可复现。
+Venus 适配阶段的测试构建与正式稳定构建应使用不同的 Release / tag 命名，避免和 `main` 的稳定版本混淆。
