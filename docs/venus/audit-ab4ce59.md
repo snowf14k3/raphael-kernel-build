@@ -167,8 +167,12 @@ stateful decoder 的 OUTPUT/CAPTURE 队列并非逐 buffer 一一对应；验证
 
 将来平台接入完成后的实机验收：确认驱动绑定、固件 `SYS_INIT_DONE`、H.264 session 初始化应答、无持续空中断/IRQ flood、能完成启动/停止/重新打开。只在必要时加入限于相关寄存器的最小诊断。之后才进入 CAPTURE 帧内容和 EOS 验证。
 
-## 8. 下一步边界
+## 8. 后续迁移与集中构建门槛
 
-下一轮先审查 VPU5 firmware boot 剩余依赖（DSP queue fallback、CPU clock 初始化），每次只实现一个有证据的差异。再以独立补丁接入 SM8150 resource / binding / DTS 和已核实的 PM 路径，才有条件发布面向手机的 decoder bring-up Pre-release。
+2026-09-11 用户明确调整构建节奏：小补丁独立审查，但不逐个完整构建。针对 `0005` 启动的 `local-build.sh --jobs 6` 已主动中止，没有生成 image / headers / DTB 的可安装包或 tar.gz；本次不是编译错误。中断日志保留为证据，本轮临时构建树和中间产物清理，不保留为已通过的构建结果。
+
+同一阶段继续完成多份有下游依据的独立补丁：VPU5 firmware boot 剩余依赖（DSP queue fallback、CPU clock 初始化）、SM8150 resource / binding / DTS、必要的 PM/时钟/IOMMU 接入，以及 HFI4 session/work-route 与 H.264 buffer/format 路径。每个 patch 仍聚焦一个问题，不搬整套旧实验、不为凑数量修改已有实现。
+
+中间只做应用检查、diff/checkpatch 与必要的局部逻辑测试；有编译疑点时优先局部目标。达到“源码层面基本解码链路齐备，可进行有意义的实机验证”的功能节点后，才统一完整构建、校验、打包，并按需发布 decoder bring-up Pre-release。随后分别推进 HEVC、Main10 和编码，不为等待编码迁移而阻塞首轮 H.264 验证。
 
 本轮 IRQ 前置补丁本身没有独立可观察的硬解收益，不应为了凑一次测试而发布它、要求用户升级手机，或宣称已经达到 H.264/HEVC 解码目标。
