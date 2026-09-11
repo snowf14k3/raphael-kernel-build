@@ -5,3 +5,4 @@
 0005-drm-msm-dpu-log-underrun-state.patch
 0006-drm-msm-dsi-capture-complete-error-diagnostics.patch
 0007-drm-msm-dpu-capture-command-mode-failure-state.patch
+0008-drm-panel-ams639rq08-use-lp-for-brightness.patch
