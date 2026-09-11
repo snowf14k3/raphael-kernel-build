@@ -4,7 +4,9 @@ set -Eeuo pipefail
 # Raphael 内核镜像更新入口。
 # 只负责选择 GitHub 下载代理，然后调用同仓库的 update-kernel.sh。
 
-RAW_URL="https://raw.githubusercontent.com/snowf14k3/raphael-kernel-build/main/scripts/update-kernel.sh"
+REPOSITORY="snowf14k3/raphael-kernel-build"
+RAW_BASE="https://raw.githubusercontent.com/${REPOSITORY}"
+API_HEAD="https://api.github.com/repos/${REPOSITORY}/commits/main"
 ROUTE=""
 PASSTHROUGH=()
 TMP_SCRIPT=""
@@ -102,7 +104,25 @@ cleanup() {
 }
 trap cleanup EXIT
 
+MAIN_SHA="$(
+    curl -fsSL --max-time 10 \
+        -H "Accept: application/vnd.github+json" \
+        -H "User-Agent: raphael-kernel-proxy-updater" \
+        "${API_HEAD}" 2>/dev/null |
+    grep -o '"sha":"[0-9a-f]\{40\}"' |
+    head -n1 |
+    sed 's/^"sha":"//;s/"$//' || true
+)"
+
+if [[ "${MAIN_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+    RAW_URL="${RAW_BASE}/${MAIN_SHA}/scripts/update-kernel.sh"
+else
+    # API 不可用时退回 main ref，并增加 cache-busting query。
+    RAW_URL="${RAW_BASE}/refs/heads/main/scripts/update-kernel.sh?ts=$(date +%s)"
+fi
+
 echo "使用镜像线路: ${ROUTE}"
+[[ -n "${MAIN_SHA}" ]] && echo "main commit: ${MAIN_SHA}"
 echo "获取更新脚本..."
 curl -fL --retry 3 --retry-delay 2 \
     -o "${TMP_SCRIPT}" \
