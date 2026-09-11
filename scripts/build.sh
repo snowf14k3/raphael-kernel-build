@@ -76,7 +76,7 @@ grep -qx 'CONFIG_QCOM_LLCC=y' .config
 grep -qx 'CONFIG_SM_GPUCC_8150=y' .config
 grep -qx 'CONFIG_INTERCONNECT_QCOM_SM8150=y' .config
 
-make -j"$(nproc)" "${make_args[@]}" deb-pkg
+make -j"$(nproc)" "${make_args[@]}" DPKG_FLAGS=-d bindeb-pkg
 
 dtb="${source_dir}/arch/arm64/boot/dts/qcom/sm8150-xiaomi-raphael.dtb"
 test -s "${dtb}"
