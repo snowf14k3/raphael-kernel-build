@@ -1,90 +1,102 @@
-# Raphael kernel build
+# Raphael 麦克风录音修复
 
-Patch-based kernel build workspace for Xiaomi Redmi K20 Pro / Mi 9T Pro (`raphael`, SM8150).
+这是 `raphael-kernel-build` 中专门用于 Xiaomi Redmi K20 Pro / Mi 9T Pro（`raphael`，SM8150）麦克风采集与录音路径修复的分支。
 
-This branch is dedicated to investigating and fixing microphone capture/recording on Raphael.
+## 内核基线
 
-## Kernel baseline
+- 上游仓库：`https://github.com/GengWei1997/linux.git`
+- 上游分支：`raphael-7.1`
+- 固定提交：`ab4ce59a1826b18ba200b33f6a32d04d749a7ea5`
 
-The build uses GengWei1997's Linux tree directly:
+构建前会检查固定 commit，防止上游分支移动后静默改变测试基线。
 
-- Repository: `https://github.com/GengWei1997/linux.git`
-- Branch: `raphael-7.1`
-- Pinned commit: `ab4ce59a1826b18ba200b33f6a32d04d749a7ea5`
+## 修复内容
 
-The pinned commit is checked by `scripts/build.sh` before any patch is applied. If the upstream branch moves, the build stops instead of silently building against an unreviewed baseline.
-
-## Workspace layout
-
-Two repositories are used locally:
+当前分支只保留麦克风相关设备树修复：
 
 ```text
-/home/snowflake/linux/raphael-linux
-/home/snowflake/linux/raphael-kernel-build
+0001-arm64-dts-qcom-raphael-restore-microphone-routing.patch
 ```
 
-`raphael-linux` is the local development checkout of `GengWei1997/linux:raphael-7.1`. Kernel changes are developed and tested there.
-
-`raphael-kernel-build` contains only the build workflow and the patches that should be applied to the clean upstream baseline.
-
-## Patch workflow
-
-Make kernel changes in:
+修改文件：
 
 ```text
-/home/snowflake/linux/raphael-linux
+arch/arm64/boot/dts/qcom/sm8150-xiaomi-raphael.dts
 ```
 
-Then export the finished change as a numbered patch into:
+修复后的模拟麦克风路由为：
+
+```dts
+audio-routing = "RX_BIAS", "MCLK",
+        "AMIC1", "MIC BIAS1",
+        "AMIC2", "MIC BIAS2",
+        "AMIC3", "MIC BIAS3",
+        "AMIC4", "MIC BIAS1",
+        "AMIC5", "MIC BIAS4";
+```
+
+该修改负责描述 Raphael 板级的 MIC BIAS 与 AMIC 物理连接关系。
+
+## 实际录音链路
+
+内核设备树只负责物理音频路由。完整录音仍需要用户空间 / ALSA mixer 建立 WCD934x 到 Q6DSP 的 capture path，大致链路如下：
 
 ```text
-patches/0001-*.patch
-patches/0002-*.patch
-...
+物理麦克风
+  ↓
+MIC BIAS / AMIC
+  ↓
+WCD934x ADC
+  ↓
+DEC0 / DEC1
+  ↓
+CDC_IF TX0 / TX1
+  ↓
+SLIM TX0 / TX1
+  ↓
+AIF1_CAP
+  ↓
+SLIMBUS_0_TX
+  ↓
+MultiMedia1
+  ↓
+ALSA PCM
 ```
 
-List the patch filenames in `patches/series` in the exact order they must be applied. Blank lines and lines beginning with `#` are ignored.
+实机手动验证时使用的 mixer 路由包括：
 
-During a CI build, `scripts/build.sh` performs the following sequence:
+```bash
+amixer -c 0 cset name='MultiMedia1 Mixer SLIMBUS_0_TX' 1
+amixer -c 0 cset name='AIF1_CAP Mixer SLIM TX0' 1
+amixer -c 0 cset name='AIF1_CAP Mixer SLIM TX1' 1
+amixer -c 0 cset name='CDC_IF TX0 MUX' DEC0
+amixer -c 0 cset name='CDC_IF TX1 MUX' DEC1
+amixer -c 0 cset name='ADC MUX0' AMIC
+amixer -c 0 cset name='ADC MUX1' AMIC
+amixer -c 0 cset name='AMIC MUX0' ADC1
+amixer -c 0 cset name='AMIC MUX1' ADC1
+```
 
-1. Clone `GengWei1997/linux` branch `raphael-7.1`.
-2. Verify that the source is still at the pinned commit.
-3. Run `git apply --check` for every entry in `patches/series`.
-4. Apply the patches in series order.
-5. Run `git diff --check` on the patched source tree.
-6. Merge the Raphael kernel configuration.
-7. Build Debian kernel packages with LLVM/Clang.
-8. Collect the kernel package, Raphael DTB, final config, patch hashes and build metadata.
+然后可以直接使用 ALSA 录音测试：
 
-## GitHub Actions
+```bash
+arecord -D hw:0,0 -f S16_LE -r 48000 -c 2 -d 5 /tmp/mic-test.wav
+```
 
-The workflow is located at:
+这些 `amixer` 配置用于手动验证完整录音链路，并不属于 DTS patch 本身。
+
+## 构建
+
+GitHub Actions 工作流位于：
 
 ```text
 .github/workflows/build.yml
 ```
 
-It currently runs manually with `workflow_dispatch` and builds on `ubuntu-24.04-arm`.
-
-The uploaded artifact is named:
+补丁应用顺序由：
 
 ```text
-raphael-microphone-test-kernel
+patches/series
 ```
 
-It contains:
-
-```text
-linux-image-xiaomi-raphael-mic-test.deb
-sm8150-xiaomi-raphael.dtb
-kernel.config
-build-info.txt
-patches.sha256
-SHA256SUMS
-```
-
-## Current target
-
-The current work focuses on the microphone capture path, including the Raphael sound-card device tree, WCD9340 codec routing, SLIMBus capture, Qualcomm QDSP6/AFE routing and the SM8150 ASoC machine driver.
-
-Keep unrelated kernel adaptations out of this branch unless they are required for microphone recording to work.
+定义。这个分支只处理麦克风相关内容，不混入显示、DSI 或 Venus 视频编解码适配。
