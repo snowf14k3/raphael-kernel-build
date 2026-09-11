@@ -2,6 +2,13 @@
 # SPDX-License-Identifier: GPL-2.0-only
 # Run only on the target phone. No persistent module install or /boot writes.
 set -Eeuo pipefail
+
+# Quarantined after the first-frame test crashed during original-module reload.
+# Keep the former body below for review; never reach its unload/load commands.
+printf '%s\n' '此热替换测试已暂停：首帧解码成功，但恢复原版模块时出现段错误。' >&2
+printf '%s\n' '不要再次执行热替换；先保存恢复阶段的内核日志，不要继续编解码。' >&2
+exit 1
+
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 EXPECTED=7.1.0-sm8150-ga0ca2cbb4b3d
 TEST_VERSION=iris1-swpc-sessiondiag-1

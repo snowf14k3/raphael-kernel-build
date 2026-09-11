@@ -1,5 +1,7 @@
 # Raphael IRIS1 session-init 超时：策略修正候选与单次模块测试
 
+> **测试入口已暂停（2026-09-12）**：候选模块已在手机成功输出第一帧 NV12，但随后恢复原版模块时出现段错误，恢复不能确认成功。不要再次使用已下载的 `venus-session-test-1.tar.gz`。以下内容保留为历史测试方案；新证据及只读日志采集边界见 [首帧结果与恢复失败](session-first-frame-reload-failure.md)。
+
 ## 实机证据与结论边界
 
 运行内核 `7.1.0-sm8150-ga0ca2cbb4b3d`，发布源码 `a0ca2cbb4b3d783c864efd14d52940867f683cc6`，其父提交固定为 `ab4ce59a1826b18ba200b33f6a32d04d749a7ea5`。
