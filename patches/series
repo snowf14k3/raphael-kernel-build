@@ -1,3 +1,4 @@
 0001-arm64-dts-qcom-raphael-restore-microphone-routing.patch
 0002-drm-msm-dpu-raise-sm8150-cmd-panel-clk-inefficiency.patch
 0003-drm-msm-dsi-serialize-dcs-with-cmd-mode-bursts.patch
+0004-drm-msm-dsi-log-raw-fifo-status.patch

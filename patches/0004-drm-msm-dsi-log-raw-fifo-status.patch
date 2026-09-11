@@ -1,0 +1,15 @@
+diff --git a/drivers/gpu/drm/msm/dsi/dsi_host.c b/drivers/gpu/drm/msm/dsi/dsi_host.c
+index 2d7bd89a2..71b1ed25c 100644
+--- a/drivers/gpu/drm/msm/dsi/dsi_host.c
++++ b/drivers/gpu/drm/msm/dsi/dsi_host.c
+@@ -1656,6 +1656,10 @@ static void dsi_fifo_status(struct msm_dsi_host *msm_host)
+ 
+ 	/* fifo underflow, overflow */
+ 	if (status) {
++		/* Preserve the raw hardware bits before write-to-clear handling. */
++		pr_err_ratelimited("dsi%d fifo raw status=0x%08x\n",
++				   msm_host->id, status);
++
+ 		dsi_write(msm_host, REG_DSI_FIFO_STATUS, status);
+ 		msm_host->err_work_state |= DSI_ERR_STATE_FIFO;
+ 		if (status & DSI_FIFO_STATUS_CMD_MDP_FIFO_UNDERFLOW)
