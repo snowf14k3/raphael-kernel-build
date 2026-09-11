@@ -18,3 +18,5 @@
 0018-arm64-dts-qcom-describe-sm8150-venus-v2.patch
 0019-arm64-dts-qcom-enable-raphael-venus.patch
 0020-media-venus-report-iris1-negotiated-encoder-size.patch
+0021-media-venus-align-iris1-firmware-power-control.patch
+0022-media-venus-report-iris1-session-init-timeout.patch

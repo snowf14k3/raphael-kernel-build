@@ -1,0 +1,128 @@
+From 696c2f87f987d4369b5b9830c237156908181a24 Mon Sep 17 00:00:00 2001
+From: snowf14k3 <60956553+snowf14k3@users.noreply.github.com>
+Date: Sat, 12 Sep 2026 01:23:04 +0800
+Subject: [PATCH] media: venus: report bounded IRIS1 session-init timeout state
+
+The first Raphael hardware test waits in hfi_session_init() without
+any increment in the Venus IRQ count. The current build has neither
+dynamic debug nor ftrace, and the common wait helper reports no state.
+
+On IRIS1 session-init timeout only, report host state, four read-only
+registers if the firmware is marked powered, and two queue-header
+snapshots. Serialize host access with the transport lock. Firmware
+updates remain asynchronous, so these values are observations rather
+than a proof of an atomic queue state. Keep the original timeout.
+
+Also print the bounded unrecognized IRIS1 firmware version string,
+without changing firmware checks or completion behavior. Do not dump
+frame data, payloads, pointers or entire queues. No polling thread,
+raw userspace MMIO, enlarged waits or error suppression is added.
+
+This diagnostic is isolated from the firmware power-policy correction
+and can be removed once the actual handshake failure is understood.
+Hardware remains untested with this patch.
+
+Signed-off-by: snowf14k3 <60956553+snowf14k3@users.noreply.github.com>
+---
+ drivers/media/platform/qcom/venus/hfi.c       |  5 ++-
+ drivers/media/platform/qcom/venus/hfi_msgs.c  |  6 +++-
+ drivers/media/platform/qcom/venus/hfi_venus.c | 36 +++++++++++++++++++
+ drivers/media/platform/qcom/venus/hfi_venus.h |  1 +
+ 4 files changed, 46 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/media/platform/qcom/venus/hfi.c b/drivers/media/platform/qcom/venus/hfi.c
+index 675e6fd1e..a0e7dab0d 100644
+--- a/drivers/media/platform/qcom/venus/hfi.c
++++ b/drivers/media/platform/qcom/venus/hfi.c
+@@ -217,8 +217,11 @@ int hfi_session_init(struct venus_inst *inst, u32 pixfmt)
+ 		return ret;
+ 
+ 	ret = wait_session_msg(inst);
+-	if (ret)
++	if (ret) {
++		if (ret == -ETIMEDOUT)
++			venus_hfi_session_init_timeout(core);
+ 		return ret;
++	}
+ 
+ 	inst->state = INST_INIT;
+ 
+diff --git a/drivers/media/platform/qcom/venus/hfi_msgs.c b/drivers/media/platform/qcom/venus/hfi_msgs.c
+index 47b99d5b5..fd712205a 100644
+--- a/drivers/media/platform/qcom/venus/hfi_msgs.c
++++ b/drivers/media/platform/qcom/venus/hfi_msgs.c
+@@ -321,7 +321,11 @@ sys_get_prop_image_version(struct venus_core *core,
+ 	if (ret)
+ 		goto done;
+ 
+-	dev_err(dev, VDBGL "error reading F/W version\n");
++	if (IS_IRIS1(core))
++		dev_warn(dev, VDBGL "unrecognized F/W version: %.*s\n",
++			 VER_STR_SZ, img_ver);
++	else
++		dev_err(dev, VDBGL "error reading F/W version\n");
+ 	return;
+ 
+ done:
+diff --git a/drivers/media/platform/qcom/venus/hfi_venus.c b/drivers/media/platform/qcom/venus/hfi_venus.c
+index a283d44bf..c9b4b7113 100644
+--- a/drivers/media/platform/qcom/venus/hfi_venus.c
++++ b/drivers/media/platform/qcom/venus/hfi_venus.c
+@@ -1237,6 +1237,42 @@ static int venus_core_trigger_ssr(struct venus_core *core, u32 trigger_type)
+ 	return venus_iface_cmdq_write(hdev, &pkt, false);
+ }
+ 
++/* Only used after a failed IRIS1 session-init wait, never to change state. */
++void venus_hfi_session_init_timeout(struct venus_core *core)
++{
++	struct venus_hfi_device *hdev = to_hfi_priv(core);
++	struct hfi_queue_header *qhdr;
++	unsigned int i;
++
++	if (!IS_IRIS1(core) || !hdev)
++		return;
++
++	mutex_lock(&hdev->lock);
++	dev_err_ratelimited(core->dev,
++			    "IRIS1 session-init timeout: state=%u powered=%u suspended=%u\n",
++			    hdev->state, hdev->power_enabled, hdev->suspended);
++
++	if (hdev->power_enabled && !hdev->suspended)
++		dev_err_ratelimited(core->dev,
++				    "IRIS1 status: ctrl=%#x cpu=%#x irq=%#x mask=%#x\n",
++				    readl(core->cpu_cs_base + CPU_CS_SCIACMDARG0),
++				    readl(core->wrapper_base + WRAPPER_CPU_STATUS),
++				    readl(core->wrapper_base + WRAPPER_INTR_STATUS),
++				    readl(core->wrapper_base + WRAPPER_INTR_MASK));
++
++	/* Firmware may update these fields while this snapshot is read. */
++	for (i = IFACEQ_CMD_IDX; i <= IFACEQ_MSG_IDX; i++) {
++		qhdr = hdev->queues[i].qhdr;
++		if (!qhdr)
++			continue;
++		dev_err_ratelimited(core->dev,
++				    "IRIS1 q%u: rd=%u wr=%u rx_req=%u tx_req=%u\n", i,
++				    READ_ONCE(qhdr->read_idx), READ_ONCE(qhdr->write_idx),
++				    READ_ONCE(qhdr->rx_req), READ_ONCE(qhdr->tx_req));
++	}
++	mutex_unlock(&hdev->lock);
++}
++
+ static int venus_session_init(struct venus_inst *inst, u32 session_type,
+ 			      u32 codec)
+ {
+diff --git a/drivers/media/platform/qcom/venus/hfi_venus.h b/drivers/media/platform/qcom/venus/hfi_venus.h
+index 1b656ef2b..ee53dd856 100644
+--- a/drivers/media/platform/qcom/venus/hfi_venus.h
++++ b/drivers/media/platform/qcom/venus/hfi_venus.h
+@@ -10,6 +10,7 @@ struct venus_core;
+ 
+ void venus_hfi_destroy(struct venus_core *core);
+ int venus_hfi_create(struct venus_core *core);
++void venus_hfi_session_init_timeout(struct venus_core *core);
+ void venus_hfi_queues_reinit(struct venus_core *core);
+ 
+ #endif
+-- 
+2.43.0
+

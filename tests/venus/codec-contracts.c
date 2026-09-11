@@ -14,8 +14,8 @@
 #ifndef V4L2_TYPE_IS_OUTPUT
 #define V4L2_TYPE_IS_OUTPUT(t) ((t) == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE)
 #endif
-struct venus_resources { enum vpu_version vpu_version; enum hfi_version hfi_version; u8 num_vpp_pipes; };
-struct venus_core { struct venus_resources *res; };
+struct venus_resources { enum vpu_version vpu_version; enum hfi_version hfi_version; u8 num_vpp_pipes; void *ubwc_conf; };
+struct venus_core { struct venus_resources *res; struct device *dev; };
 struct venc_controls { int bitrate_mode, multi_slice_mode; };
 struct venus_format { u32 pixfmt; };
 struct vb2_buffer { unsigned int size; };
@@ -229,6 +229,68 @@ static void queue_tests(struct venus_inst *i, struct vb2_queue *q)
     CHECK(pm_refs == 0 && !i->lock);
 }
 
+struct device { int unused; };
+struct venus_hfi_device { struct venus_core *core; };
+static int venus_fw_debug = 3;
+static bool venus_fw_low_power_mode = true;
+static unsigned int policy_debug, policy_idle, policy_calls, policy_ubwc;
+static u32 policy_value;
+static int policy_error;
+#define dev_warn(dev, ...) ((void)(dev))
+static int venus_sys_set_debug(struct venus_hfi_device *h, int level)
+{ (void)h; CHECK(level == venus_fw_debug); policy_debug++; return 0; }
+static int venus_sys_set_idle_message(struct venus_hfi_device *h, bool enable)
+{ (void)h; CHECK(!enable); policy_idle++; return 0; }
+static int venus_sys_set_power_control(struct venus_hfi_device *h, bool enable)
+{
+    union { u32 words[16]; struct hfi_sys_set_property_pkt pkt; } data = {0};
+    (void)h;
+    pkt_sys_power_control(&data.pkt, enable);
+    CHECK(data.pkt.hdr.pkt_type == HFI_CMD_SYS_SET_PROPERTY);
+    CHECK(data.pkt.hdr.size == 20 && data.pkt.num_properties == 1);
+    CHECK(data.pkt.data[0] == HFI_PROPERTY_SYS_CODEC_POWER_PLANE_CTRL);
+    policy_value = data.pkt.data[1]; policy_calls++;
+    return policy_error;
+}
+static int venus_sys_set_ubwc_config(struct venus_hfi_device *h)
+{ CHECK(h->core->res->ubwc_conf); policy_ubwc++; return 0; }
+#include "venus_sys_set_default_properties.h"
+static void power_policy_tests(struct venus_core *core)
+{
+    struct device dev = {0};
+    struct venus_hfi_device h = { .core = core };
+    enum vpu_version vpus[] = {VPU_VERSION_IRIS1, VPU_VERSION_AR50,
+        VPU_VERSION_AR50_LITE, VPU_VERSION_IRIS2, VPU_VERSION_IRIS2_1};
+    core->dev = &dev;
+    for (unsigned int v = 0; v < sizeof(vpus)/sizeof(vpus[0]); v++) {
+        for (unsigned int low = 0; low < 2; low++) {
+            core->res->vpu_version = vpus[v];
+            core->res->hfi_version = HFI_VERSION_4XX;
+            core->res->ubwc_conf = NULL;
+            venus_fw_low_power_mode = low;
+            policy_calls=policy_debug=policy_idle=policy_ubwc=0;
+            policy_error=0;
+            CHECK(venus_sys_set_default_properties(&h) == 0);
+            CHECK(policy_value == (low && vpus[v] != VPU_VERSION_IRIS1));
+            CHECK(policy_calls == 1 && policy_debug == 1 && policy_idle == 0 && policy_ubwc == 0);
+        }
+    }
+    core->res->vpu_version=VPU_VERSION_IRIS1;
+    policy_error=-EIO;
+    CHECK(venus_sys_set_default_properties(&h) == -EIO);
+    policy_error=0;
+    core->res->vpu_version=VPU_VERSION_AR50;
+    core->res->hfi_version=HFI_VERSION_1XX;
+    policy_idle=0;
+    CHECK(venus_sys_set_default_properties(&h) == 0 && policy_idle == 1);
+    core->res->vpu_version=VPU_VERSION_IRIS2;
+    core->res->hfi_version=HFI_VERSION_6XX;
+    core->res->ubwc_conf=&dev;
+    policy_ubwc=0;
+    CHECK(venus_sys_set_default_properties(&h) == 0 && policy_ubwc == 1);
+    core->res->ubwc_conf=NULL;
+}
+
 int main(void)
 {
     struct venus_resources res={ .vpu_version=VPU_VERSION_IRIS1, .hfi_version=HFI_VERSION_4XX, .num_vpp_pipes=2 };
@@ -240,6 +302,7 @@ int main(void)
     queues.output=(struct vb2_queue){ .type=V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, .drv_priv=&inst };
     packet_tests(); route_tests(&inst); format_tests(&inst);
     queue_tests(&inst, &queues.input); queue_tests(&inst, &queues.output);
+    power_policy_tests(&core);
     printf("PASS: %u assertions against real HFI packetizer and codec functions (host mocks, no hardware)\n", assertions);
     return 0;
 }

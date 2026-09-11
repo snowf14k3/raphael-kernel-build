@@ -6,7 +6,7 @@ set -Eeuo pipefail
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 BUILD="$(cd -- "$HERE/../.." && pwd)"
 SOURCE="${RAPHAEL_SOURCE_REPO:-$(dirname "$BUILD")/raphael-linux}"
-BASE=ab4ce59a1826b18ba200b33f6a32d04d749a7ea5
+BASE="${VENUS_TEST_REF:-ab4ce59a1826b18ba200b33f6a32d04d749a7ea5}"
 V=drivers/media/platform/qcom/venus
 CC="${HOST_CC:-clang-22}"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/venus-codec-contracts.XXXXXX")"
@@ -15,13 +15,14 @@ mkdir -p "$TMP/linux" "$TMP/src"
 export GIT_INDEX_FILE="$TMP/index"
 git -C "$SOURCE" read-tree "$BASE"
 cp "$BUILD/patches/series" "$TMP/series"
+if [[ -n "${VENUS_TEST_REF:-}" ]]; then : > "$TMP/series"; fi
 while IFS= read -r name; do
     [[ -n "$name" && "$name" != \#* ]] || continue
     git -C "$SOURCE" apply --cached --check "$BUILD/patches/$name"
     git -C "$SOURCE" apply --cached "$BUILD/patches/$name"
 done < "$TMP/series"
 git -C "$SOURCE" diff --cached --check
-for f in hfi_cmds.c hfi_cmds.h hfi_helper.h hfi.h core.h vdec.c venc.c; do
+for f in hfi_venus.c hfi_cmds.c hfi_cmds.h hfi_helper.h hfi.h core.h vdec.c venc.c; do
     git -C "$SOURCE" show ":$V/$f" > "$TMP/src/$f"
 done
 unset GIT_INDEX_FILE
@@ -54,7 +55,7 @@ printf 'static inline u32 hash32_ptr(const void *p) { return (u32)(uintptr_t)p; 
 sed -i '1i#ifndef VENUS_TEST_HOST_H\n#define VENUS_TEST_HOST_H' "$TMP/host.h"
 printf '\n#endif\n' >> "$TMP/host.h"
 awk '/^enum vpu_version \{/{p=1} p{print} p && /^};$/{exit}' "$TMP/src/core.h" > "$TMP/vpu-types.h"
-grep -E '^#define IS_(IRIS1|IRIS2|IRIS2_1)\(' "$TMP/src/core.h" >> "$TMP/vpu-types.h"
+grep -E '^#define IS_(V1|IRIS1|IRIS2|IRIS2_1)\(' "$TMP/src/core.h" >> "$TMP/vpu-types.h"
 extract() {
     awk -v fn="$2" '
         $0 ~ "^static int " fn "\\(" {p=1; found=1}
@@ -63,6 +64,7 @@ extract() {
         END {if (!found || !done) exit 1}
     ' "$TMP/src/$1" > "$TMP/$2.h"
 }
+extract hfi_venus.c venus_sys_set_default_properties
 extract vdec.c vdec_set_work_route
 extract venc.c venc_set_work_route
 extract venc.c venc_queue_setup_iris1

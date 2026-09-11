@@ -1,0 +1,63 @@
+From 5b3d31bb59317112fe82324af01f94ac899abca4 Mon Sep 17 00:00:00 2001
+From: snowf14k3 <60956553+snowf14k3@users.noreply.github.com>
+Date: Sat, 12 Sep 2026 01:21:13 +0800
+Subject: [PATCH] media: venus: align IRIS1 firmware power control with
+ software GDSCs
+
+The IRIS1 bring-up powers the video and CVP domains under software
+control, explicitly disabling genpd hardware mode. The HFI defaults
+still enable HFI_PROPERTY_SYS_CODEC_POWER_PLANE_CTRL unconditionally.
+These are inconsistent halves of the power contract.
+
+Android Q uses msm_vidc_fw_low_power_mode both to select the firmware
+property and to decide whether __enable_hw_power_collapse() hands the
+regulators to hardware. Keep the selected software-controlled IRIS1
+policy and send a disabled property to firmware. Other VPU versions
+retain their current choice. Do not bypass PC_PREP, WFI/idle checks or
+secure runtime-suspend handshakes.
+
+A Raphael test hangs in hfi_session_init() with no additional Venus
+interrupts (5 before and after). This establishes the failure stage,
+not that this policy mismatch caused it. Hardware retesting is needed;
+no decoder/encoder success is claimed and no buffer/DMA code is changed.
+
+Link: https://github.com/MiCode/Xiaomi_Kernel_OpenSource/blob/192eca8550f95c2eec58a474793d1d93fc1b3b67/drivers/media/platform/msm/vidc/venus_hfi.c#L4448-L4462
+Signed-off-by: snowf14k3 <60956553+snowf14k3@users.noreply.github.com>
+---
+ drivers/media/platform/qcom/venus/hfi_venus.c | 12 +++++++++---
+ 1 file changed, 9 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/media/platform/qcom/venus/hfi_venus.c b/drivers/media/platform/qcom/venus/hfi_venus.c
+index f3060e1eb..a283d44bf 100644
+--- a/drivers/media/platform/qcom/venus/hfi_venus.c
++++ b/drivers/media/platform/qcom/venus/hfi_venus.c
+@@ -958,6 +958,7 @@ static int venus_sys_set_default_properties(struct venus_hfi_device *hdev)
+ {
+ 	struct device *dev = hdev->core->dev;
+ 	const struct venus_resources *res = hdev->core->res;
++	bool fw_low_power = venus_fw_low_power_mode && !IS_IRIS1(hdev->core);
+ 	int ret;
+ 
+ 	ret = venus_sys_set_debug(hdev, venus_fw_debug);
+@@ -971,10 +972,15 @@ static int venus_sys_set_default_properties(struct venus_hfi_device *hdev)
+ 			dev_warn(dev, "setting idle response ON failed (%d)\n", ret);
+ 	}
+ 
+-	ret = venus_sys_set_power_control(hdev, venus_fw_low_power_mode);
++	/*
++	 * IRIS1 keeps the video/CVP domains in software control. Do not
++	 * advertise autonomous power collapse without the matching GDSC
++	 * handoff. Host PC_PREP and secure runtime suspend remain separate.
++	 */
++	ret = venus_sys_set_power_control(hdev, fw_low_power);
+ 	if (ret)
+-		dev_warn(dev, "setting hw power collapse ON failed (%d)\n",
+-			 ret);
++		dev_warn(dev, "setting hw power collapse %s failed (%d)\n",
++			 fw_low_power ? "ON" : "OFF", ret);
+ 
+ 	/* For specific venus core, it is mandatory to set the UBWC configuration */
+ 	if (res->ubwc_conf) {
+-- 
+2.43.0
+
