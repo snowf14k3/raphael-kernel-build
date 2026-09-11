@@ -157,11 +157,11 @@ scripts/ghproxy-update-kernel.sh
 可以通过任意一条镜像获取入口脚本，随后交互选择下载线路：
 
 ```bash
-# 通过 ghfast.top 获取镜像更新入口
-sudo bash -c "$(curl -fsSL https://ghfast.top/https://raw.githubusercontent.com/snowf14k3/raphael-kernel-build/main/scripts/ghproxy-update-kernel.sh)"
+# 通过 ghfast.top 获取镜像更新入口（附带时间戳避免代理缓存旧脚本）
+sudo bash -c "$(curl -fsSL \"https://ghfast.top/https://raw.githubusercontent.com/snowf14k3/raphael-kernel-build/refs/heads/main/scripts/ghproxy-update-kernel.sh?ts=$(date +%s)\")"
 
 # 通过 proxy.koishi.asia 获取镜像更新入口
-sudo bash -c "$(curl -fsSL https://proxy.koishi.asia/https://raw.githubusercontent.com/snowf14k3/raphael-kernel-build/main/scripts/ghproxy-update-kernel.sh)"
+sudo bash -c "$(curl -fsSL \"https://proxy.koishi.asia/https://raw.githubusercontent.com/snowf14k3/raphael-kernel-build/refs/heads/main/scripts/ghproxy-update-kernel.sh?ts=$(date +%s)\")"
 ```
 
 也可以直接指定线路：
