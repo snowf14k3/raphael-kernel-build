@@ -131,11 +131,47 @@ raphael-kernel-arm64
 
 ## Raphael 一键更新内核
 
-目标机可以直接动态读取本仓库的 Pre-release 并选择版本升级：
+目标机可以直接动态读取本仓库的 Pre-release 并选择版本升级。
+
+### GitHub 直连
 
 ```bash
 sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/snowf14k3/raphael-kernel-build/main/scripts/update-kernel.sh)"
 ```
+
+### GitHub 镜像线路
+
+参考 `GengWei1997/kernel-deb` 的 ghproxy 更新方式，仓库另外提供：
+
+```text
+scripts/ghproxy-update-kernel.sh
+```
+
+镜像入口支持两条线路：
+
+```text
+1. ghfast.top
+2. proxy.koishi.asia
+```
+
+可以通过任意一条镜像获取入口脚本，随后交互选择下载线路：
+
+```bash
+# 通过 ghfast.top 获取镜像更新入口
+sudo bash -c "$(curl -fsSL https://ghfast.top/https://raw.githubusercontent.com/snowf14k3/raphael-kernel-build/main/scripts/ghproxy-update-kernel.sh)"
+
+# 通过 proxy.koishi.asia 获取镜像更新入口
+sudo bash -c "$(curl -fsSL https://proxy.koishi.asia/https://raw.githubusercontent.com/snowf14k3/raphael-kernel-build/main/scripts/ghproxy-update-kernel.sh)"
+```
+
+也可以直接指定线路：
+
+```bash
+./scripts/update-kernel.sh --mirror ghfast
+./scripts/update-kernel.sh --mirror koishi
+```
+
+GitHub API 的版本列表请求仍使用直连，仅 Release 的大文件资产下载走镜像，减少代理 API 兼容性问题。
 
 更新脚本参考 `GengWei1997/kernel-deb` 的固定启动文件更新方式，但额外加入：
 
