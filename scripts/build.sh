@@ -30,7 +30,7 @@ fi
 patch --dry-run "${source_dir}/scripts/package/builddeb" < "${builddeb_patch}"
 patch "${source_dir}/scripts/package/builddeb" < "${builddeb_patch}"
 
-# Apply the local Raphael test patch series on top of the known-good 7.1 source.
+# Apply the validated Raphael patch series on top of the known-good 7.1 source.
 mapfile -t patch_names < <(grep -Ev '^[[:space:]]*(#|$)' "${patch_dir}/series")
 : > "${patch_manifest}"
 
@@ -56,7 +56,7 @@ git -C "${source_dir}" diff --stat
 git -C "${source_dir}" config user.email "gw19970326@gmail.com"
 git -C "${source_dir}" config user.name "GengWei1997"
 git -C "${source_dir}" add -A
-git -C "${source_dir}" commit -m "build: apply Raphael test patches and SM8150 DTB packaging"
+git -C "${source_dir}" commit -m "build: apply validated Raphael patches and SM8150 DTB packaging"
 patched_source_commit="$(git -C "${source_dir}" rev-parse HEAD)"
 
 cd "${source_dir}"
@@ -80,21 +80,25 @@ make -j"$(nproc)" "${make_args[@]}" deb-pkg
 
 dtb="${source_dir}/arch/arm64/boot/dts/qcom/sm8150-xiaomi-raphael.dtb"
 test -s "${dtb}"
-
 image_deb="$(find "${build_root}" -maxdepth 1 -type f \
     -name 'linux-image-*.deb' ! -name '*dbg*' -print -quit)"
+headers_deb="$(find "${build_root}" -maxdepth 1 -type f \
+    -name 'linux-headers-*.deb' -print -quit)"
 test -n "${image_deb}"
 test -s "${image_deb}"
+test -n "${headers_deb}"
+test -s "${headers_deb}"
 
 # Verify the image package contains the Raphael DTB in the same /boot tree
 # expected by the rootfs/boot-image build.
 dpkg-deb -c "${image_deb}" | grep -q '/boot/dtbs/qcom/sm8150-xiaomi-raphael.dtb$'
 
 mkdir -p "${artifact_dir}"
-install -m 0644 "${image_deb}" \
-    "${artifact_dir}/linux-image-xiaomi-raphael-dsi-flicker-test.deb"
-install -m 0644 "${dtb}" \
-    "${artifact_dir}/sm8150-xiaomi-raphael.dtb"
+image_name="$(basename "${image_deb}")"
+headers_name="$(basename "${headers_deb}")"
+install -m 0644 "${image_deb}" "${artifact_dir}/${image_name}"
+install -m 0644 "${headers_deb}" "${artifact_dir}/${headers_name}"
+install -m 0644 "${dtb}" "${artifact_dir}/sm8150-xiaomi-raphael.dtb"
 install -m 0644 .config "${artifact_dir}/kernel.config"
 install -m 0644 "${patch_manifest}" "${artifact_dir}/patches.sha256"
 
@@ -108,7 +112,8 @@ printf 'kernel_release=%s\nsource_commit=%s\npatched_source_commit=%s\nsource_br
 
 cd "${artifact_dir}"
 sha256sum \
-    linux-image-xiaomi-raphael-dsi-flicker-test.deb \
+    "${image_name}" \
+    "${headers_name}" \
     sm8150-xiaomi-raphael.dtb \
     kernel.config \
     build-info.txt \
