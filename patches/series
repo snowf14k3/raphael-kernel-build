@@ -1,8 +1,4 @@
 0001-arm64-dts-qcom-raphael-restore-microphone-routing.patch
 0002-drm-msm-dpu-raise-sm8150-cmd-panel-clk-inefficiency.patch
 0003-drm-msm-dsi-serialize-dcs-with-cmd-mode-bursts.patch
-0004-drm-msm-dsi-log-error-state-snapshot.patch
-0005-drm-msm-dpu-log-underrun-state.patch
-0006-drm-msm-dsi-capture-complete-error-diagnostics.patch
-0007-drm-msm-dpu-capture-command-mode-failure-state.patch
-0008-drm-msm-dsi-preserve-active-link-clocks-during-xfer.patch
+0004-drm-msm-dsi-preserve-active-link-clocks-during-xfer.patch
