@@ -72,3 +72,28 @@ scripts/build.sh
 构建环境使用 LLVM/Clang 22，输出 ARM64 Debian kernel image、headers、Raphael DTB、最终 config、补丁哈希和 `SHA256SUMS`。
 
 Venus 适配阶段的测试构建与正式稳定构建应使用不同的 Release / tag 命名，避免和 `main` 的稳定版本混淆。
+
+## 本地构建与 Pre-release
+
+本分支优先在编译服务器本地构建，避免频繁占用 GitHub Actions：
+
+```bash
+cd /home/snowflake/linux/raphael-kernel-venus
+./scripts/local-build.sh
+```
+
+脚本会复用 `/home/snowflake/linux/raphael-linux` 的 Git 对象，从固定基线 `ab4ce59a1826b18ba200b33f6a32d04d749a7ea5` 创建临时 worktree，再应用本分支当前 `patches/series`。构建结束后自动清理临时源码和中间产物。
+
+实机测试前可以发布 Pre-release：
+
+```bash
+./scripts/publish-prerelease.sh
+```
+
+目标 Raphael 可以通过 `main` 分支的一键更新脚本动态选择测试版本：
+
+```bash
+sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/snowf14k3/raphael-kernel-build/main/scripts/update-kernel.sh)"
+```
+
+Venus 的每一轮迁移建议保持“小 patch、单变量验证”，本地构建 → Pre-release → 实机验证 → 清理上一轮垃圾，再进入下一阶段。
