@@ -1,0 +1,55 @@
+From 2ff534d55880e3808c52218faa7200ee4dcdb74d Mon Sep 17 00:00:00 2001
+From: snowf14k3 <60956553+snowf14k3@users.noreply.github.com>
+Date: Sat, 12 Sep 2026 01:50:10 +0800
+Subject: [PATCH] media: venus: preserve the parent node reference during child
+ lookup
+
+venus_add_video_core() passes dev->of_node as the starting point of
+of_find_node_by_name(). That iterator consumes the starting node's
+reference even if no matching node exists. The caller does not own an
+extra reference, so checking the two codec children drops two references
+to the Venus parent during each probe.
+
+The first Raphael module test decoded a frame successfully, but reload
+of the original driver reported of_node refcount underflow and failed
+in kernfs_find_and_get_ns() through venus_add_dynamic_nodes(). The
+unbalanced parent lookup can invalidate the parent's sysfs state when
+references held by the dynamic children are released.
+
+Use of_get_child_by_name() to search only the immediate children without
+consuming the parent reference. Keep the existing of_node_put(enp) for
+the acquired child. This also avoids treating a similarly named node
+under another device as an existing Venus child.
+
+The faulty lookup already exists in the fixed raphael-7.1 ab4ce59
+baseline. This is a Linux OF ownership fix, not an Android HFI/DMA port.
+Do not hide the refcount warnings or add NULL checks to kernfs instead.
+
+Test the extracted driver function with the actual fixed-baseline OF
+lookup/traversal helpers and host reference-count/changeset stubs. The
+old function loses a parent reference and incorrectly accepts unrelated
+nodes; the new function must preserve all acquired references on both
+success and allocation/property failures. Hardware teardown still needs
+validation from a clean boot; the previous hot-reload entry stays blocked.
+
+Signed-off-by: snowf14k3 <60956553+snowf14k3@users.noreply.github.com>
+---
+ drivers/media/platform/qcom/venus/core.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/drivers/media/platform/qcom/venus/core.c b/drivers/media/platform/qcom/venus/core.c
+index f460645af..bd5325915 100644
+--- a/drivers/media/platform/qcom/venus/core.c
++++ b/drivers/media/platform/qcom/venus/core.c
+@@ -303,7 +303,7 @@ static int venus_add_video_core(struct venus_core *core, const char *node_name,
+ 	if (!node_name)
+ 		return 0;
+ 
+-	enp = of_find_node_by_name(dev->of_node, node_name);
++	enp = of_get_child_by_name(dev->of_node, node_name);
+ 	if (enp) {
+ 		of_node_put(enp);
+ 		return 0;
+-- 
+2.43.0
+

@@ -20,3 +20,4 @@
 0020-media-venus-report-iris1-negotiated-encoder-size.patch
 0021-media-venus-align-iris1-firmware-power-control.patch
 0022-media-venus-report-iris1-session-init-timeout.patch
+0023-media-venus-preserve-parent-node-reference.patch
