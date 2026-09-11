@@ -67,3 +67,22 @@
 - HEVC Main、HEVC Main10/P010、HEVC 编码分别记录结果。H.264 测试不替代它们；Main10 输入能输出 NV12，也不等于原精度 10-bit 输出已通过。
 
 接口参考：Linux 官方 `userspace-api/media/v4l/dev-encoder.html` 和 `dev-decoder.html`。本批次尚没有上述实机结果，不改目标机 `/boot`、不声称性能/稳定性、也不发布正式 Release。
+
+## 2026-09-11：首轮整包收集失败及修正
+
+`1b4afc9` 的 `bindeb-pkg` 已完成，但构建脚本在配置同步前读取了
+`7.1.0-g30680a89d863`，实际生成的 image/headers 使用
+`7.1.0-sm8150-g30680a89d863`。脚本据此查找错误的 vmlinuz 路径，
+在收集阶段退出；原清理逻辑删除了临时树及已生成的 Debian 包，未留下
+`last-build.env` 或可发布的 tar.gz。这不是 Venus C 代码编译失败。
+
+修正限定在构建工具：完成 bindeb-pkg 后读取实际
+`include/config/kernel.release`，交叉验证 image/headers 的包名及架构，
+并报告缺失的精确路径。收集失败时保留非 debug 安装包、配置、DTB、
+补丁清单和恢复信息；仍清理全量源码、中间对象及 debug 包。恢复目录
+明确标注 UNVERIFIED，不作为发布成功记录。保存恢复副本失败时不删除原包。
+
+`tests/build/test-local-build-artifacts.sh` 使用真实微型 Debian 包测试
+实际收集/清理代码，7 项回归通过，并重现旧版本号负对照。
+20 份内核补丁、raphael.config 和 builddeb.patch 未改变。
+失败日志保存在 `out/venus-validation/build-1b4afc9-packaging-failed.log`。

@@ -116,13 +116,52 @@ SOURCE_DIR="${RUN_DIR}/linux-src"
 PATCH_MANIFEST="${RUN_DIR}/patches.sha256"
 WORKTREE_ADDED=0
 BUILD_OK=0
+BUILD_STAGE=prepare
+
+# Keep only completed binary packages and small recovery inputs when collection
+# fails. The full source tree and debug packages are still disposable.
+preserve_completed_packages() {
+    local saved="${OUT_ROOT}/failed-packaging" pkg have_packages=0 input
+    for pkg in "${RUN_DIR}"/linux-image-*.deb "${RUN_DIR}"/linux-headers-*.deb; do
+        [[ -s "$pkg" && "${pkg##*/}" != *-dbg_* ]] || continue
+        dpkg-deb -f "$pkg" Package >/dev/null 2>&1 || continue
+        mkdir -p "$saved" || return 1
+        cp -- "$pkg" "$saved/" || return 1
+        have_packages=1
+    done
+    (( have_packages )) || return 0
+
+    for input in .config include/config/kernel.release \
+        arch/arm64/boot/dts/qcom/sm8150-xiaomi-raphael.dtb; do
+        [[ ! -s "${SOURCE_DIR}/$input" ]] ||
+            cp -- "${SOURCE_DIR}/$input" "$saved/" || return 1
+    done
+    for input in patches.sha256 image-contents.txt; do
+        [[ ! -s "${RUN_DIR}/$input" ]] ||
+            cp -- "${RUN_DIR}/$input" "$saved/" || return 1
+    done
+    {
+        printf 'build_commit=%s\nsource_commit=%s\nstage=%s\n' \
+            "$BUILD_COMMIT" "$EXPECTED_SOURCE_COMMIT" "$BUILD_STAGE"
+        printf 'status=UNVERIFIED_NOT_FOR_RELEASE\n'
+    } > "$saved/recovery-info.txt" || return 1
+    echo "已保留待复核的非 debug 包和打包输入: $saved"
+}
 
 cleanup() {
+
     local rc=$?
     set +e
     cd / >/dev/null 2>&1 || true
 
+    if (( rc != 0 )) && ! preserve_completed_packages; then
+        # Never discard the only packages if saving the recovery copy fails.
+        KEEP_WORKTREE=1
+        echo "保存恢复包失败，临时目录保留供排查: ${RUN_DIR}" >&2
+    fi
+
     if (( KEEP_WORKTREE == 0 )); then
+
         if (( WORKTREE_ADDED == 1 )); then
             git -C "${SOURCE_REPO}" worktree remove --force "${SOURCE_DIR}" >/dev/null 2>&1 || true
             git -C "${SOURCE_REPO}" worktree prune >/dev/null 2>&1 || true
@@ -140,6 +179,8 @@ cleanup() {
     return "$rc"
 }
 trap cleanup EXIT
+trap 'printf "阶段 %s，第 %s 行失败: %s\n" "$BUILD_STAGE" "$LINENO" "$BASH_COMMAND" >&2' ERR
+
 
 # 终端输出同时保存到 out/<branch>/build.log。
 exec > >(tee -a "${LOG_FILE}") 2>&1
@@ -217,11 +258,24 @@ grep -qx 'CONFIG_QCOM_LLCC=y' .config
 grep -qx 'CONFIG_SM_GPUCC_8150=y' .config
 grep -qx 'CONFIG_INTERCONNECT_QCOM_SM8150=y' .config
 
-KERNEL_RELEASE="$(make -s "${MAKE_ARGS[@]}" kernelrelease)"
-echo "kernel_release=${KERNEL_RELEASE}"
-
+BUILD_STAGE=kernel-packages
 echo "=== AMD64 本地构建 ARM64 binary-only Debian 包 ==="
 make -j"${JOBS}" "${MAKE_ARGS[@]}" DPKG_FLAGS=-d bindeb-pkg
+
+BUILD_STAGE=collect
+# kernelrelease is a no-sync-config target. Before bindeb-pkg it can use the
+# stale defconfig auto.conf and omit CONFIG_LOCALVERSION from raphael.config.
+# Use the release actually written by the completed build instead.
+[[ -s include/config/kernel.release ]] || {
+    echo "构建没有生成 include/config/kernel.release" >&2
+    exit 1
+}
+KERNEL_RELEASE="$(< include/config/kernel.release)"
+[[ "${KERNEL_RELEASE}" =~ ^[A-Za-z0-9._+-]+$ ]] || {
+    echo "构建产生非法内核版本号: ${KERNEL_RELEASE}" >&2
+    exit 1
+}
+echo "kernel_release=${KERNEL_RELEASE}"
 
 DTB="${SOURCE_DIR}/arch/arm64/boot/dts/qcom/sm8150-xiaomi-raphael.dtb"
 [[ -s "${DTB}" ]] || {
@@ -240,12 +294,26 @@ HEADERS_DEB="$(find "${RUN_DIR}" -maxdepth 1 -type f -name 'linux-headers-*.deb'
     exit 1
 }
 
-[[ "$(dpkg-deb -f "${IMAGE_DEB}" Architecture)" == "arm64" ]]
-[[ "$(dpkg-deb -f "${HEADERS_DEB}" Architecture)" == "arm64" ]]
+for package in "${IMAGE_DEB}" "${HEADERS_DEB}"; do
+    [[ "$(dpkg-deb -f "$package" Architecture)" == "arm64" ]] || {
+        echo "Debian 包不是 arm64: $package" >&2
+        exit 1
+    }
+done
+[[ "$(dpkg-deb -f "${IMAGE_DEB}" Package)" == "linux-image-${KERNEL_RELEASE}" &&
+   "$(dpkg-deb -f "${HEADERS_DEB}" Package)" == "linux-headers-${KERNEL_RELEASE}" ]] || {
+    echo "image/headers 包名与实际内核版本 ${KERNEL_RELEASE} 不一致" >&2
+    exit 1
+}
 
-dpkg-deb -c "${IMAGE_DEB}" > "${RUN_DIR}/image-contents.txt"
-grep -q '/boot/dtbs/qcom/sm8150-xiaomi-raphael.dtb$' "${RUN_DIR}/image-contents.txt"
-grep -q "/boot/vmlinuz-${KERNEL_RELEASE}$" "${RUN_DIR}/image-contents.txt"
+dpkg-deb --fsys-tarfile "${IMAGE_DEB}" | tar -tf - > "${RUN_DIR}/image-contents.txt"
+for expected in "./boot/dtbs/qcom/sm8150-xiaomi-raphael.dtb" \
+                "./boot/vmlinuz-${KERNEL_RELEASE}"; do
+    grep -Fxq -- "$expected" "${RUN_DIR}/image-contents.txt" || {
+        echo "image 包缺少必要文件: $expected" >&2
+        exit 1
+    }
+done
 
 BUNDLE_NAME="raphael-${BUILD_BRANCH_SAFE}-${KERNEL_RELEASE}"
 ARTIFACT_DIR="${OUT_ROOT}/${BUNDLE_NAME}"
@@ -287,6 +355,7 @@ INFO
     sha256sum -c SHA256SUMS
 )
 
+BUILD_STAGE=bundle
 ARCHIVE="${OUT_ROOT}/${BUNDLE_NAME}.tar.gz"
 tar -C "${OUT_ROOT}" -czf "${ARCHIVE}" "${BUNDLE_NAME}"
 (
