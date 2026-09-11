@@ -70,7 +70,7 @@
 1. **IRQ mask 初始化**：下游 `interrupt_init_vpu5()` 读取当前 mask，只清 CPU 与 watchdog 的 mask；上游 `venus_boot_core()` 的 IRIS1 路径原本会直接写 `0x8`。这是本轮唯一修改。
 2. **DSP queue fallback**：下游 `setup_dsp_uc_memmap_vpu5()`（`venus_hfi.c:4691-4707`）即使不启用 CVP，也先用 CPU HFI queue 初始化 DSP queue / UC-region 三个寄存器。上游 `venus_run()` 只初始化 CPU queue 与 SFR。此项需要单独审查和验证，不能把 CVP 整套搬进 decoder。
 3. **CPU 时钟配置**：下游 VPU5 的 `clock_config_on_enable_vpu5()`（`venus_hfi.c:4709-4713`）在电源/时钟使能流程中清 `WRAPPER_CPU_CGC_DIS` 和 `WRAPPER_CPU_CLOCK_CONFIG`。上游正常 secure runtime 路径没有对应 IRIS1 hook。上游 no-TZ CPU reset 路径中的相似写操作不能代替 secure resume 审计。
-4. **decoder work route**：上游 `vdec_set_work_route()`（`vdec.c:731-742`）只给 IRIS2 / IRIS2_1 发送 property；下游 VPU5 的 `msm_vidc_decide_work_route()`（`msm_vidc_clocks.c:1213` 起）对一般逐行 H.264 / HEVC 选择 route 2，另有 MPEG2 / 隔行等例外。序列化 property 的代码已经存在，但 IRIS1 选择逻辑尚未接入。
+4. **decoder work route**：上游 `vdec_set_work_route()`（`vdec.c:731-742`）只给 IRIS2 / IRIS2_1 发送 property；下游 VPU5 的 `msm_vidc_decide_work_route()`（`msm_vidc_clocks.c:1213` 起）对一般逐行 H.264 / HEVC 选择 route 2，另有 MPEG2 / 隔行等例外。更进一步，`hfi_cmds.c:1337-1343` 的 WORK_ROUTE 序列化仅位于 `pkt_session_set_property_6xx()`；HFI4 dispatch 不会进入它。因此后续需要同时审查 HFI4 property 打包与 IRIS1 decoder 的 route 选择，不能只放宽 `vdec_set_work_route()` 的条件。
 
 ### 2.3 待核实的固件合约
 
@@ -102,7 +102,8 @@ Linux 7.1 已有 MDT 加载、预留区检查和 SCM/PAS 启动，不需要重�
 重点差异：
 
 - 下游 VPU5 `__prepare_ahb2axi_bridge()`（`venus_hfi.c:3982-4009`）有单独 reset assert / delay / deassert。需对照上游 core reset 顺序与可用 reset binding。
-- `vcodec_control_v4()`（`pm_helpers.c:415` 起）先尝试 genpd hardware mode，失败后落入旧 wrapper power 寄存器路径。必须验证 SM8150 videocc/genpd 是否正确提供所需能力，不能默认为 SDM845 fallback 适用。
+- `vcodec_control_v4()`（`pm_helpers.c:415` 起）先尝试 genpd hardware mode，失败后落入旧 wrapper power 寄存器路径。固定 `videocc-sm8150.c` 的 `vcodec0_gdsc` / `vcodec1_gdsc` 已设置 `HW_CTRL_TRIGGER`，因此不能宣称缺少基础 hardware-mode 支持；后续应优先验证已有 genpd 路径，不能默认为 SDM845 wrapper fallback 适用。
+- `core.h:26-28` 当前限制 core clocks 最多 4 路、每组 vcodec clocks 最多 2 路、resets 最多 2 路。下游六时钟/四复位不能原样塞进同一资源数组；需要分别映射依赖并论证 decoder-first 的必要集合。
 - 下游 MVS1 对应 CVP。decoder-first 不开启 CVP，但也不能未经核实就推断启动固件永远不需要该域；需要单独确认 firmware boot 与 session 的依赖。
 - `core_clks_enable()` 是否在首次 boot 前设置正确频率、secure resume 的 CPU clock config、AXI halt / runtime suspend / resume 的顺序均需核对，不在一个补丁里同时修改。
 - 对照 `msm_vidc_platform.c:106-116` 的宏参数顺序，H.264 / HEVC 的基本 VPP/VSP cycle 值与现有 HFI4 表相符；不是缺一个全新的频率计算器。不过下游还有 work-route 分摊和固件开销，OPP、带宽与总负载限制不能直接照搬其他 SoC。
