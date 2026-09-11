@@ -1,0 +1,47 @@
+From d8388417f11ae5c8655d875b5ed3cc3f3427d081 Mon Sep 17 00:00:00 2001
+From: snowf14k3 <60956553+snowf14k3@users.noreply.github.com>
+Date: Fri, 11 Sep 2026 22:34:17 +0800
+Subject: [PATCH] media: venus: preserve the IRIS1 interrupt mask at boot
+
+The SM8150 Android Q driver selects VPU5 and uses read-modify-write
+in interrupt_init_vpu5(). It unmasks only the CPU and watchdog
+interrupts while preserving every other wrapper interrupt mask bit.
+Its documented reset mask is 0x1f6, resulting in 0x1e2 rather than the
+VPU4 constant 0x8.
+
+The fixed raphael-7.1 baseline has an IRIS1 VPU identifier but would
+take the VPU4 constant-write path when an IRIS1 platform is added.
+Add the dedicated branch using the existing legacy watchdog bit 4
+and CPU bit 2 definitions. Do not use the IRIS2 watchdog bit or
+register layout.
+
+This is a preparatory change only. No SM8150 resource or device-tree
+binding is added, and hardware decoding is not claimed. Other VPU
+paths, PM, DMA, formats and encoder session code are unchanged.
+
+Link: https://github.com/MiCode/Xiaomi_Kernel_OpenSource/blob/192eca8550f95c2eec58a474793d1d93fc1b3b67/drivers/media/platform/msm/vidc/venus_hfi.c#L4672-L4683
+Signed-off-by: snowf14k3 <60956553+snowf14k3@users.noreply.github.com>
+---
+ drivers/media/platform/qcom/venus/hfi_venus.c | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/media/platform/qcom/venus/hfi_venus.c b/drivers/media/platform/qcom/venus/hfi_venus.c
+index bd82066bb..7c3440dd0 100644
+--- a/drivers/media/platform/qcom/venus/hfi_venus.c
++++ b/drivers/media/platform/qcom/venus/hfi_venus.c
+@@ -473,7 +473,11 @@ static int venus_boot_core(struct venus_hfi_device *hdev)
+ 	void __iomem *wrapper_base = hdev->core->wrapper_base;
+ 	int ret = 0;
+ 
+-	if (IS_IRIS2(hdev->core) || IS_IRIS2_1(hdev->core)) {
++	if (IS_IRIS1(hdev->core)) {
++		mask_val = readl(wrapper_base + WRAPPER_INTR_MASK);
++		mask_val &= ~(WRAPPER_INTR_MASK_A2HWD_BASK |
++			      WRAPPER_INTR_MASK_A2HCPU_MASK);
++	} else if (IS_IRIS2(hdev->core) || IS_IRIS2_1(hdev->core)) {
+ 		mask_val = readl(wrapper_base + WRAPPER_INTR_MASK);
+ 		mask_val &= ~(WRAPPER_INTR_MASK_A2HWD_BASK_V6 |
+ 			      WRAPPER_INTR_MASK_A2HCPU_MASK);
+-- 
+2.43.0
+

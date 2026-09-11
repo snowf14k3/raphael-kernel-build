@@ -34,9 +34,13 @@
 
 ## 当前状态
 
-这个分支目前只是新的 Venus 适配起点。
+已完成固定 `ab4ce59` 与 Xiaomi Android Q 下游的首轮源码审计，详见 [六类缺口清单与验证边界](docs/venus/audit-ab4ce59.md)。
 
-**尚未加入任何新的 Venus 修复补丁。**
+已加入一个前置补丁 `0005-media-venus-preserve-iris1-interrupt-mask.patch`：仅修正 IRIS1 启动时的 interrupt mask 保留语义。补丁通过 checkpatch，并通过真实函数提取后的 1,069 项 host MMIO 模拟检查；原始基线作为负对照可复现差异。
+
+**尚未加入 SM8150 Venus resource / DTS 接入，尚未进行本基线的实机硬解验证。此补丁不会单独启用 H.264 / HEVC 解码，不应据此发布可用性声明。**
+
+回归入口：`tests/venus/test-iris1-irq-mask.sh`。测试不会操作硬件，也不会往内核加入 diagnostic 代码。
 
 之前仓库历史中存在过一系列 Venus 测试和 bring-up 提交，但这些旧实验不会直接带入本分支。需要使用的逻辑会重新核对上游、下游 Android 内核和实机行为后，再整理成新的补丁。
 
@@ -62,12 +66,15 @@ Venus 相关修改后续会继续使用编号 patch，并在 `patches/series` �
 
 ## 构建
 
-构建入口仍为：
+优先使用本地构建：
 
-```text
-.github/workflows/build.yml
-scripts/build.sh
+```bash
+./scripts/local-build.sh
 ```
+
+该脚本复用 `raphael-linux` 的 Git 对象，从固定提交创建临时 worktree，使用 `ARCH=arm64 LLVM=-22 DPKG_FLAGS=-d bindeb-pkg`，并清理本轮中间产物。编译结果不等于实机解码通过。
+
+`.github/workflows/build.yml` / `scripts/build.sh` 仅作为备用 CI；需要实机发布时使用 `scripts/publish-prerelease.sh`，只发布 Pre-release。
 
 构建环境使用 LLVM/Clang 22，输出 ARM64 Debian kernel image、headers、Raphael DTB、最终 config、补丁哈希和 `SHA256SUMS`。
 
