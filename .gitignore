@@ -2,3 +2,4 @@
 /.ccache/
 /linux-src/
 /scripts/__pycache__/
+/out/

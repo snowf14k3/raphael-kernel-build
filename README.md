@@ -102,3 +102,52 @@ raphael-kernel-arm64
 ```
 
 内核源码实验优先在 `raphael-linux` 中完成；确认后的修改再整理为独立 patch 放入本仓库，以保持构建过程可复现。
+
+## 本地构建与测试发布
+
+为了减少 GitHub Actions 的使用，仓库提供可复用的本地构建流程。
+
+在当前分支直接执行：
+
+```bash
+./scripts/local-build.sh
+```
+
+脚本默认复用同级目录中的：
+
+```text
+/home/snowflake/linux/raphael-linux
+```
+
+从固定提交 `ab4ce59a1826b18ba200b33f6a32d04d749a7ea5` 创建临时 Git worktree，不会每次重新 clone 上游源码。构建结束后临时源码、debug 包和中间文件会自动清理。
+
+本地测试成功后可发布 GitHub Pre-release：
+
+```bash
+./scripts/publish-prerelease.sh
+```
+
+发布内容包含 `.tar.gz` 和对应 `.tar.gz.sha256`，并在发布后自动回下载校验。
+
+## Raphael 一键更新内核
+
+目标机可以直接动态读取本仓库的 Pre-release 并选择版本升级：
+
+```bash
+sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/snowf14k3/raphael-kernel-build/main/scripts/update-kernel.sh)"
+```
+
+更新脚本参考 `GengWei1997/kernel-deb` 的固定启动文件更新方式，但额外加入：
+
+- 只选择 GitHub Pre-release 测试内核；
+- tar.gz 外层 SHA256 与包内 `SHA256SUMS` 双重验证；
+- 更新前备份当前 `linux.efi`、`initramfs`、DTB、versioned kernel 和 modules；
+- 新内核验证成功后才原子切换 `/boot/linux.efi` 与 `/boot/initramfs`；
+- 当前运行内核保留为一次回退；
+- 新内核成功启动后自动清理旧 kernel package、`/boot` 旧版本文件和旧 modules。
+
+编译服务器完整工作流说明见：
+
+```text
+/home/snowflake/linux/WORKSPACE.md
+```
