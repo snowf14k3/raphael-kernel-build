@@ -1,8 +1,8 @@
 # Raphael kernel build
 
-Patch-based kernel build workspace for Xiaomi Redmi K20 Pro / Mi 9T Pro (`raphael`, SM8150).
+Patch-based Linux kernel build workspace for Xiaomi Redmi K20 Pro / Mi 9T Pro (`raphael`, SM8150).
 
-This branch is dedicated to fixing DSI command-mode brightness-update flicker/tearing on Raphael while retaining the already validated microphone-routing patch.
+This branch contains the validated Raphael fixes used for the production kernel build. The temporary DSI/DPU diagnostic instrumentation used during bring-up has been removed.
 
 ## Kernel baseline
 
@@ -12,82 +12,48 @@ The build uses GengWei1997's Linux tree directly:
 - Branch: `raphael-7.1`
 - Pinned commit: `ab4ce59a1826b18ba200b33f6a32d04d749a7ea5`
 
-The pinned commit is checked by `scripts/build.sh` before any patch is applied. If the upstream branch moves, the build stops instead of silently building against an unreviewed baseline.
+`scripts/build.sh` verifies the pinned source commit before applying any local patch, so an upstream branch move cannot silently change the build baseline.
 
-## Workspace layout
+## Validated patch series
 
-Two repositories are used locally:
+The production series is intentionally small:
+
+1. Restore the validated Raphael microphone routing.
+2. Raise the SM8150 DPU clock inefficiency factor from 105 to 186 for additional command-mode clock headroom.
+3. Serialize DCS transfers against an in-flight command-mode burst with a bounded wait.
+4. Preserve already-active DSI link clocks during DCS transfers instead of retuning/re-enabling/disabling them while the powered command-mode display owns the link.
+
+The fourth change was the final change under test when brightness flicker stopped reproducing on the physical Raphael device. The prior `DSIERR#`, `DPUERR#`, `DPUCMD#`, FIFO and timeout diagnostic patches are not part of this production series.
+
+Patch order is defined by `patches/series`.
+
+## Build
+
+GitHub Actions can be started manually from `.github/workflows/build.yml`. The workflow uses `ubuntu-24.04-arm`, LLVM/Clang 22 and the same `raphael.config` used by the known-good GengWei 7.1 build.
+
+The build script:
+
+1. Clones the pinned `raphael-7.1` source.
+2. Applies the SM8150 DTB packaging adjustment.
+3. Checks and applies every patch in `patches/series`.
+4. Runs `git diff --check`.
+5. Builds Debian packages with LLVM/Clang 22.
+6. Verifies the image package contains `sm8150-xiaomi-raphael.dtb`.
+7. Collects the image package, matching headers, Raphael DTB, final config, build metadata, patch hashes and `SHA256SUMS`.
+
+The uploaded Actions artifact is named:
+
+```text
+raphael-kernel-arm64
+```
+
+## Local workspace
+
+The development checkouts on the build host are:
 
 ```text
 /home/snowflake/linux/raphael-linux
 /home/snowflake/linux/raphael-kernel-build
 ```
 
-`raphael-linux` is the local development checkout of `GengWei1997/linux:raphael-7.1`. Kernel changes are developed and tested there.
-
-`raphael-kernel-build` contains only the build workflow and the patches that should be applied to the clean upstream baseline.
-
-## Patch workflow
-
-Make kernel changes in:
-
-```text
-/home/snowflake/linux/raphael-linux
-```
-
-Then export the finished change as a numbered patch into:
-
-```text
-patches/0001-*.patch
-patches/0002-*.patch
-...
-```
-
-List the patch filenames in `patches/series` in the exact order they must be applied. Blank lines and lines beginning with `#` are ignored.
-
-During a CI build, `scripts/build.sh` performs the following sequence:
-
-1. Clone `GengWei1997/linux` branch `raphael-7.1`.
-2. Verify that the source is still at the pinned commit.
-3. Run `git apply --check` for every entry in `patches/series`.
-4. Apply the patches in series order.
-5. Run `git diff --check` on the patched source tree.
-6. Merge the Raphael kernel configuration.
-7. Build Debian kernel packages with LLVM/Clang.
-8. Collect the kernel package, Raphael DTB, final config, patch hashes and build metadata.
-
-## GitHub Actions
-
-The workflow is located at:
-
-```text
-.github/workflows/build.yml
-```
-
-It currently runs manually with `workflow_dispatch` and builds on `ubuntu-24.04-arm`.
-
-The uploaded artifact is named:
-
-```text
-raphael-dsi-brightness-flicker-test-kernel
-```
-
-It contains:
-
-```text
-linux-image-xiaomi-raphael-dsi-flicker-test.deb
-sm8150-xiaomi-raphael.dtb
-kernel.config
-build-info.txt
-patches.sha256
-SHA256SUMS
-```
-
-## Current target
-
-The current work focuses on brightness-update flicker/tearing on Raphael's command-mode DSI panel. The branch keeps the validated microphone-routing patch from `main` and adds two display fixes adapted from AKaNecoo's Raphael work:
-
-- `1ed35ec50bfb8dc7c1a53684f3fab2107b266e83`: raise the SM8150 DPU `clk_inefficiency_factor` from 105 to 186 so command-mode frame writes receive more MDP clock headroom.
-- `c4a07b573474d1496f398c65f33c63ba52901f2a`: wait for an in-flight command-mode frame burst to drain before issuing DCS command DMA, with a bounded 70 ms wait.
-
-The test target is the DSI/MDP display path; unrelated kernel changes should stay out of this branch.
+Kernel source experiments happen in `raphael-linux`; only reviewed patches and reproducible build files belong in this repository.

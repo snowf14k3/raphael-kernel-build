@@ -1,4 +1,4 @@
-name: Build Raphael DSI brightness flicker test kernel
+name: Build Raphael kernel
 
 on:
   workflow_dispatch:
@@ -7,7 +7,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: raphael-dsi-brightness-flicker-kernel
+  group: raphael-kernel-build
   cancel-in-progress: false
 
 jobs:
@@ -41,7 +41,7 @@ jobs:
       - name: Upload kernel artifacts
         uses: actions/upload-artifact@v7
         with:
-          name: raphael-dsi-brightness-flicker-test-kernel
+          name: raphael-kernel-arm64
           path: artifacts/*
           if-no-files-found: error
           retention-days: 14
