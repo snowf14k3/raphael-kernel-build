@@ -1,0 +1,53 @@
+From b4c02ba396fe34f8154f1a275ed40f2d9fb99805 Mon Sep 17 00:00:00 2001
+From: snowf14k3 <60956553+snowf14k3@users.noreply.github.com>
+Date: Fri, 11 Sep 2026 23:12:43 +0800
+Subject: [PATCH] media: venus: report negotiated IRIS1 encoder plane sizes
+
+IRIS1 queue setup now consults firmware before allocating either queue,
+but G_FMT still recomputes sizeimage using only the generic formula.
+A client can therefore see a smaller size than the one the same driver
+requires for CAPTURE or OUTPUT after REQBUFS.
+
+For an allocated IRIS1 queue, report at least the cached negotiated
+minimum. Clear the caller-supplied size before the generic calculation:
+G_FMT must report the driver format, not inflate it from arbitrary input.
+Do not retain a previous allocation size after buffers are released.
+
+The HFI4 queue-query change is the immediate prerequisite; the Android Q
+encoder also copies the firmware requirement into its reported format.
+A real-function host test fails on the old G_FMT wrapper and checks both
+queue directions with this fix. Verify G_FMT/REQBUFS/QUERYBUF consistency
+on hardware. All other Venus platforms keep their existing behavior.
+
+Signed-off-by: snowf14k3 <60956553+snowf14k3@users.noreply.github.com>
+---
+ drivers/media/platform/qcom/venus/venc.c | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+diff --git a/drivers/media/platform/qcom/venus/venc.c b/drivers/media/platform/qcom/venus/venc.c
+index 88f203f15..9c91ed420 100644
+--- a/drivers/media/platform/qcom/venus/venc.c
++++ b/drivers/media/platform/qcom/venus/venc.c
+@@ -328,8 +328,19 @@ static int venc_g_fmt(struct file *file, void *fh, struct v4l2_format *f)
+ 		pixmp->height = inst->out_height;
+ 	}
+ 
++	if (IS_IRIS1(inst->core))
++		pixmp->plane_fmt[0].sizeimage = 0;
++
+ 	venc_try_fmt_common(inst, f);
+ 
++	if (IS_IRIS1(inst->core) &&
++	    vb2_is_busy(v4l2_m2m_get_vq(inst->m2m_ctx, f->type))) {
++		u32 size = V4L2_TYPE_IS_OUTPUT(f->type) ? inst->input_buf_size :
++							      inst->output_buf_size;
++
++		pixmp->plane_fmt[0].sizeimage = max(pixmp->plane_fmt[0].sizeimage, size);
++	}
++
+ 	return 0;
+ }
+ 
+-- 
+2.43.0
+

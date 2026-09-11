@@ -1,0 +1,87 @@
+From 62c49efc6694615df6260002046bb71da127d7b3 Mon Sep 17 00:00:00 2001
+From: snowf14k3 <60956553+snowf14k3@users.noreply.github.com>
+Date: Fri, 11 Sep 2026 23:03:35 +0800
+Subject: [PATCH] media: venus: describe SM8150 IRIS1 codec resources
+
+Select HFI4 and IRIS1, a single video core with two VPP pipes, and the
+separate CVP island as a shared firmware dependency. Provide both
+video-decoder and video-encoder child nodes. All clocks are managed
+by the IRIS1 parent PM path, not by the AR50 per-core clock groups.
+
+Use the downstream non-secure IOVA end and protected-region split.
+The device tree must reserve the lower protected IOVA range; the DMA
+mask alone is not sufficient. Rates and voltage votes come from DT.
+
+Use the downstream 6533000 kB/s bus ceiling for initial no-LLCC-slice
+operation instead of inventing an unvalidated per-load bandwidth model.
+This is deliberately conservative and not power/performance tuned.
+
+Reference: Android Q sm8150-vidc.dtsi, sm8150.dtsi pil Venus node,
+and msm_vidc_platform.c sm8150_data/common_data. Firmware path is a
+default and must be verified or overridden in the board device tree.
+
+Risk: platform binding activates all previously isolated IRIS1 paths.
+Validate both codec nodes, firmware authentication, IOMMU aperture and
+all resource dependencies before any real frame submission.
+
+Signed-off-by: snowf14k3 <60956553+snowf14k3@users.noreply.github.com>
+---
+ drivers/media/platform/qcom/venus/core.c | 35 ++++++++++++++++++++++++
+ 1 file changed, 35 insertions(+)
+
+diff --git a/drivers/media/platform/qcom/venus/core.c b/drivers/media/platform/qcom/venus/core.c
+index 7e639760c..f460645af 100644
+--- a/drivers/media/platform/qcom/venus/core.c
++++ b/drivers/media/platform/qcom/venus/core.c
+@@ -1119,6 +1119,40 @@ static const struct venus_resources qcm2290_res = {
+ 	.min_fw = &min_fw,
+ };
+ 
++/* Conservative no-system-cache vote from the downstream bus ceiling. */
++static const struct bw_tbl sm8150_bw_table[] = {
++	{ 0, 6533000, 0, 6533000, 0 },
++};
++
++static const struct venus_resources sm8150_res = {
++	.bw_tbl_enc = sm8150_bw_table,
++	.bw_tbl_enc_size = ARRAY_SIZE(sm8150_bw_table),
++	.bw_tbl_dec = sm8150_bw_table,
++	.bw_tbl_dec_size = ARRAY_SIZE(sm8150_bw_table),
++	.clks = { "iface", "vcodec0_bus", "cvp_bus", "core",
++		  "vcodec0_core", "cvp_core", "bus" },
++	.clks_num = 7,
++	.resets = { "bus", "core", "vcodec0", "cvp" },
++	.resets_num = 4,
++	.vcodec_pmdomains = (const char *[]) { "venus", "vcodec0", "cvp" },
++	.vcodec_pmdomains_num = 3,
++	.opp_pmdomain = (const char *[]) { "mmcx" },
++	.vcodec_num = 1,
++	.max_load = 3916800,
++	.hfi_version = HFI_VERSION_4XX,
++	.vpu_version = VPU_VERSION_IRIS1,
++	.num_vpp_pipes = 2,
++	.vmem_id = VIDC_RESOURCE_NONE,
++	.dma_mask = 0xe0000000 - 1,
++	.cp_start = 0,
++	.cp_size = 0x25800000,
++	.cp_nonpixel_start = 0x1000000,
++	.cp_nonpixel_size = 0x24800000,
++	.fwname = "qcom/sm8150/venus.mbn",
++	.dec_nodename = "video-decoder",
++	.enc_nodename = "video-encoder",
++};
++
+ static const struct of_device_id venus_dt_match[] = {
+ 	{ .compatible = "qcom,msm8916-venus", .data = &msm8916_res, },
+ 	{ .compatible = "qcom,msm8996-venus", .data = &msm8996_res, },
+@@ -1129,6 +1163,7 @@ static const struct of_device_id venus_dt_match[] = {
+ 	{ .compatible = "qcom,sdm660-venus", .data = &sdm660_res, },
+ 	{ .compatible = "qcom,sdm845-venus", .data = &sdm845_res, },
+ 	{ .compatible = "qcom,sdm845-venus-v2", .data = &sdm845_res_v2, },
++	{ .compatible = "qcom,sm8150-venus", .data = &sm8150_res, },
+ 	{ .compatible = "qcom,sm8250-venus", .data = &sm8250_res, },
+ 	{ }
+ };
+-- 
+2.43.0
+

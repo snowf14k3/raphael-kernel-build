@@ -1,0 +1,43 @@
+From b0023fcdc52a826cade8fb225255d77c0640ee4b Mon Sep 17 00:00:00 2001
+From: snowf14k3 <60956553+snowf14k3@users.noreply.github.com>
+Date: Fri, 11 Sep 2026 22:57:40 +0800
+Subject: [PATCH] media: venus: avoid the AR50 AXI halt sequence on IRIS1
+
+IRIS1 uses HFI4 packets but not the AR50 wrapper AXI halt sequence.
+The VPU5 downstream suspend path waits for firmware power-collapse
+readiness, sends the secure suspend request, then disables resources.
+It does not access WRAPPER_CPU_AXI_HALT or poll its AR50 status bit.
+
+Skip only that legacy MMIO sequence for IRIS1 after the existing secure
+suspend call succeeds. Keep the HFI idle/PC_READY checks and SCM error
+handling, as well as all other VPU paths.
+
+Reference: Android Q venus_hfi.c __suspend(), __venus_power_off() and
+__power_collapse(), downstream 192eca8550f95c.
+
+This changes power-down behavior and requires idle/resume and repeated
+session testing on hardware before any stability claim. It does not
+replace a proper SM8150 clock/reset/power-domain resource description.
+
+Signed-off-by: snowf14k3 <60956553+snowf14k3@users.noreply.github.com>
+---
+ drivers/media/platform/qcom/venus/hfi_venus.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/media/platform/qcom/venus/hfi_venus.c b/drivers/media/platform/qcom/venus/hfi_venus.c
+index e59e11c65..f3060e1eb 100644
+--- a/drivers/media/platform/qcom/venus/hfi_venus.c
++++ b/drivers/media/platform/qcom/venus/hfi_venus.c
+@@ -581,7 +581,8 @@ static int venus_halt_axi(struct venus_hfi_device *hdev)
+ 	u32 mask_val;
+ 	int ret;
+ 
+-	if (IS_AR50_LITE(hdev->core))
++	/* VPU5 powers down after the firmware/SCM suspend handshake. */
++	if (IS_IRIS1(hdev->core) || IS_AR50_LITE(hdev->core))
+ 		return 0;
+ 
+ 	if (IS_IRIS2(hdev->core) || IS_IRIS2_1(hdev->core)) {
+-- 
+2.43.0
+

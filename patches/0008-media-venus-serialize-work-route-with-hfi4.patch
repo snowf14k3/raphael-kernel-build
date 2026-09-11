@@ -1,0 +1,58 @@
+From 86edccbece73efad3006103772d92aab5fcfc945 Mon Sep 17 00:00:00 2001
+From: snowf14k3 <60956553+snowf14k3@users.noreply.github.com>
+Date: Fri, 11 Sep 2026 22:53:15 +0800
+Subject: [PATCH] media: venus: serialize work-route properties with HFI4
+
+VPU5 uses HFI4 packetization and already sends PARAM_WORK_ROUTE in
+the Android Q driver. The baseline only serializes this property from
+its HFI6 switch, so adding an IRIS1 call site alone returns an error.
+Move the existing identical wire representation to the HFI4 switch.
+HFI6 retains the same representation through its existing fallback.
+
+Reference: Android Q hfi_packetization.c HAL_PARAM_VIDEO_WORK_ROUTE
+and venus_hfi.c __initialize_packetization(), downstream 192eca8550f95c.
+
+Risk is limited to accepting this property on HFI4. No existing HFI4
+call sites start sending it until a separate platform-specific change.
+Validate the packet size, type, session id and route, plus HFI6 parity.
+
+Signed-off-by: snowf14k3 <60956553+snowf14k3@users.noreply.github.com>
+---
+ drivers/media/platform/qcom/venus/hfi_cmds.c | 14 +++++++-------
+ 1 file changed, 7 insertions(+), 7 deletions(-)
+
+diff --git a/drivers/media/platform/qcom/venus/hfi_cmds.c b/drivers/media/platform/qcom/venus/hfi_cmds.c
+index 3ae063094..16377326d 100644
+--- a/drivers/media/platform/qcom/venus/hfi_cmds.c
++++ b/drivers/media/platform/qcom/venus/hfi_cmds.c
+@@ -1225,6 +1225,13 @@ pkt_session_set_property_4xx(struct hfi_session_set_property_pkt *pkt,
+ 		pkt->shdr.hdr.size += sizeof(u32) + sizeof(*wm);
+ 		break;
+ 	}
++	case HFI_PROPERTY_PARAM_WORK_ROUTE: {
++		struct hfi_video_work_route *in = pdata, *wr = prop_data;
++
++		wr->video_work_route = in->video_work_route;
++		pkt->shdr.hdr.size += sizeof(u32) + sizeof(*wr);
++		break;
++	}
+ 	case HFI_PROPERTY_CONFIG_VIDEOCORES_USAGE: {
+ 		struct hfi_videocores_usage_type *in = pdata, *cu = prop_data;
+ 
+@@ -1334,13 +1341,6 @@ pkt_session_set_property_6xx(struct hfi_session_set_property_pkt *pkt,
+ 		pkt->shdr.hdr.size += sizeof(u32) + sizeof(*cq);
+ 		break;
+ 	}
+-	case HFI_PROPERTY_PARAM_WORK_ROUTE: {
+-		struct hfi_video_work_route *in = pdata, *wr = prop_data;
+-
+-		wr->video_work_route = in->video_work_route;
+-		pkt->shdr.hdr.size += sizeof(u32) + sizeof(*wr);
+-		break;
+-	}
+ 	default:
+ 		return pkt_session_set_property_4xx(pkt, cookie, ptype, pdata);
+ 	}
+-- 
+2.43.0
+

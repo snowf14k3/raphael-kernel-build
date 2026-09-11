@@ -1,0 +1,59 @@
+From 1e7a1a342abf71bc6f9f7b74ff125e76657d53da Mon Sep 17 00:00:00 2001
+From: snowf14k3 <60956553+snowf14k3@users.noreply.github.com>
+Date: Fri, 11 Sep 2026 22:52:25 +0800
+Subject: [PATCH] media: venus: initialize the IRIS1 DSP queue fallback
+
+VPU5 initializes the DSP queue registers from the CPU queue before
+booting firmware, even when no separate CVP queues are enabled. Mirror
+that fallback only for IRIS1. Do not enable CVP or allocate DSP buffers.
+The legacy CPU CS layout remains unchanged.
+
+Reference: Android Q venus_hfi.c setup_dsp_uc_memmap_vpu5(), lines
+4691-4707; vidc_hfi_io.h HFI_DSP_* definitions, at downstream
+192eca8550f95c2eec58a474793d1d93fc1b3b67.
+
+Hardware validation: firmware SYS_INIT_DONE after cold boot and resume;
+this is not a claim that either codec session has been tested.
+
+Signed-off-by: snowf14k3 <60956553+snowf14k3@users.noreply.github.com>
+---
+ drivers/media/platform/qcom/venus/hfi_venus.c    | 6 ++++++
+ drivers/media/platform/qcom/venus/hfi_venus_io.h | 5 +++++
+ 2 files changed, 11 insertions(+)
+
+diff --git a/drivers/media/platform/qcom/venus/hfi_venus.c b/drivers/media/platform/qcom/venus/hfi_venus.c
+index 7c3440dd0..e59e11c65 100644
+--- a/drivers/media/platform/qcom/venus/hfi_venus.c
++++ b/drivers/media/platform/qcom/venus/hfi_venus.c
+@@ -553,6 +553,12 @@ static int venus_run(struct venus_hfi_device *hdev)
+ 	if (hdev->sfr.da)
+ 		writel(hdev->sfr.da, cpu_cs_base + SFR_ADDR);
+ 
++	if (IS_IRIS1(hdev->core)) {
++		writel(hdev->ifaceq_table.da, cpu_cs_base + CPU_CS_DSP_QTBL_ADDR);
++		writel(hdev->ifaceq_table.da, cpu_cs_base + CPU_CS_DSP_UC_REGION_ADDR);
++		writel(SHARED_QSIZE, cpu_cs_base + CPU_CS_DSP_UC_REGION_SIZE);
++	}
++
+ 	ret = venus_boot_core(hdev);
+ 	if (ret) {
+ 		dev_err(dev, "failed to reset venus core\n");
+diff --git a/drivers/media/platform/qcom/venus/hfi_venus_io.h b/drivers/media/platform/qcom/venus/hfi_venus_io.h
+index f2c3064c4..58b40bb62 100644
+--- a/drivers/media/platform/qcom/venus/hfi_venus_io.h
++++ b/drivers/media/platform/qcom/venus/hfi_venus_io.h
+@@ -25,6 +25,11 @@
+ 
+ #define CPU_CS_A2HSOFTINTCLR			0x1c
+ 
++/* IRIS1 firmware expects a DSP queue map even without a CVP session. */
++#define CPU_CS_DSP_QTBL_ADDR			0x34
++#define CPU_CS_DSP_UC_REGION_ADDR		0x38
++#define CPU_CS_DSP_UC_REGION_SIZE		0x3c
++
+ #define VIDC_CTRL_INIT				0x48
+ #define VIDC_CTRL_INIT_RESERVED_BITS31_1_MASK	0xfffffffe
+ #define VIDC_CTRL_INIT_RESERVED_BITS31_1_SHIFT	1
+-- 
+2.43.0
+

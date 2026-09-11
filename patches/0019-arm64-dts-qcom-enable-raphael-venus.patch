@@ -1,0 +1,45 @@
+From cf8dcefcc3cefb620c4fc6985ca92a8323a6e585 Mon Sep 17 00:00:00 2001
+From: snowf14k3 <60956553+snowf14k3@users.noreply.github.com>
+Date: Fri, 11 Sep 2026 23:08:55 +0800
+Subject: [PATCH] arm64: dts: qcom: enable the Raphael Venus codec
+
+The pinned Raphael board declares QCOM_ID_SM8150 revision 0x20000,
+so use the V2 resource graph instead of waiting on a silicon assumption
+that the selected board profile already resolves. Preserve its existing
+5 MiB firmware carveout at 0x97600000 and every audio/display fix.
+
+Use the same case-sensitive board firmware directory as its other
+remote processors. The Venus image must be installed as venus.mbn;
+its presence, provenance and version remain a target preflight check,
+not something a successful kernel build can establish.
+
+Both codec children are created by the existing resource-driven
+OF_DYNAMIC path (enabled by the Raphael configuration). This enables
+both directions, not a declaration of successful hardware decoding or
+encoding. Validate firmware authentication, both nodes, and H.264
+round-trip tests before any stability claim.
+
+Signed-off-by: snowf14k3 <60956553+snowf14k3@users.noreply.github.com>
+---
+ arch/arm64/boot/dts/qcom/sm8150-xiaomi-raphael.dts | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8150-xiaomi-raphael.dts b/arch/arm64/boot/dts/qcom/sm8150-xiaomi-raphael.dts
+index f0028d363..a2916ade2 100644
+--- a/arch/arm64/boot/dts/qcom/sm8150-xiaomi-raphael.dts
++++ b/arch/arm64/boot/dts/qcom/sm8150-xiaomi-raphael.dts
+@@ -1312,6 +1312,11 @@ &usb_1_hsphy {
+ 	status = "okay";
+ };
+ 
++&venus {
++	firmware-name = "qcom/sm8150/Xiaomi/raphael/venus.mbn";
++	status = "okay";
++};
++
+ &wifi {
+ 	vdd-0.8-cx-mx-supply = <&vdda_wcss_pll>;
+ 	vdd-1.8-xo-supply = <&vreg_pmu_xo>;
+-- 
+2.43.0
+

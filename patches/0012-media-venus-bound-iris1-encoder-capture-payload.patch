@@ -1,0 +1,48 @@
+From 6fab0ee56848e066611f76f9e1c02253fb28d05f Mon Sep 17 00:00:00 2001
+From: snowf14k3 <60956553+snowf14k3@users.noreply.github.com>
+Date: Fri, 11 Sep 2026 22:55:01 +0800
+Subject: [PATCH] media: venus: bound IRIS1 encoder capture payloads
+
+Reject a returned frame when the firmware offset or payload exceeds
+the allocated CAPTURE plane. Check with subtraction before adding,
+so an overflowing offset plus payload is never reported as valid.
+Return that buffer in error with an empty payload.
+
+The firmware wire contract carries separate offset and filled length;
+see Android Q hfi_response_handler.c and hfi_session_fill_buffer_done
+handling. Linux V4L2 bytesused includes data_offset, so keep the current
+bytesused-plus-offset behavior for valid replies.
+
+This is an encoder-only boundary check, not a decoder or DMA rewrite.
+Validate zero-length EOS, exact end-of-plane payloads, nonzero offsets,
+and oversized or overflowing values with a host boundary test.
+
+Signed-off-by: snowf14k3 <60956553+snowf14k3@users.noreply.github.com>
+---
+ drivers/media/platform/qcom/venus/venc.c | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/drivers/media/platform/qcom/venus/venc.c b/drivers/media/platform/qcom/venus/venc.c
+index 15ea17f15..88f203f15 100644
+--- a/drivers/media/platform/qcom/venus/venc.c
++++ b/drivers/media/platform/qcom/venus/venc.c
+@@ -1510,7 +1510,16 @@ static void venc_buf_done(struct venus_inst *inst, unsigned int buf_type,
+ 
+ 	if (type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) {
+ 		vb = &vbuf->vb2_buf;
++		if (IS_IRIS1(inst->core) &&
++		    (data_offset > vb2_plane_size(vb, 0) ||
++		     bytesused > vb2_plane_size(vb, 0) - data_offset)) {
++			vb2_set_plane_payload(vb, 0, 0);
++			vb->planes[0].data_offset = 0;
++			v4l2_m2m_buf_done(vbuf, VB2_BUF_STATE_ERROR);
++			return;
++		}
+ 		vb2_set_plane_payload(vb, 0, bytesused + data_offset);
++
+ 		vb->planes[0].data_offset = data_offset;
+ 		vb->timestamp = timestamp_us * NSEC_PER_USEC;
+ 		vbuf->sequence = inst->sequence_cap++;
+-- 
+2.43.0
+

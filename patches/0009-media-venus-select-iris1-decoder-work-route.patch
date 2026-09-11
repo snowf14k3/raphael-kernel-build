@@ -1,0 +1,69 @@
+From 946030ddd968dc26b5f14f2a3200d74cb635f8b2 Mon Sep 17 00:00:00 2001
+From: snowf14k3 <60956553+snowf14k3@users.noreply.github.com>
+Date: Fri, 11 Sep 2026 22:53:15 +0800
+Subject: [PATCH] media: venus: select the IRIS1 decoder work route
+
+Enable the existing decoder work-route property for IRIS1 using the
+platform pipe count. Match the VPU5 exceptions: MPEG2 and interlaced
+H.264 use one pipe. Configure the route with output configuration so
+the sequence-header picture structure is considered on reconfiguration.
+
+Reference: Android Q msm_vidc_clocks.c msm_vidc_decide_work_route(),
+lines 1228-1239, downstream 192eca8550f95c.
+
+No encoder, DMA or power-management changes. HFI4 serialization must
+precede this patch. Validate progressive H.264/HEVC and later picture
+structure changes; the baseline IRIS2 route value stays unchanged.
+
+Signed-off-by: snowf14k3 <60956553+snowf14k3@users.noreply.github.com>
+---
+ drivers/media/platform/qcom/venus/vdec.c | 16 +++++++++++-----
+ 1 file changed, 11 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/media/platform/qcom/venus/vdec.c b/drivers/media/platform/qcom/venus/vdec.c
+index daa8f5661..553554fcd 100644
+--- a/drivers/media/platform/qcom/venus/vdec.c
++++ b/drivers/media/platform/qcom/venus/vdec.c
+@@ -733,10 +733,16 @@ static int vdec_set_work_route(struct venus_inst *inst)
+ 	u32 ptype = HFI_PROPERTY_PARAM_WORK_ROUTE;
+ 	struct hfi_video_work_route wr;
+ 
+-	if (!(IS_IRIS2(inst->core) || IS_IRIS2_1(inst->core)))
++	if (!(IS_IRIS1(inst->core) || IS_IRIS2(inst->core) ||
++	      IS_IRIS2_1(inst->core)))
+ 		return 0;
+ 
+ 	wr.video_work_route = inst->core->res->num_vpp_pipes;
++	if (IS_IRIS1(inst->core) &&
++	    (inst->hfi_codec == HFI_VIDEO_CODEC_MPEG2 ||
++	     (inst->hfi_codec == HFI_VIDEO_CODEC_H264 &&
++	      inst->pic_struct != HFI_INTERLACE_FRAME_PROGRESSIVE)))
++		wr.video_work_route = 1;
+ 
+ 	return hfi_session_set_property(inst, ptype, &wr);
+ }
+@@ -762,6 +768,10 @@ static int vdec_output_conf(struct venus_inst *inst)
+ 	if (ret)
+ 		return ret;
+ 
++	ret = vdec_set_work_route(inst);
++	if (ret)
++		return ret;
++
+ 	if (core->res->hfi_version == HFI_VERSION_1XX) {
+ 		ptype = HFI_PROPERTY_PARAM_VDEC_CONTINUE_DATA_TRANSFER;
+ 		ret = hfi_session_set_property(inst, ptype, &en);
+@@ -1151,10 +1161,6 @@ static int vdec_start_output(struct venus_inst *inst)
+ 	if (ret)
+ 		return ret;
+ 
+-	ret = vdec_set_work_route(inst);
+-	if (ret)
+-		return ret;
+-
+ 	ret = vdec_output_conf(inst);
+ 	if (ret)
+ 		return ret;
+-- 
+2.43.0
+

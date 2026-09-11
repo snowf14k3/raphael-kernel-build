@@ -34,13 +34,13 @@
 
 ## 当前状态
 
-已完成固定 `ab4ce59` 与 Xiaomi Android Q 下游的首轮源码审计，详见 [六类缺口清单与验证边界](docs/venus/audit-ab4ce59.md)。
+已从固定 `ab4ce59` 连续迁移共享 SM8150/VPU5/HFI4 平台依赖、基本 decoder 和基本 encoder。Raphael V2 设备树已启用 Venus，两个 codec 子节点由驱动创建；详见 [本批次改动、依据与验收边界](docs/venus/codec-stage1.md)。[首次缺口审计](docs/venus/audit-ab4ce59.md) 保留为迁移前快照，不代表这些接入项仍然缺失。
 
-已加入一个前置补丁 `0005-media-venus-preserve-iris1-interrupt-mask.patch`：仅修正 IRIS1 启动时的 interrupt mask 保留语义。补丁通过 checkpatch，并通过真实函数提取后的 1,069 项 host MMIO 模拟检查；原始基线作为负对照可复现差异。
+Venus core/decoder/encoder 的 ARM64 目标编译和 Raphael DTB 编译通过。主机回归包括 IRQ 1,069 个用例、实际 HFI packetizer/codec 函数 136 项断言、PM/reset 535 项断言；这些不是实机测试。
 
-**尚未加入 SM8150 Venus resource / DTS 接入，尚未进行本基线的实机硬解验证。此补丁不会单独启用 H.264 / HEVC 解码，不应据此发布可用性声明。**
+**尚未进行本批次实机编解码验证。固件路径要求为 `qcom/sm8150/Xiaomi/raphael/venus.mbn`，文件实际存在性及版本必须在目标机核实。不能把模块、格式枚举或主机测试通过写成硬解/硬编已可用。**
 
-回归入口：`tests/venus/test-iris1-irq-mask.sh`。测试不会操作硬件，也不会往内核加入 diagnostic 代码。
+回归入口在 `tests/venus/`，不会操作硬件，也不往内核加入 diagnostic 代码。完整包是否生成，以当前 `out/raphael-venus-hwaccel/last-build.env` 和 `build-info.txt` 为准。
 
 之前仓库历史中存在过一系列 Venus 测试和 bring-up 提交，但这些旧实验不会直接带入本分支。需要使用的逻辑会重新核对上游、下游 Android 内核和实机行为后，再整理成新的补丁。
 
@@ -66,7 +66,7 @@ Venus 相关修改后续会继续使用编号 patch，并在 `patches/series` �
 
 ## 构建
 
-**按功能里程碑集中构建，不按单个 patch 构建。** 同一解码阶段连续整理多份独立补丁，中间只做应用检查、静态检查和必要的局部测试。SM8150 平台/DTS、VPU5/HFI4 启动与 session、必要的 PM/时钟/IOMMU、H.264 buffer/format 路径在源码层面基本补齐后，才统一完整构建并进行实机验证；不为几行前置修正反复运行 `bindeb-pkg`。第一轮仍以基本解码为目标，不等编码迁移完才测试。
+**按功能里程碑集中构建，不按单个 patch 构建。** 用户最新要求：下一次完整构建必须同时具备基本解码和基本编码。连续整理独立补丁，中间执行应用/静态检查和必要局部测试；共享 SM8150 平台/DTS、VPU5/HFI4 启动、PM/时钟/IOMMU，以及两条 session/work-route/buffer/format 路径在源码层面均具备实机验证条件后，再统一 `local-build.sh`。首轮同时验证 H.264 -> NV12 与 NV12 -> H.264，不能仅完成 decoder 就打包；HEVC/Main10 另记实际结果。
 
 2026-09-11 针对 `0005` 前置补丁启动的全量构建已按用户要求中止，没有生成可安装测试包；补丁及已有局部测试结果保留。
 

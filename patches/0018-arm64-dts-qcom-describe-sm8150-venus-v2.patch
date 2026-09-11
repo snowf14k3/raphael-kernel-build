@@ -1,0 +1,131 @@
+From c83781458d95f46290074fbcfe2c605fe02325a8 Mon Sep 17 00:00:00 2001
+From: snowf14k3 <60956553+snowf14k3@users.noreply.github.com>
+Date: Fri, 11 Sep 2026 23:05:02 +0800
+Subject: [PATCH] arm64: dts: qcom: describe SM8150 Venus V2 resources
+
+Add the shared IRIS1 resource graph with V2 stream IDs and OPPs matching
+the fixed tree videocc-sm8150 driver. Android Q sm8150-v2.dtsi overrides
+the base SID 0x1300 with 0x2300 and replaces the allowed frequency table;
+using only the base sm8150-vidc.dtsi would miss both changes.
+
+Use a 1 MiB codec MMIO window so it does not overlap the independently
+managed videocc at 0x0ab00000. Keep firmware memory-region index zero.
+Reserve [0, 0x25800000) in IOVA space through generic iommu-addresses,
+without reserving physical RAM. Together with the driver DMA mask this
+matches the downstream non-secure address pool.
+
+The node remains disabled. Board activation requires verifying silicon
+revision and firmware location; this does not assert all Raphael units
+have V2 silicon. The downstream overlay supports several base DTBs.
+
+Reference: Android Q sm8150-vidc.dtsi, sm8150-v2.dtsi:367-385,
+videocc-sm8150.c V2 fixup and vdd-level mapping; fixed Linux 7.1
+of_iommu_get_resv_regions() for the generic IOVA exclusion.
+
+Validate DTC/schema, resource and OPP resolution, IOVA reservation and
+both codec nodes before running either session on hardware.
+
+Signed-off-by: snowf14k3 <60956553+snowf14k3@users.noreply.github.com>
+---
+ arch/arm64/boot/dts/qcom/sm8150.dtsi | 78 ++++++++++++++++++++++++++++
+ 1 file changed, 78 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8150.dtsi b/arch/arm64/boot/dts/qcom/sm8150.dtsi
+index e591140a2..654a7e512 100644
+--- a/arch/arm64/boot/dts/qcom/sm8150.dtsi
++++ b/arch/arm64/boot/dts/qcom/sm8150.dtsi
+@@ -755,6 +755,10 @@ mpss_mem: memory@8d800000 {
+ 			no-map;
+ 		};
+ 
++		venus_iova: venus-iova {
++			iommu-addresses = <&venus 0 0 0 0x25800000>;
++		};
++
+ 		venus_mem: memory@96e00000 {
+ 			reg = <0x0 0x96e00000 0x0 0x500000>;
+ 			no-map;
+@@ -3815,6 +3819,80 @@ usb_2_dwc3: usb@a800000 {
+ 			};
+ 		};
+ 
++		venus: video-codec@aa00000 {
++			compatible = "qcom,sm8150-venus";
++			reg = <0 0x0aa00000 0 0x100000>;
++			interrupts = <GIC_SPI 174 IRQ_TYPE_LEVEL_HIGH>;
++
++			clocks = <&gcc GCC_VIDEO_AXIC_CLK>,
++				 <&gcc GCC_VIDEO_AXI0_CLK>,
++				 <&gcc GCC_VIDEO_AXI1_CLK>,
++				 <&videocc VIDEO_CC_MVSC_CORE_CLK>,
++				 <&videocc VIDEO_CC_MVS0_CORE_CLK>,
++				 <&videocc VIDEO_CC_MVS1_CORE_CLK>,
++				 <&videocc VIDEO_CC_IRIS_AHB_CLK>;
++			clock-names = "iface", "vcodec0_bus", "cvp_bus", "core",
++				      "vcodec0_core", "cvp_core", "bus";
++
++			power-domains = <&videocc VENUS_GDSC>,
++					<&videocc VCODEC0_GDSC>,
++					<&videocc VCODEC1_GDSC>,
++					<&rpmhpd SM8150_MMCX>;
++			power-domain-names = "venus", "vcodec0", "cvp", "mmcx";
++			operating-points-v2 = <&venus_opp_table>;
++
++			resets = <&gcc GCC_VIDEO_AXIC_CLK_BCR>,
++				 <&videocc VIDEO_CC_MVSC_CORE_CLK_BCR>,
++				 <&gcc GCC_VIDEO_AXI0_CLK_BCR>,
++				 <&gcc GCC_VIDEO_AXI1_CLK_BCR>;
++			reset-names = "bus", "core", "vcodec0", "cvp";
++
++			interconnects = <&mmss_noc MASTER_VIDEO_P0 0 &mc_virt SLAVE_EBI_CH0 0>,
++					<&gem_noc MASTER_AMPSS_M0 0 &config_noc SLAVE_VENUS_CFG 0>;
++			interconnect-names = "video-mem", "cpu-cfg";
++
++			/* V2 SIDs match the V2 rates implemented by videocc-sm8150. */
++			iommus = <&apps_smmu 0x2300 0x60>;
++			memory-region = <&venus_mem>, <&venus_iova>;
++			memory-region-names = "firmware", "iova";
++
++			status = "disabled";
++
++			venus_opp_table: opp-table {
++				compatible = "operating-points-v2";
++
++				opp-200000000 {
++					opp-hz = /bits/ 64 <200000000>;
++					required-opps = <&rpmhpd_opp_min_svs>;
++				};
++
++				opp-240000000 {
++					opp-hz = /bits/ 64 <240000000>;
++					required-opps = <&rpmhpd_opp_low_svs>;
++				};
++
++				opp-338000000 {
++					opp-hz = /bits/ 64 <338000000>;
++					required-opps = <&rpmhpd_opp_svs>;
++				};
++
++				opp-365000000 {
++					opp-hz = /bits/ 64 <365000000>;
++					required-opps = <&rpmhpd_opp_svs_l1>;
++				};
++
++				opp-444000000 {
++					opp-hz = /bits/ 64 <444000000>;
++					required-opps = <&rpmhpd_opp_nom>;
++				};
++
++				opp-533000000 {
++					opp-hz = /bits/ 64 <533000000>;
++					required-opps = <&rpmhpd_opp_turbo>;
++				};
++			};
++		};
++
+ 		videocc: clock-controller@ab00000 {
+ 			compatible = "qcom,sm8150-videocc";
+ 			reg = <0 0x0ab00000 0 0x10000>;
+-- 
+2.43.0
+

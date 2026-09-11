@@ -1,0 +1,42 @@
+From d87c175b83250f2fc2afd02cb64aff7b01eccc01 Mon Sep 17 00:00:00 2001
+From: snowf14k3 <60956553+snowf14k3@users.noreply.github.com>
+Date: Fri, 11 Sep 2026 22:52:25 +0800
+Subject: [PATCH] media: venus: restore IRIS1 CPU clock configuration on enable
+
+The VPU5 downstream clock enable hook clears CPU_CGC_DIS and
+CPU_CLOCK_CONFIG after the clocks are prepared. Do the same after a
+successful core clock enable on IRIS1, including runtime resume. The
+no-TZ reset helper is not used by the normal authenticated firmware path.
+
+Reference: Android Q venus_hfi.c clock_config_on_enable_vpu5() and its
+call in __prepare_enable_clks(), downstream 192eca8550f95c.
+
+Only two IRIS1-specific MMIO writes are added. Clock rates, power-domain
+selection and reset sequencing are deliberately separate changes.
+Hardware validation: cold boot and repeated idle/resume of both codec
+sessions; host compilation cannot validate the power sequence.
+
+Signed-off-by: snowf14k3 <60956553+snowf14k3@users.noreply.github.com>
+---
+ drivers/media/platform/qcom/venus/pm_helpers.c | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/drivers/media/platform/qcom/venus/pm_helpers.c b/drivers/media/platform/qcom/venus/pm_helpers.c
+index f0269524a..5d04a57c5 100644
+--- a/drivers/media/platform/qcom/venus/pm_helpers.c
++++ b/drivers/media/platform/qcom/venus/pm_helpers.c
+@@ -70,6 +70,11 @@ static int core_clks_enable(struct venus_core *core)
+ 			goto err;
+ 	}
+ 
++	if (IS_IRIS1(core)) {
++		writel(0, core->wrapper_base + WRAPPER_CPU_CGC_DIS);
++		writel(0, core->wrapper_base + WRAPPER_CPU_CLOCK_CONFIG);
++	}
++
+ 	return 0;
+ err:
+ 	while (i--)
+-- 
+2.43.0
+

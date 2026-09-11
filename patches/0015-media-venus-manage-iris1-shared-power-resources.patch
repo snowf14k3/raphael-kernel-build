@@ -1,0 +1,172 @@
+From 2018e3592aa06f1df21d9a325ba25beb31e7de07 Mon Sep 17 00:00:00 2001
+From: snowf14k3 <60956553+snowf14k3@users.noreply.github.com>
+Date: Fri, 11 Sep 2026 23:01:54 +0800
+Subject: [PATCH] media: venus: manage IRIS1 islands as shared firmware
+ resources
+
+VPU5 powers the controller, video and CVP islands before resetting the
+bridges and enabling clocks. MVS1 is a CVP resource, not a second video
+codec core to assign to an encoder. Keep these islands in the parent
+firmware power cycle and retain existing single-core session selection.
+
+Represent all six downstream clocks plus the firmware proxy AHB clock,
+and all four bridge resets. Assert the whole reset group before the
+delay and release every asserted reset on failure. Acquire power domains
+with balanced runtime-PM references and unwind in reverse order.
+
+The initial implementation keeps video/CVP in software control while
+firmware is active; it does not enable CVP sessions or inter-frame
+hardware power collapse. Runtime idle still uses the normal firmware
+PC_READY and secure suspend handshake. Power optimization is deferred.
+
+Reference: Android Q sm8150-vidc.dtsi; sm8150.dtsi pil Venus clocks;
+venus_hfi.c __venus_power_on(), __prepare_ahb2axi_bridge(), and the
+msm_vidc_fw_low_power_mode-controlled regulator handoff.
+
+Risk: this shared PM logic affects both codec directions. Validate
+failure unwinds, cold boot, both sessions, idle/resume and shutdown.
+Other VPU versions retain the existing paths.
+
+Signed-off-by: snowf14k3 <60956553+snowf14k3@users.noreply.github.com>
+---
+ drivers/media/platform/qcom/venus/core.h      |  4 +-
+ .../media/platform/qcom/venus/pm_helpers.c    | 93 +++++++++++++++++++
+ 2 files changed, 95 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/media/platform/qcom/venus/core.h b/drivers/media/platform/qcom/venus/core.h
+index 7506f5d0f..3ea69bfb3 100644
+--- a/drivers/media/platform/qcom/venus/core.h
++++ b/drivers/media/platform/qcom/venus/core.h
+@@ -23,9 +23,9 @@
+ #define VDBGH	"VenusHigh: "
+ #define VDBGFW	"VenusFW  : "
+ 
+-#define VIDC_CLKS_NUM_MAX		4
++#define VIDC_CLKS_NUM_MAX		7
+ #define VIDC_VCODEC_CLKS_NUM_MAX	2
+-#define VIDC_RESETS_NUM_MAX		2
++#define VIDC_RESETS_NUM_MAX		4
+ #define VIDC_MAX_HIER_CODING_LAYER 6
+ 
+ #define VENUS_MAX_FPS			240
+diff --git a/drivers/media/platform/qcom/venus/pm_helpers.c b/drivers/media/platform/qcom/venus/pm_helpers.c
+index 38d4abc47..f5d4692fb 100644
+--- a/drivers/media/platform/qcom/venus/pm_helpers.c
++++ b/drivers/media/platform/qcom/venus/pm_helpers.c
+@@ -776,6 +776,19 @@ static int coreid_power_v4(struct venus_inst *inst, int on)
+ 	struct venus_core *core = inst->core;
+ 	int ret;
+ 
++	if (IS_IRIS1(core)) {
++		/* Codec/CVP islands belong to the parent firmware power cycle. */
++		if (on == POWER_ON) {
++			ret = decide_core(inst);
++			if (!ret)
++				inst->core_acquired = true;
++			return ret;
++		}
++		inst->clk_data.core_id = VIDC_CORE_ID_DEFAULT;
++		inst->core_acquired = false;
++		return 0;
++	}
++
+ 	if (legacy_binding)
+ 		return 0;
+ 
+@@ -1031,6 +1044,83 @@ static void core_put_v4(struct venus_core *core)
+ {
+ }
+ 
++static int iris1_reset_bridge(struct venus_core *core)
++{
++	unsigned int i, asserted = 0;
++	int ret = 0, err;
++
++	for (i = 0; i < core->res->resets_num; i++) {
++		ret = reset_control_assert(core->resets[i]);
++		if (ret)
++			break;
++		asserted++;
++	}
++
++	if (asserted)
++		usleep_range(150, 250);
++
++	/* Release every asserted reset, including when assertion failed. */
++	for (i = 0; i < asserted; i++) {
++		err = reset_control_deassert(core->resets[i]);
++		if (!ret)
++			ret = err;
++	}
++
++	return ret;
++}
++
++static int core_power_iris1(struct venus_core *core, int on)
++{
++	struct device *dev = core->dev;
++	unsigned int i, acquired = 0;
++	int ret = 0, err;
++
++	if (!core->pmdomains || core->res->vcodec_pmdomains_num != 3)
++		return -EINVAL;
++
++	if (on != POWER_ON) {
++		core_clks_disable(core);
++		ret = dev_pm_opp_set_rate(dev, 0);
++		for (i = core->res->vcodec_pmdomains_num; i > 0; i--) {
++			err = pm_runtime_put_sync(core->pmdomains->pd_devs[i - 1]);
++			if (!ret && err < 0)
++				ret = err;
++		}
++		return ret;
++	}
++
++	for (i = 0; i < core->res->vcodec_pmdomains_num; i++) {
++		ret = pm_runtime_resume_and_get(core->pmdomains->pd_devs[i]);
++		if (ret < 0)
++			goto unwind;
++		acquired++;
++
++		/*
++		 * Keep video/CVP on throughout the firmware cycle. Inter-frame
++		 * hardware power collapse is a later optimization.
++		 */
++		if (i) {
++			ret = dev_pm_genpd_set_hwmode(core->pmdomains->pd_devs[i], false);
++			if (ret)
++				goto unwind;
++		}
++	}
++
++	ret = iris1_reset_bridge(core);
++	if (ret)
++		goto unwind;
++
++	ret = core_clks_enable(core);
++	if (!ret)
++		return 0;
++
++unwind:
++	dev_pm_opp_set_rate(dev, 0);
++	while (acquired)
++		pm_runtime_put_sync(core->pmdomains->pd_devs[--acquired]);
++	return ret;
++}
++
+ static int core_power_v4(struct venus_core *core, int on)
+ {
+ 	struct device *dev = core->dev;
+@@ -1038,6 +1128,9 @@ static int core_power_v4(struct venus_core *core, int on)
+ 			core->pmdomains->pd_devs[0] : NULL;
+ 	int ret = 0;
+ 
++	if (IS_IRIS1(core))
++		return core_power_iris1(core, on);
++
+ 	if (on == POWER_ON) {
+ 		if (pmctrl) {
+ 			ret = pm_runtime_resume_and_get(pmctrl);
+-- 
+2.43.0
+
