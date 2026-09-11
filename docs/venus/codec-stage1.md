@@ -31,10 +31,10 @@
 | 0016 | SM8150 match/resource、HFI4+IRIS1、一个视频核/两个 VPP 管线、双向子节点 | MVS1 不伪装成第二编码核；带宽先用下游上限，性能/功耗未调优 |
 | 0017 | SM8150 专用 binding，允许 firmware+IOVA 两个 memory-region | 新 binding 已被 MAINTAINERS 的 `media/*venus*` 范围覆盖；schema 验证结果须单独记录 |
 | 0018 | SoC DT 的 V2 SID、OPP、clock/reset/genpd/ICC 与虚拟 IOVA 保留区 | codec 1 MiB MMIO 不与 videocc 重叠；SoC 默认 disabled |
-| 0026 | 对固定 Raphael V2 板级配置启用 Venus，指定板级固件路径 | 固定 DTS 第 41 行已声明 `SM8150 0x20000`；固件实际存在性/版本未验证 |
-| 0027 | G_FMT 报告已分配 IRIS1 encoder 队列的协商尺寸，而非只报旧通用公式 | 真实 G_FMT 包装函数旧版测试失败，修补后通过；非 IRIS1 保持原逻辑 |
+| 0019 | 对固定 Raphael V2 板级配置启用 Venus，指定板级固件路径 | 固定 DTS 第 41 行已声明 `SM8150 0x20000`；固件实际存在性/版本未验证 |
+| 0020 | G_FMT 报告已分配 IRIS1 encoder 队列的协商尺寸，而非只报旧通用公式 | 真实 G_FMT 包装函数旧版测试失败，修补后通过；非 IRIS1 保持原逻辑 |
 
-编号空档不改变应用顺序，实际顺序以 `patches/series` 为准；每个 patch 正文保留独立说明。
+补丁已连续编号，实际顺序以 `patches/series` 为准；每个 patch 正文保留独立说明。
 
 ## 避免重复或错误迁移的决定
 
