@@ -1,0 +1,337 @@
+diff --git a/drivers/gpu/drm/msm/dsi/dsi_host.c b/drivers/gpu/drm/msm/dsi/dsi_host.c
+index 1f08f9eca..73a0129f8 100644
+--- a/drivers/gpu/drm/msm/dsi/dsi_host.c
++++ b/drivers/gpu/drm/msm/dsi/dsi_host.c
+@@ -8,6 +8,7 @@
+ #include <linux/dma-mapping.h>
+ #include <linux/err.h>
+ #include <linux/interrupt.h>
++#include <linux/ktime.h>
+ #include <linux/mfd/syscon.h>
+ #include <linux/of.h>
+ #include <linux/of_graph.h>
+@@ -30,10 +31,28 @@
+ #include "msm_dsc_helper.h"
+ #include "msm_kms.h"
+ #include "msm_gem.h"
++#include "disp/msm_disp_snapshot.h"
+ #include "phy/dsi_phy.h"
+ 
+ #define DSI_RESET_TOGGLE_DELAY_MS 20
+ 
++#define DSI_DIAG_XFER_HISTORY 8
++#define DSI_DIAG_TX_BYTES 16
++
++struct dsi_diag_xfer {
++	u64 seq;
++	u64 queued_ns;
++	u64 start_ns;
++	u64 end_ns;
++	u8 channel;
++	u8 type;
++	u16 flags;
++	u32 tx_len;
++	u32 rx_len;
++	int result;
++	u8 tx[DSI_DIAG_TX_BYTES];
++};
++
+ static int dsi_populate_dsc_params(struct msm_dsi_host *msm_host, struct drm_dsc_config *dsc);
+ 
+ static int dsi_get_version(const void __iomem *base, u32 *major, u32 *minor)
+@@ -146,6 +165,13 @@ struct msm_dsi_host {
+ 	struct mutex cmd_mutex;
+ 	spinlock_t intr_lock; /* Protect interrupt ctrl register */
+ 
++	/* Diagnostic-only history used to correlate DCS transfers with DSI IRQs. */
++	spinlock_t diag_lock;
++	atomic_t diag_err_seq;
++	u64 diag_xfer_seq;
++	u32 diag_xfer_head;
++	struct dsi_diag_xfer diag_xfer[DSI_DIAG_XFER_HISTORY];
++
+ 	u32 err_work_state;
+ 	struct work_struct err_work;
+ 	struct workqueue_struct *workqueue;
+@@ -1619,7 +1645,8 @@ static void dsi_err_worker(struct work_struct *work)
+ 		container_of(work, struct msm_dsi_host, err_work);
+ 	u32 status = msm_host->err_work_state;
+ 
+-	pr_err_ratelimited("%s: status=%x\n", __func__, status);
++	pr_err_ratelimited("%s: status=%x last_event=%d\n", __func__, status,
++			   atomic_read(&msm_host->diag_err_seq));
+ 	if (status & DSI_ERR_STATE_MDP_FIFO_UNDERFLOW)
+ 		dsi_sw_reset(msm_host);
+ 
+@@ -1689,8 +1716,59 @@ static void dsi_fifo_status(struct msm_dsi_host *msm_host)
+ }
+ 
+ 
+-static void dsi_log_error_snapshot(struct msm_dsi_host *msm_host, u32 isr)
++static void dsi_diag_log_xfer_history(struct msm_dsi_host *msm_host,
++				      u32 event, u64 now_ns)
++{
++	struct dsi_diag_xfer history[DSI_DIAG_XFER_HISTORY];
++	unsigned long flags;
++	u32 head;
++	int i;
++
++	spin_lock_irqsave(&msm_host->diag_lock, flags);
++	head = msm_host->diag_xfer_head;
++	memcpy(history, msm_host->diag_xfer, sizeof(history));
++	spin_unlock_irqrestore(&msm_host->diag_lock, flags);
++
++	for (i = 0; i < DSI_DIAG_XFER_HISTORY; i++) {
++		const struct dsi_diag_xfer *x;
++		u32 idx = (head - 1 - i) & (DSI_DIAG_XFER_HISTORY - 1);
++		u64 age_us, wait_us = 0, dur_us = 0;
++		u32 dump_len;
++
++		x = &history[idx];
++		if (!x->seq)
++			continue;
++
++		age_us = now_ns > x->queued_ns ? (now_ns - x->queued_ns) / 1000 : 0;
++		if (x->start_ns > x->queued_ns)
++			wait_us = (x->start_ns - x->queued_ns) / 1000;
++		if (x->start_ns) {
++			u64 end_ns = x->end_ns ? x->end_ns : now_ns;
++
++			if (end_ns > x->start_ns)
++				dur_us = (end_ns - x->start_ns) / 1000;
++		}
++
++		dump_len = min_t(u32, x->tx_len, DSI_DIAG_TX_BYTES);
++		if (dump_len)
++			pr_err_ratelimited(
++				"DSIERR#%u dsi%d xfer[-%d] seq=%llu age_us=%llu wait_us=%llu dur_us=%llu ch=%u type=0x%02x flags=0x%04x tx_len=%u rx_len=%u ret=%d tx=%*ph\n",
++				event, msm_host->id, i, x->seq, age_us, wait_us,
++				dur_us, x->channel, x->type, x->flags, x->tx_len,
++				x->rx_len, x->result, dump_len, x->tx);
++		else
++			pr_err_ratelimited(
++				"DSIERR#%u dsi%d xfer[-%d] seq=%llu age_us=%llu wait_us=%llu dur_us=%llu ch=%u type=0x%02x flags=0x%04x tx_len=%u rx_len=%u ret=%d\n",
++				event, msm_host->id, i, x->seq, age_us, wait_us,
++				dur_us, x->channel, x->type, x->flags, x->tx_len,
++				x->rx_len, x->result);
++	}
++}
++
++static void dsi_log_error_snapshot(struct msm_dsi_host *msm_host, u32 isr,
++				   u32 event)
+ {
++	u64 now_ns = ktime_get_mono_fast_ns();
+ 	u32 ctrl = dsi_read(msm_host, REG_DSI_CTRL);
+ 	u32 status0 = dsi_read(msm_host, REG_DSI_STATUS0);
+ 	u32 fifo = dsi_read(msm_host, REG_DSI_FIFO_STATUS);
+@@ -1701,6 +1779,7 @@ static void dsi_log_error_snapshot(struct msm_dsi_host *msm_host, u32 isr)
+ 	u32 lane = dsi_read(msm_host, REG_DSI_LANE_STATUS);
+ 	u32 lane_ctrl = dsi_read(msm_host, REG_DSI_LANE_CTRL);
+ 	u32 trig = dsi_read(msm_host, REG_DSI_TRIG_CTRL);
++	u32 trig_dma = dsi_read(msm_host, REG_DSI_TRIG_DMA);
+ 	u32 cmd_dma = dsi_read(msm_host, REG_DSI_CMD_DMA_CTRL);
+ 	u32 dma_base = dsi_read(msm_host, REG_DSI_DMA_BASE);
+ 	u32 dma_len = dsi_read(msm_host, REG_DSI_DMA_LEN);
+@@ -1719,11 +1798,27 @@ static void dsi_log_error_snapshot(struct msm_dsi_host *msm_host, u32 isr)
+ 	u32 vid_cfg1 = dsi_read(msm_host, REG_DSI_VID_CFG1);
+ 	u32 cmd_cfg0 = dsi_read(msm_host, REG_DSI_CMD_CFG0);
+ 	u32 cmd_cfg1 = dsi_read(msm_host, REG_DSI_CMD_CFG1);
++	u32 active_h = dsi_read(msm_host, REG_DSI_ACTIVE_H);
++	u32 active_v = dsi_read(msm_host, REG_DSI_ACTIVE_V);
++	u32 total = dsi_read(msm_host, REG_DSI_TOTAL);
++	u32 active_hsync = dsi_read(msm_host, REG_DSI_ACTIVE_HSYNC);
++	u32 active_vsync_hpos = dsi_read(msm_host, REG_DSI_ACTIVE_VSYNC_HPOS);
++	u32 active_vsync_vpos = dsi_read(msm_host, REG_DSI_ACTIVE_VSYNC_VPOS);
++	u32 rdbk_ctrl = 0;
++	u32 tclk_pre_ext = 0;
++	u32 vid_comp = 0;
++	u32 cmd_comp = 0;
++	u32 version = 0;
+ 	int hdisplay = 0, vdisplay = 0, mode_clock = 0;
+ 
+ 	if (msm_host->cfg_hnd && msm_host->cfg_hnd->major == MSM_DSI_VER_MAJOR_6G) {
+ 		mdp2 = dsi_read(msm_host, REG_DSI_CMD_MODE_MDP_CTRL2);
+ 		stream2 = dsi_read(msm_host, REG_DSI_CMD_MODE_MDP_STREAM2_CTRL);
++		rdbk_ctrl = dsi_read(msm_host, REG_DSI_RDBK_DATA_CTRL);
++		tclk_pre_ext = dsi_read(msm_host, REG_DSI_T_CLK_PRE_EXTEND);
++		vid_comp = dsi_read(msm_host, REG_DSI_VIDEO_COMPRESSION_MODE_CTRL);
++		cmd_comp = dsi_read(msm_host, REG_DSI_COMMAND_COMPRESSION_MODE_CTRL);
++		version = dsi_read(msm_host, REG_DSI_VERSION);
+ 	}
+ 
+ 	if (msm_host->mode) {
+@@ -1733,23 +1828,29 @@ static void dsi_log_error_snapshot(struct msm_dsi_host *msm_host, u32 isr)
+ 	}
+ 
+ 	pr_err_ratelimited(
+-		"dsi%d raw err: isr=%08x ctrl=%08x status0=%08x fifo=%08x ack=%08x timeout=%08x phy=%08x clk=%08x lane=%08x lane_ctrl=%08x\n",
+-		msm_host->id, isr, ctrl, status0, fifo, ack, timeout, phy,
+-		clk, lane, lane_ctrl);
++		"DSIERR#%u dsi%d raw err: ns=%llu isr=%08x ctrl=%08x status0=%08x fifo=%08x ack=%08x timeout=%08x phy=%08x clk=%08x lane=%08x lane_ctrl=%08x\n",
++		event, msm_host->id, now_ns, isr, ctrl, status0, fifo, ack,
++		timeout, phy, clk, lane, lane_ctrl);
+ 
+ 	pr_err_ratelimited(
+-		"dsi%d raw cmd: trig=%08x cmd_dma=%08x dma_base=%08x dma_len=%08x s0=%08x/%08x s1=%08x/%08x mdp2=%08x s2=%08x\n",
+-		msm_host->id, trig, cmd_dma, dma_base, dma_len, stream0,
+-		stream0_total, stream1, stream1_total, mdp2, stream2);
++		"DSIERR#%u dsi%d raw cmd: trig=%08x trig_dma=%08x cmd_dma=%08x dma_base=%08x dma_len=%08x s0=%08x/%08x s1=%08x/%08x mdp2=%08x s2=%08x\n",
++		event, msm_host->id, trig, trig_dma, cmd_dma, dma_base, dma_len,
++		stream0, stream0_total, stream1, stream1_total, mdp2, stream2);
+ 
+ 	pr_err_ratelimited(
+-		"dsi%d raw timing: hs_timer=%08x lp_timer=%08x eot=%08x clk_ctrl=%08x err_mask=%08x vid_cfg=%08x/%08x cmd_cfg=%08x/%08x\n",
+-		msm_host->id, hs_timer, lp_timer, eot, clk_ctrl, err_mask,
+-		vid_cfg0, vid_cfg1, cmd_cfg0, cmd_cfg1);
++		"DSIERR#%u dsi%d raw timing: hs_timer=%08x lp_timer=%08x eot=%08x clk_ctrl=%08x err_mask=%08x active=%08x/%08x total=%08x hsync=%08x vsync=%08x/%08x\n",
++		event, msm_host->id, hs_timer, lp_timer, eot, clk_ctrl, err_mask,
++		active_h, active_v, total, active_hsync, active_vsync_hpos,
++		active_vsync_vpos);
+ 
+ 	pr_err_ratelimited(
+-		"dsi%d fifo bits: vid_ovf=%u vid_udf=%u cmd_mdp_udf=%u cmd_dma_rdwm=%u cmd_dma_wrwm=%u cmd_dma_udf=%u lp_empty=%u lp_full=%u lp_ovf=%u hs_udf=%u/%u/%u/%u hs_ovf=%u/%u/%u/%u\n",
+-		msm_host->id,
++		"DSIERR#%u dsi%d raw cfg: vid=%08x/%08x cmd=%08x/%08x rdbk=%08x tclk_pre_ext=%08x comp=%08x/%08x version=%08x\n",
++		event, msm_host->id, vid_cfg0, vid_cfg1, cmd_cfg0, cmd_cfg1,
++		rdbk_ctrl, tclk_pre_ext, vid_comp, cmd_comp, version);
++
++	pr_err_ratelimited(
++		"DSIERR#%u dsi%d fifo bits: vid_ovf=%u vid_udf=%u cmd_mdp_udf=%u cmd_dma_rdwm=%u cmd_dma_wrwm=%u cmd_dma_udf=%u lp_empty=%u lp_full=%u lp_ovf=%u hs_udf=%u/%u/%u/%u hs_ovf=%u/%u/%u/%u\n",
++		event, msm_host->id,
+ 		!!(fifo & DSI_FIFO_STATUS_VIDEO_MDP_FIFO_OVERFLOW),
+ 		!!(fifo & DSI_FIFO_STATUS_VIDEO_MDP_FIFO_UNDERFLOW),
+ 		!!(fifo & DSI_FIFO_STATUS_CMD_MDP_FIFO_UNDERFLOW),
+@@ -1769,8 +1870,8 @@ static void dsi_log_error_snapshot(struct msm_dsi_host *msm_host, u32 isr)
+ 		!!(fifo & DSI_FIFO_STATUS_DLN3_HS_FIFO_OVERFLOW));
+ 
+ 	pr_err_ratelimited(
+-		"dsi%d busy bits: engine=%u dma=%u mdp=%u video=%u dsi=%u contention=%u lanes=%u fmt=%u flags=%#lx power=%u enabled=%u mode=%dx%d clock=%d rates=%lu/%lu/%lu/%lu\n",
+-		msm_host->id,
++		"DSIERR#%u dsi%d busy bits: engine=%u dma=%u mdp=%u video=%u dsi=%u contention=%u lanes=%u fmt=%u flags=%#lx power=%u enabled=%u mode=%dx%d clock=%d rates=%lu/%lu/%lu/%lu src=%lu\n",
++		event, msm_host->id,
+ 		!!(status0 & DSI_STATUS0_CMD_MODE_ENGINE_BUSY),
+ 		!!(status0 & DSI_STATUS0_CMD_MODE_DMA_BUSY),
+ 		!!(status0 & DSI_STATUS0_CMD_MODE_MDP_BUSY),
+@@ -1780,7 +1881,36 @@ static void dsi_log_error_snapshot(struct msm_dsi_host *msm_host, u32 isr)
+ 		msm_host->lanes, msm_host->format, msm_host->mode_flags,
+ 		msm_host->power_on, msm_host->enabled, hdisplay, vdisplay, mode_clock,
+ 		msm_host->byte_clk_rate, msm_host->byte_intf_clk_rate,
+-		msm_host->pixel_clk_rate, msm_host->esc_clk_rate);
++		msm_host->pixel_clk_rate, msm_host->esc_clk_rate,
++		msm_host->src_clk_rate);
++
++	pr_err_ratelimited(
++		"DSIERR#%u dsi%d phy/lane: pll_unlock=%u esc=%u sync_esc=%u control=%u lp0_cont=%u lp1_cont=%u stop=%u/%u/%u/%u clkstop=%u ulps_not=%u/%u/%u/%u clkulps_not=%u dln0_dir=%u\n",
++		event, msm_host->id, !!(clk & DSI_CLK_STATUS_PLL_UNLOCKED),
++		!!(phy & DSI_DLN0_PHY_ERR_DLN0_ERR_ESC),
++		!!(phy & DSI_DLN0_PHY_ERR_DLN0_ERR_SYNC_ESC),
++		!!(phy & DSI_DLN0_PHY_ERR_DLN0_ERR_CONTROL),
++		!!(phy & DSI_DLN0_PHY_ERR_DLN0_ERR_CONTENTION_LP0),
++		!!(phy & DSI_DLN0_PHY_ERR_DLN0_ERR_CONTENTION_LP1),
++		!!(lane & DSI_LANE_STATUS_DLN0_STOPSTATE),
++		!!(lane & DSI_LANE_STATUS_DLN1_STOPSTATE),
++		!!(lane & DSI_LANE_STATUS_DLN2_STOPSTATE),
++		!!(lane & DSI_LANE_STATUS_DLN3_STOPSTATE),
++		!!(lane & DSI_LANE_STATUS_CLKLN_STOPSTATE),
++		!!(lane & DSI_LANE_STATUS_DLN0_ULPS_ACTIVE_NOT),
++		!!(lane & DSI_LANE_STATUS_DLN1_ULPS_ACTIVE_NOT),
++		!!(lane & DSI_LANE_STATUS_DLN2_ULPS_ACTIVE_NOT),
++		!!(lane & DSI_LANE_STATUS_DLN3_ULPS_ACTIVE_NOT),
++		!!(lane & DSI_LANE_STATUS_CLKLN_ULPS_ACTIVE_NOT),
++		!!(lane & DSI_LANE_STATUS_DLN0_DIRECTION));
++
++	/* The first few failures are the most useful and avoid coredump storms. */
++	if (event <= 3 && msm_host->dev)
++		msm_disp_snapshot_state(msm_host->dev);
++
++	/* Dump recent panel/DSI messages only on early and power-of-two errors. */
++	if (event <= 8 || !(event & (event - 1)))
++		dsi_diag_log_xfer_history(msm_host, event, now_ns);
+ }
+ 
+ static void dsi_status(struct msm_dsi_host *msm_host)
+@@ -1810,8 +1940,10 @@ static void dsi_clk_status(struct msm_dsi_host *msm_host)
+ 
+ static void dsi_error(struct msm_dsi_host *msm_host, u32 isr)
+ {
++	u32 event = atomic_inc_return(&msm_host->diag_err_seq);
++
+ 	/* Snapshot useful state before the helpers write-to-clear status bits. */
+-	dsi_log_error_snapshot(msm_host, isr);
++	dsi_log_error_snapshot(msm_host, isr, event);
+ 
+ 	/* disable dsi error interrupt */
+ 	dsi_intr_ctrl(msm_host, DSI_IRQ_MASK_ERROR, 0);
+@@ -1911,17 +2043,63 @@ static int dsi_host_detach(struct mipi_dsi_host *host,
+ 	return 0;
+ }
+ 
++static u32 dsi_diag_record_xfer_begin(struct msm_dsi_host *msm_host,
++				      const struct mipi_dsi_msg *msg,
++				      u64 queued_ns, u64 start_ns)
++{
++	struct dsi_diag_xfer *x;
++	unsigned long flags;
++	u32 idx, copy_len;
++
++	spin_lock_irqsave(&msm_host->diag_lock, flags);
++	idx = msm_host->diag_xfer_head++ & (DSI_DIAG_XFER_HISTORY - 1);
++	x = &msm_host->diag_xfer[idx];
++	memset(x, 0, sizeof(*x));
++	x->seq = ++msm_host->diag_xfer_seq;
++	x->queued_ns = queued_ns;
++	x->start_ns = start_ns;
++	x->channel = msg->channel;
++	x->type = msg->type;
++	x->flags = msg->flags;
++	x->tx_len = min_t(size_t, msg->tx_len, U32_MAX);
++	x->rx_len = min_t(size_t, msg->rx_len, U32_MAX);
++	x->result = -EINPROGRESS;
++	copy_len = min_t(size_t, msg->tx_len, DSI_DIAG_TX_BYTES);
++	if (copy_len && msg->tx_buf)
++		memcpy(x->tx, msg->tx_buf, copy_len);
++	spin_unlock_irqrestore(&msm_host->diag_lock, flags);
++
++	return idx;
++}
++
++static void dsi_diag_record_xfer_end(struct msm_dsi_host *msm_host,
++				    u32 idx, int ret)
++{
++	unsigned long flags;
++
++	spin_lock_irqsave(&msm_host->diag_lock, flags);
++	msm_host->diag_xfer[idx].end_ns = ktime_get_mono_fast_ns();
++	msm_host->diag_xfer[idx].result = ret;
++	spin_unlock_irqrestore(&msm_host->diag_lock, flags);
++}
++
+ static ssize_t dsi_host_transfer(struct mipi_dsi_host *host,
+ 					const struct mipi_dsi_msg *msg)
+ {
+ 	struct msm_dsi_host *msm_host = to_msm_dsi_host(host);
++	u64 queued_ns, start_ns;
++	u32 diag_idx;
+ 	int ret;
+ 
+ 	if (!msg || !msm_host->power_on)
+ 		return -EINVAL;
+ 
++	queued_ns = ktime_get_mono_fast_ns();
+ 	mutex_lock(&msm_host->cmd_mutex);
++	start_ns = ktime_get_mono_fast_ns();
++	diag_idx = dsi_diag_record_xfer_begin(msm_host, msg, queued_ns, start_ns);
+ 	ret = msm_dsi_manager_cmd_xfer(msm_host->id, msg);
++	dsi_diag_record_xfer_end(msm_host, diag_idx, ret);
+ 	mutex_unlock(&msm_host->cmd_mutex);
+ 
+ 	return ret;
+@@ -2223,6 +2401,8 @@ int msm_dsi_host_init(struct msm_dsi *msm_dsi)
+ 	mutex_init(&msm_host->dev_mutex);
+ 	mutex_init(&msm_host->cmd_mutex);
+ 	spin_lock_init(&msm_host->intr_lock);
++	spin_lock_init(&msm_host->diag_lock);
++	atomic_set(&msm_host->diag_err_seq, 0);
+ 
+ 	/* setup workqueue */
+ 	msm_host->workqueue = alloc_ordered_workqueue("dsi_drm_work", 0);

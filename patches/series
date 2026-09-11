@@ -3,3 +3,5 @@
 0003-drm-msm-dsi-serialize-dcs-with-cmd-mode-bursts.patch
 0004-drm-msm-dsi-log-error-state-snapshot.patch
 0005-drm-msm-dpu-log-underrun-state.patch
+0006-drm-msm-dsi-capture-complete-error-diagnostics.patch
+0007-drm-msm-dpu-capture-command-mode-failure-state.patch
