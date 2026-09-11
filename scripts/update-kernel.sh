@@ -11,6 +11,7 @@ TAG=""
 YES=0
 LIST_ONLY=0
 CLEANUP_ONLY=0
+MIRROR="${RAPHAEL_GITHUB_MIRROR:-direct}"
 KEEP_BACKUPS="${RAPHAEL_KEEP_BACKUPS:-3}"
 BACKUP_ROOT="${RAPHAEL_BACKUP_ROOT:-}"
 TMP_DIR=""
@@ -26,6 +27,8 @@ Raphael 内核 Pre-release 更新工具
   $0 --cleanup-only          只清理非当前运行版本的旧内核
   $0 --yes                   非交互确认；未指定 tag 时选择列表第一项
   $0 --repo OWNER/REPO       指定 Release 仓库
+  $0 --mirror direct|ghfast|koishi
+                              Release 资产下载线路，默认 direct
 
 推荐直接运行:
   sudo bash -c "\$(curl -fsSL https://raw.githubusercontent.com/snowf14k3/raphael-kernel-build/main/scripts/update-kernel.sh)"
@@ -60,6 +63,10 @@ while (($#)); do
             API_BASE="https://api.github.com/repos/${REPOSITORY}"
             shift 2
             ;;
+        --mirror)
+            MIRROR="${2:?缺少 --mirror 参数}"
+            shift 2
+            ;;
         -h|--help)
             usage
             exit 0
@@ -71,6 +78,31 @@ while (($#)); do
             ;;
     esac
 done
+
+case "${MIRROR}" in
+    direct|ghfast|koishi)
+        ;;
+    *)
+        echo "未知镜像线路: ${MIRROR}" >&2
+        echo "可选: direct / ghfast / koishi" >&2
+        exit 2
+        ;;
+esac
+
+mirror_url() {
+    local url="$1"
+    case "${MIRROR}" in
+        direct)
+            printf '%s\n' "${url}"
+            ;;
+        ghfast)
+            printf 'https://ghfast.top/%s\n' "${url}"
+            ;;
+        koishi)
+            printf 'https://proxy.koishi.asia/%s\n' "${url}"
+            ;;
+    esac
+}
 
 need_cmd() {
     command -v "$1" >/dev/null 2>&1 || {
@@ -302,12 +334,15 @@ trap cleanup_tmp EXIT
 
 ARCHIVE_NAME="$(basename "${ARCHIVE_URL%%\?*}")"
 ARCHIVE_PATH="${TMP_DIR}/${ARCHIVE_NAME}"
+ARCHIVE_DOWNLOAD_URL="$(mirror_url "${ARCHIVE_URL}")"
 echo "=== 下载 Pre-release ==="
-curl -fL --retry 3 --retry-delay 2 -o "${ARCHIVE_PATH}" "${ARCHIVE_URL}"
+echo "下载线路: ${MIRROR}"
+curl -fL --retry 3 --retry-delay 2 -o "${ARCHIVE_PATH}" "${ARCHIVE_DOWNLOAD_URL}"
 
 if [[ -n "${SHA_URL}" && "${SHA_URL}" != "null" ]]; then
     SHA_NAME="$(basename "${SHA_URL%%\?*}")"
-    curl -fL --retry 3 --retry-delay 2 -o "${TMP_DIR}/${SHA_NAME}" "${SHA_URL}"
+    SHA_DOWNLOAD_URL="$(mirror_url "${SHA_URL}")"
+    curl -fL --retry 3 --retry-delay 2 -o "${TMP_DIR}/${SHA_NAME}" "${SHA_DOWNLOAD_URL}"
     echo "=== 校验外层 tar.gz ==="
     (cd "${TMP_DIR}" && sha256sum -c "${SHA_NAME}")
 else
