@@ -36,3 +36,4 @@
 0036-dt-bindings-media-qcom-sm8150-venus-add-secure-context.patch
 0037-arm64-dts-qcom-add-sm8150-venus-secure-nonpixel-stream.patch
 0038-media-venus-allocate-iris1-encoder-persist-securely.patch
+0039-arm64-dts-qcom-cover-reserved-venus-iova-in-dma-range.patch

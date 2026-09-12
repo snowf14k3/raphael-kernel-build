@@ -1,0 +1,34 @@
+From 80b1000c033d9d5462a0e963431ab7c9e7f6e052 Mon Sep 17 00:00:00 2001
+From: snowf14k3 <60956553+snowf14k3@users.noreply.github.com>
+Date: Sat, 12 Sep 2026 21:41:40 +0800
+Subject: [PATCH] arm64: dts: qcom: cover reserved Venus IOVA in DMA range
+
+The secure non-pixel low-IOVA reservation starts at zero. Cover that
+reservation with the parent DMA translation window so the IOMMU
+reserved-region parser can translate it.
+
+The reservation still excludes the first 16 MiB, leaving the effective
+allocation pool unchanged.
+
+Signed-off-by: snowf14k3 <60956553+snowf14k3@users.noreply.github.com>
+---
+ arch/arm64/boot/dts/qcom/sm8150.dtsi | 3 +--
+ 1 file changed, 1 insertion(+), 2 deletions(-)
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8150.dtsi b/arch/arm64/boot/dts/qcom/sm8150.dtsi
+index de3442ce6..fd61bee89 100644
+--- a/arch/arm64/boot/dts/qcom/sm8150.dtsi
++++ b/arch/arm64/boot/dts/qcom/sm8150.dtsi
+@@ -3830,8 +3830,7 @@ venus: video-codec@aa00000 {
+ 			#address-cells = <2>;
+ 			#size-cells = <2>;
+ 			ranges;
+-			dma-ranges = <0 0x01000000 0 0x01000000
+-				      0 0x24800000>;
++			dma-ranges = <0 0 0 0 0 0x25800000>;
+ 
+ 			clocks = <&gcc GCC_VIDEO_AXIC_CLK>,
+ 				 <&gcc GCC_VIDEO_AXI0_CLK>,
+-- 
+2.43.0
+

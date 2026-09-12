@@ -88,9 +88,8 @@ check("venus_put_secure_nonpixel_device(core);" in venus_core,
 check("iommus = <&apps_smmu 0x2304 0x60>;" in dts, "V2 secure SID")
 check("qcom,secure-vmid = <QCOM_SCM_VMID_CP_NON_PIXEL>;" in dts,
       "DT secure VMID")
-check("dma-ranges = <0 0x01000000 0 0x01000000" in dts,
-      "secure IOVA DMA base")
-check("0 0x24800000>;" in dts, "secure IOVA DMA size")
+check("dma-ranges = <0 0 0 0 0 0x25800000>;" in dts,
+      "secure IOVA translation window covers low reservation")
 check("iommu-addresses = <&venus_secure_nonpixel 0 0 0 0x1000000>;" in dts,
       "low secure IOVA reservation")
 check("secure-non-pixel:" in binding, "binding secure child")
