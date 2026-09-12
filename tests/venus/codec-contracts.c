@@ -11,11 +11,15 @@
 #define max(a,b) ((a) > (b) ? (a) : (b))
 #define max3(a,b,c) max(max(a,b),c)
 #define DIV_ROUND_UP(n,d) (((n) + (d) - 1) / (d))
+#define IS_ALIGNED(n,a) (!((n) & ((a) - 1)))
+#define SZ_4K 4096
+#define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
+#define TEST_HFI_BUFFER_INTERNAL_RECON 9
 #ifndef V4L2_TYPE_IS_OUTPUT
 #define V4L2_TYPE_IS_OUTPUT(t) ((t) == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE)
 #endif
-struct venus_resources { enum vpu_version vpu_version; enum hfi_version hfi_version; u8 num_vpp_pipes; void *ubwc_conf; };
-struct venus_core { struct venus_resources *res; struct device *dev; };
+struct venus_resources { enum vpu_version vpu_version; enum hfi_version hfi_version; u8 num_vpp_pipes; void *ubwc_conf; u32 cp_nonpixel_start, cp_nonpixel_size; };
+struct venus_core { struct venus_resources *res; struct device *dev; void *secure_nonpixel_dev; };
 struct venc_controls { int bitrate_mode, multi_slice_mode; };
 struct venus_format { u32 pixfmt; };
 struct vb2_buffer { unsigned int size; };
@@ -26,6 +30,22 @@ struct vb2_queue {
     struct vb2_buffer *bufs[16];
 };
 struct queues { struct vb2_queue input, output; };
+typedef u64 dma_addr_t;
+typedef u64 phys_addr_t;
+struct qcom_scm_vmperm { int vmid, perm; };
+struct iommu_domain { int unused; };
+struct intbuf {
+    size_t size;
+    void *va;
+    dma_addr_t da;
+    phys_addr_t pa;
+    struct device *dma_dev;
+    unsigned long attrs;
+    bool secure;
+    bool secure_alloc;
+    bool hfi_registered;
+};
+
 struct venus_inst {
     struct venus_core *core;
     struct { struct venc_controls enc; } controls;
@@ -35,6 +55,7 @@ struct venus_inst {
     unsigned int width, height, out_width, out_height, fps;
     u32 hfi_codec, pic_struct, input_buf_size, output_buf_size;
     unsigned int num_input_bufs, num_output_bufs;
+    enum venus_enc_state enc_state;
     int lock;
 };
 
@@ -52,8 +73,20 @@ int hfi_session_set_property(struct venus_inst *inst, u32 type, void *data)
     property_calls++;
     return property_error;
 }
+static unsigned int set_properties_calls;
+static int set_properties_error;
+static int venc_set_properties(struct venus_inst *inst)
+{
+    (void)inst;
+    set_properties_calls++;
+    return set_properties_error;
+}
+#include "venc_mark_config_dirty.h"
+#include "venc_set_properties_if_needed.h"
+
 static struct hfi_buffer_requirements requirements;
 static int pm_refs, get_error, put_error, init_error, query_error;
+static unsigned int bufreq_calls;
 static u32 queried_type;
 static void *vb2_get_drv_priv(struct vb2_queue *q) { return q->drv_priv; }
 static unsigned int vb2_get_num_buffers(struct vb2_queue *q) { return q->count; }
@@ -67,7 +100,7 @@ static int venc_pm_put(struct venus_inst *inst, bool autosuspend) { (void)inst; 
 static int venc_init_session(struct venus_inst *inst) { (void)inst; return init_error; }
 static unsigned int venus_helper_get_framesz(u32 fmt, unsigned int w, unsigned int h) { (void)fmt; return w * h * 3 / 2; }
 static int venus_helper_get_bufreq(struct venus_inst *inst, u32 type, struct hfi_buffer_requirements *r)
-{ (void)inst; queried_type = type; *r = requirements; return query_error; }
+{ (void)inst; queried_type = type; bufreq_calls++; *r = requirements; return query_error; }
 
 struct file { struct venus_inst *inst; };
 static struct venus_inst *to_inst(struct file *file) { return file->inst; }
@@ -99,6 +132,27 @@ static void format_tests(struct venus_inst *i)
         CHECK(venc_g_fmt(&file, NULL, &fmt) == 0);
         CHECK(fmt.fmt.pix_mp.plane_fmt[0].sizeimage == 4096);
     }
+    /* Firmware-authoritative encoder CAPTURE may be smaller than the generic
+     * compressed-frame heuristic; an allocated queue must report it exactly. */
+    i->output_buf_size = 2048;
+    struct vb2_queue *capq = v4l2_m2m_get_vq(i->m2m_ctx, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE);
+    memset(&fmt, 0, sizeof(fmt));
+    fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+    capq->count = 4;
+    CHECK(venc_g_fmt(&file, NULL, &fmt) == 0);
+    CHECK(fmt.fmt.pix_mp.plane_fmt[0].sizeimage == 2048);
+    capq->count = 0;
+
+    /* Raw OUTPUT remains conservative when the Venus layout exceeds FW min. */
+    i->input_buf_size = 2048;
+    struct vb2_queue *outq = v4l2_m2m_get_vq(i->m2m_ctx, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE);
+    memset(&fmt, 0, sizeof(fmt));
+    fmt.type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
+    outq->count = 4;
+    CHECK(venc_g_fmt(&file, NULL, &fmt) == 0);
+    CHECK(fmt.fmt.pix_mp.plane_fmt[0].sizeimage == 4096);
+    outq->count = 0;
+
     memset(&fmt, 0, sizeof(fmt));
     CHECK(venc_g_fmt(&file, NULL, &fmt) == -EINVAL);
 }
@@ -106,7 +160,280 @@ static void format_tests(struct venus_inst *i)
 #include "vdec_set_work_route.h"
 #include "venc_set_work_route.h"
 #include "venc_queue_setup_iris1.h"
-#include "venc_verify_queue_iris1.h"
+#include "venc_set_queue_count_iris1.h"
+
+static const unsigned int intbuf_types_4xx[] = {
+    HFI_BUFFER_INTERNAL_SCRATCH(HFI_VERSION_4XX),
+    HFI_BUFFER_INTERNAL_SCRATCH_1(HFI_VERSION_4XX),
+    HFI_BUFFER_INTERNAL_SCRATCH_2(HFI_VERSION_4XX),
+    HFI_BUFFER_INTERNAL_PERSIST,
+    HFI_BUFFER_INTERNAL_PERSIST_1,
+};
+static union hfi_get_property fw_snapshot;
+static unsigned int snapshot_queries, size_calls, intbuf_calls, unset_calls;
+static unsigned int dev_errors, dev_infos;
+#define dev_err(dev, fmt, ...) do { (void)(dev); dev_errors++; } while (0)
+#define dev_info(dev, fmt, ...) do { (void)(dev); dev_infos++; } while (0)
+
+#define QCOM_SCM_VMID_HLOS 3
+#define QCOM_SCM_VMID_CP_NON_PIXEL 11
+#define QCOM_SCM_PERM_READ 4
+#define QCOM_SCM_PERM_WRITE 2
+#define QCOM_SCM_PERM_EXEC 1
+#define QCOM_SCM_PERM_RW (QCOM_SCM_PERM_READ | QCOM_SCM_PERM_WRITE)
+#define QCOM_SCM_PERM_RWX (QCOM_SCM_PERM_RW | QCOM_SCM_PERM_EXEC)
+#define BIT_ULL(n) (1ULL << (n))
+#define DMA_ATTR_NO_KERNEL_MAPPING (1UL << 4)
+#define DMA_ATTR_FORCE_CONTIGUOUS (1UL << 6)
+#define GFP_KERNEL 0
+#define __GFP_ZERO 0
+
+static struct iommu_domain secure_domain;
+static dma_addr_t secure_iova;
+static phys_addr_t secure_pa;
+static size_t discontinuity_offset;
+static unsigned int secure_alloc_calls, secure_free_calls, normal_free_calls;
+static unsigned int scm_assign_calls, scm_unassign_calls;
+static int secure_alloc_error, secure_domain_error;
+static int scm_assign_error, scm_unassign_error;
+
+static struct iommu_domain *iommu_get_domain_for_dev(struct device *dev)
+{
+    (void)dev;
+    return secure_domain_error ? NULL : &secure_domain;
+}
+static phys_addr_t iommu_iova_to_phys(
+    struct iommu_domain *domain, dma_addr_t iova)
+{
+    size_t offset;
+
+    CHECK(domain == &secure_domain);
+    CHECK(iova >= secure_iova);
+    offset = iova - secure_iova;
+    if (offset == discontinuity_offset)
+        return secure_pa + offset + SZ_4K;
+    return secure_pa + offset;
+}
+static void *dma_alloc_attrs(struct device *dev, size_t size,
+                             dma_addr_t *da, int gfp, unsigned long attrs)
+{
+    (void)dev; (void)size; (void)gfp;
+    secure_alloc_calls++;
+    CHECK(attrs == (DMA_ATTR_FORCE_CONTIGUOUS |
+                    DMA_ATTR_NO_KERNEL_MAPPING));
+    *da = secure_iova;
+    return secure_alloc_error ? NULL : (void *)(uintptr_t)0x1234;
+}
+static void dma_free_attrs(struct device *dev, size_t size, void *va,
+                           dma_addr_t da, unsigned long attrs)
+{
+    (void)dev; (void)size; (void)va; (void)da;
+    if (attrs & DMA_ATTR_FORCE_CONTIGUOUS)
+        secure_free_calls++;
+    else
+        normal_free_calls++;
+}
+static int qcom_scm_assign_mem(
+    phys_addr_t pa, size_t size, u64 *src,
+    const struct qcom_scm_vmperm *perm, unsigned int count)
+{
+    CHECK(pa == secure_pa);
+    CHECK(size == 65536);
+    CHECK(count == 1);
+    if (*src == BIT_ULL(QCOM_SCM_VMID_HLOS)) {
+        CHECK(perm->vmid == QCOM_SCM_VMID_CP_NON_PIXEL);
+        CHECK(perm->perm == QCOM_SCM_PERM_RW);
+        scm_assign_calls++;
+        return scm_assign_error;
+    }
+    CHECK(*src == BIT_ULL(QCOM_SCM_VMID_CP_NON_PIXEL));
+    CHECK(perm->vmid == QCOM_SCM_VMID_HLOS);
+    CHECK(perm->perm == QCOM_SCM_PERM_RWX);
+    scm_unassign_calls++;
+    return scm_unassign_error;
+}
+#include "intbuf_secure_assign.h"
+#include "intbuf_secure_unassign.h"
+#include "intbuf_alloc_secure_persist.h"
+#include "intbuf_free_memory.h"
+static unsigned int intbuf_types_seen, start_step;
+static int snapshot_error, size_error, intbuf_error;
+int hfi_session_get_property(struct venus_inst *inst, u32 type,
+                                    union hfi_get_property *out)
+{
+    (void)inst;
+    CHECK(type == HFI_PROPERTY_CONFIG_BUFFER_REQUIREMENTS);
+    CHECK(start_step == 0);
+    snapshot_queries++;
+    start_step = 1;
+    if (snapshot_error)
+        return snapshot_error;
+    *out = fw_snapshot;
+    return 0;
+}
+static int venus_helper_set_bufsize(struct venus_inst *inst, u32 size, u32 type)
+{
+    CHECK(inst->output_buf_size == size);
+    CHECK(type == HFI_BUFFER_OUTPUT);
+    CHECK(start_step == 1);
+    size_calls++;
+    start_step = 2;
+    return size_error;
+}
+static int intbufs_set_buffer_req(struct venus_inst *inst,
+                                  const struct hfi_buffer_requirements *req)
+{
+    (void)inst;
+    CHECK(start_step >= 2);
+    intbuf_calls++;
+    intbuf_types_seen |= BIT(req->type);
+    start_step = 3;
+    return intbuf_error;
+}
+static int intbufs_unset_buffers(struct venus_inst *inst)
+{
+    (void)inst;
+    unset_calls++;
+    return 0;
+}
+#include "intbufs_find_req.h"
+#include "intbufs_validate_queue.h"
+#include "intbufs_validate_snapshot.h"
+#include "intbufs_alloc_iris1_encoder.h"
+
+static void secure_persist_tests(struct venus_inst *i)
+{
+    struct intbuf buf;
+
+    i->core->res->cp_nonpixel_start = 0x01000000;
+    i->core->res->cp_nonpixel_size = 0x24800000;
+    i->core->secure_nonpixel_dev = (void *)(uintptr_t)1;
+    secure_pa = 0x90000000;
+    secure_iova = 0x02000000;
+    discontinuity_offset = SIZE_MAX;
+    secure_alloc_calls = secure_free_calls = normal_free_calls = 0;
+    scm_assign_calls = scm_unassign_calls = 0;
+    secure_alloc_error = secure_domain_error = 0;
+    scm_assign_error = scm_unassign_error = 0;
+    dev_infos = 0;
+
+    memset(&buf, 0, sizeof(buf));
+    buf.size = 65536;
+    CHECK(intbuf_alloc_secure_persist(i, &buf) == 0);
+    CHECK(buf.va && buf.secure_alloc && buf.secure);
+    CHECK(buf.pa == 0x90000000 && buf.da == 0x02000000);
+    CHECK(secure_alloc_calls == 1 && scm_assign_calls == 1);
+    CHECK(dev_infos == 1);
+    CHECK(intbuf_free_memory(i, &buf) == 0);
+    CHECK(!buf.va && !buf.secure_alloc && !buf.secure);
+    CHECK(secure_free_calls == 1 && scm_unassign_calls == 1);
+    CHECK(dev_infos == 2);
+
+    memset(&buf, 0, sizeof(buf));
+    buf.size = 65536;
+    CHECK(intbuf_alloc_secure_persist(i, &buf) == 0);
+    CHECK(dev_infos == 3);
+    scm_unassign_error = -EIO;
+    CHECK(intbuf_free_memory(i, &buf) == -EIO);
+    CHECK(buf.va && buf.secure_alloc && buf.secure);
+    CHECK(secure_free_calls == 1 && dev_infos == 3);
+    scm_unassign_error = 0;
+    CHECK(intbuf_free_memory(i, &buf) == 0);
+    CHECK(secure_free_calls == 2 && dev_infos == 4);
+
+    memset(&buf, 0, sizeof(buf));
+    buf.size = 65536;
+    scm_assign_error = -EIO;
+    CHECK(intbuf_alloc_secure_persist(i, &buf) == -EIO);
+    CHECK(!buf.va && !buf.secure_alloc && !buf.secure);
+    CHECK(secure_free_calls == 3);
+    scm_assign_error = 0;
+
+    memset(&buf, 0, sizeof(buf));
+    buf.size = 65536;
+    secure_iova = 0x25800000;
+    CHECK(intbuf_alloc_secure_persist(i, &buf) == -ERANGE);
+    CHECK(!buf.va && !buf.secure_alloc && secure_free_calls == 4);
+    secure_iova = 0x02000000;
+
+    memset(&buf, 0, sizeof(buf));
+    buf.size = 65536;
+    discontinuity_offset = SZ_4K;
+    CHECK(intbuf_alloc_secure_persist(i, &buf) == -EINVAL);
+    CHECK(!buf.va && !buf.secure_alloc && secure_free_calls == 5);
+    discontinuity_offset = SIZE_MAX;
+
+    memset(&buf, 0, sizeof(buf));
+    buf.size = 65536;
+    secure_pa = 0x90000001;
+    CHECK(intbuf_alloc_secure_persist(i, &buf) == -EINVAL);
+    CHECK(!buf.va && !buf.secure_alloc && secure_free_calls == 6);
+    secure_pa = 0x90000000;
+
+    memset(&buf, 0, sizeof(buf));
+    buf.size = 65536;
+    secure_domain_error = 1;
+    CHECK(intbuf_alloc_secure_persist(i, &buf) == -ENODEV);
+    CHECK(!buf.va && !buf.secure_alloc && secure_alloc_calls == 6);
+    secure_domain_error = 0;
+
+    memset(&buf, 0, sizeof(buf));
+    buf.size = 65536;
+    secure_alloc_error = 1;
+    CHECK(intbuf_alloc_secure_persist(i, &buf) == -ENOMEM);
+    CHECK(!buf.va && !buf.secure_alloc && secure_alloc_calls == 7);
+    secure_alloc_error = 0;
+
+    memset(&buf, 0, sizeof(buf));
+    buf.size = 65536;
+    i->core->secure_nonpixel_dev = NULL;
+    CHECK(intbuf_alloc_secure_persist(i, &buf) == -EOPNOTSUPP);
+    CHECK(secure_alloc_calls == 7);
+
+    memset(&buf, 0, sizeof(buf));
+    buf.size = 4096;
+    buf.dma_dev = (void *)(uintptr_t)1;
+    CHECK(intbuf_free_memory(i, &buf) == 0);
+    CHECK(normal_free_calls == 1);
+}
+
+static void property_replay_tests(struct venus_inst *i)
+{
+    i->core->res->vpu_version = VPU_VERSION_IRIS1;
+    i->enc_state = VENUS_ENC_STATE_INIT;
+    set_properties_calls = 0;
+    set_properties_error = 0;
+
+    CHECK(venc_set_properties_if_needed(i) == 0);
+    CHECK(set_properties_calls == 1);
+    CHECK(i->enc_state == VENUS_ENC_STATE_CONFIGURED);
+
+    CHECK(venc_set_properties_if_needed(i) == 0);
+    CHECK(set_properties_calls == 1);
+    CHECK(i->enc_state == VENUS_ENC_STATE_CONFIGURED);
+
+    venc_mark_config_dirty(i);
+    CHECK(i->enc_state == VENUS_ENC_STATE_INIT);
+    CHECK(venc_set_properties_if_needed(i) == 0);
+    CHECK(set_properties_calls == 2);
+    CHECK(i->enc_state == VENUS_ENC_STATE_CONFIGURED);
+
+    venc_mark_config_dirty(i);
+    set_properties_error = -EIO;
+    CHECK(venc_set_properties_if_needed(i) == -EIO);
+    CHECK(set_properties_calls == 3);
+    CHECK(i->enc_state == VENUS_ENC_STATE_INIT);
+
+    i->core->res->vpu_version = VPU_VERSION_AR50;
+    i->enc_state = VENUS_ENC_STATE_CONFIGURED;
+    set_properties_error = 0;
+    venc_mark_config_dirty(i);
+    CHECK(i->enc_state == VENUS_ENC_STATE_CONFIGURED);
+    CHECK(venc_set_properties_if_needed(i) == 0);
+    CHECK(venc_set_properties_if_needed(i) == 0);
+    CHECK(set_properties_calls == 5);
+    CHECK(i->enc_state == VENUS_ENC_STATE_CONFIGURED);
+}
 
 static void packet_tests(void)
 {
@@ -131,6 +458,55 @@ static void packet_tests(void)
         CHECK(!memcmp(packet, reference, sizeof(packet)));
     }
     pkt_set_version(HFI_VERSION_4XX);
+
+    /* Downstream BUFFER_SIZE_MINIMUM is Venus BUFFER_SIZE_ACTUAL on wire. */
+    {
+        struct hfi_buffer_size_actual size = {
+            .type = HFI_BUFFER_OUTPUT,
+            .size = 230400,
+        };
+        memset(packet, 0x5a, sizeof(packet));
+        CHECK(pkt_session_set_property(p, cookie,
+                                       HFI_PROPERTY_PARAM_BUFFER_SIZE_ACTUAL,
+                                       &size) == 0);
+        CHECK(packet[0] == 28 && packet[1] == HFI_CMD_SESSION_SET_PROPERTY);
+        CHECK(packet[4] == 0x20100c);
+        CHECK(packet[5] == HFI_BUFFER_OUTPUT && packet[6] == 230400);
+        CHECK(packet[7] == 0x5a5a5a5a);
+    }
+
+    /* Generic zero level keeps the historical fallback to H.264 Level 1. */
+    {
+        struct hfi_profile_level pl = {
+            .profile = HFI_H264_PROFILE_HIGH,
+            .level = 0,
+        };
+        memset(packet, 0x5a, sizeof(packet));
+        CHECK(pkt_session_set_property(p, cookie,
+                                       HFI_PROPERTY_PARAM_PROFILE_LEVEL_CURRENT,
+                                       &pl) == 0);
+        CHECK(packet[0] == 28 && packet[1] == HFI_CMD_SESSION_SET_PROPERTY);
+        CHECK(packet[4] == HFI_PROPERTY_PARAM_PROFILE_LEVEL_CURRENT);
+        CHECK(packet[5] == HFI_H264_PROFILE_HIGH);
+        CHECK(packet[6] == HFI_H264_LEVEL_1);
+    }
+
+    /* CF5 host-only marker is converted to firmware AUTO/UNKNOWN on wire. */
+    {
+        struct hfi_profile_level pl = {
+            .profile = HFI_H264_PROFILE_HIGH,
+            .level = ~0U,
+        };
+        memset(packet, 0x5a, sizeof(packet));
+        CHECK(pkt_session_set_property(p, cookie,
+                                       HFI_PROPERTY_PARAM_PROFILE_LEVEL_CURRENT,
+                                       &pl) == 0);
+        CHECK(packet[0] == 28 && packet[1] == HFI_CMD_SESSION_SET_PROPERTY);
+        CHECK(packet[4] == HFI_PROPERTY_PARAM_PROFILE_LEVEL_CURRENT);
+        CHECK(packet[5] == HFI_H264_PROFILE_HIGH);
+        CHECK(packet[6] == 0);
+    }
+
     CHECK(pkt_session_set_property(NULL, cookie, HFI_PROPERTY_PARAM_WORK_ROUTE, &wr) == -EINVAL);
     CHECK(pkt_session_set_property(p, NULL, HFI_PROPERTY_PARAM_WORK_ROUTE, &wr) == -EINVAL);
     CHECK(pkt_session_set_property(p, cookie, HFI_PROPERTY_PARAM_WORK_ROUTE, NULL) == -EINVAL);
@@ -186,7 +562,6 @@ static void queue_tests(struct venus_inst *i, struct vb2_queue *q)
 {
     unsigned int n, planes, sizes[1];
     const bool input = V4L2_TYPE_IS_OUTPUT(q->type);
-    struct vb2_buffer small = { .size = 8191 }, large = { .size = 32768 };
     requirements = (struct hfi_buffer_requirements){ .size=8192, .count_actual=3, .hold_count=2, .count_min=5 };
     i->out_width = 64; i->out_height = 64;
     i->output_buf_size = 4096;
@@ -213,20 +588,131 @@ static void queue_tests(struct venus_inst *i, struct vb2_queue *q)
     requirements.size=8192; requirements.count_min=17;
     CHECK(venc_queue_setup_iris1(q, &n, &planes, sizes) == -EINVAL);
     requirements.count_min=5;
-    q->count=4;
-    CHECK(venc_verify_queue_iris1(i, q->type) == -EINVAL);
+    q->count=0;
+    unsigned int calls = bufreq_calls;
+    CHECK(venc_set_queue_count_iris1(i, q->type) == -EINVAL);
+    CHECK(bufreq_calls == calls);
     q->count=5;
-    for (unsigned int idx=0; idx<5; idx++) q->bufs[idx]=&large;
-    CHECK(venc_verify_queue_iris1(i, q->type) == 0);
+    query_error=-EIO;
+    CHECK(venc_set_queue_count_iris1(i, q->type) == 0);
     CHECK((input ? i->num_input_bufs : i->num_output_bufs) == 5);
-    q->bufs[4]=&small;
-    CHECK(venc_verify_queue_iris1(i, q->type) == -EINVAL);
-    q->bufs[4]=NULL; q->bufs[15]=&large;
-    CHECK(venc_verify_queue_iris1(i, q->type) == 0);
-    requirements.size=65536;
-    CHECK(venc_verify_queue_iris1(i, q->type) == -EINVAL);
-    memset(q->bufs, 0, sizeof(q->bufs));
+    CHECK(bufreq_calls == calls);
+    query_error=0;
     CHECK(pm_refs == 0 && !i->lock);
+}
+
+static void reset_start_snapshot(struct venus_inst *i)
+{
+    static struct vb2_buffer raw = { .size = 475136 };
+    static struct vb2_buffer compressed = { .size = 230400 };
+
+    raw.size = 475136;
+    compressed.size = 230400;
+    memset(&fw_snapshot, 0, sizeof(fw_snapshot));
+    fw_snapshot.bufreq[0] = (struct hfi_buffer_requirements) {
+        .type = HFI_BUFFER_INPUT, .size = 460800,
+        .hold_count = 3, .count_min = 3, .count_actual = 4,
+    };
+    fw_snapshot.bufreq[1] = (struct hfi_buffer_requirements) {
+        .type = HFI_BUFFER_OUTPUT, .size = 230400,
+        .hold_count = 2, .count_min = 2, .count_actual = 4,
+    };
+    fw_snapshot.bufreq[2] = (struct hfi_buffer_requirements) {
+        .type = HFI_BUFFER_INTERNAL_PERSIST, .size = 64768,
+        .hold_count = 1, .count_min = 1, .count_actual = 1,
+    };
+    fw_snapshot.bufreq[3] = (struct hfi_buffer_requirements) {
+        .type = HFI_BUFFER_INTERNAL_SCRATCH(HFI_VERSION_4XX), .size = 1307392,
+        .hold_count = 1, .count_min = 1, .count_actual = 1,
+    };
+    fw_snapshot.bufreq[4] = (struct hfi_buffer_requirements) {
+        .type = HFI_BUFFER_INTERNAL_SCRATCH_1(HFI_VERSION_4XX), .size = 694624,
+        .hold_count = 1, .count_min = 1, .count_actual = 1,
+    };
+    fw_snapshot.bufreq[5] = (struct hfi_buffer_requirements) {
+        .type = HFI_BUFFER_INTERNAL_SCRATCH_2(HFI_VERSION_4XX), .size = 2523136,
+        .hold_count = 1, .count_min = 1, .count_actual = 1,
+    };
+    fw_snapshot.bufreq[6] = (struct hfi_buffer_requirements) {
+        .type = TEST_HFI_BUFFER_INTERNAL_RECON, .size = 479232,
+        .hold_count = 1, .count_min = 1, .count_actual = 2,
+    };
+
+    i->m2m_ctx->input.count = i->m2m_ctx->output.count = 4;
+    i->m2m_ctx->input.max_num_buffers = i->m2m_ctx->output.max_num_buffers = 16;
+    memset(i->m2m_ctx->input.bufs, 0, sizeof(i->m2m_ctx->input.bufs));
+    memset(i->m2m_ctx->output.bufs, 0, sizeof(i->m2m_ctx->output.bufs));
+    for (unsigned int n = 0; n < 4; n++) {
+        i->m2m_ctx->input.bufs[n] = &raw;
+        i->m2m_ctx->output.bufs[n] = &compressed;
+    }
+    i->output_buf_size = 230400;
+    snapshot_queries = size_calls = intbuf_calls = unset_calls = 0;
+    intbuf_types_seen = start_step = 0;
+    snapshot_error = size_error = intbuf_error = 0;
+}
+
+static void start_contract_tests(struct venus_inst *i)
+{
+    /* Real SM8150 requirements include encoder PERSIST. Until the secure
+     * CP_NON_PIXEL path exists, reject before size or buffer registration.
+     */
+    reset_start_snapshot(i);
+    dev_errors = 0;
+    CHECK(intbufs_alloc_iris1_encoder(i) == -EOPNOTSUPP);
+    CHECK(snapshot_queries == 1 && !size_calls && !intbuf_calls);
+    CHECK(unset_calls == 0 && start_step == 1);
+    CHECK(dev_errors == 1);
+
+    reset_start_snapshot(i);
+    i->core->secure_nonpixel_dev = (void *)(uintptr_t)1;
+    CHECK(intbufs_alloc_iris1_encoder(i) == 0);
+    CHECK(snapshot_queries == 1 && size_calls == 1 && intbuf_calls == 4);
+    CHECK(unset_calls == 0 && start_step == 3);
+    CHECK(intbuf_types_seen & BIT(HFI_BUFFER_INTERNAL_PERSIST));
+    i->core->secure_nonpixel_dev = NULL;
+
+    /* Keep testing the remaining CF6 machinery with an artificial snapshot
+     * in which firmware declares no PERSIST requirement.
+     */
+    reset_start_snapshot(i);
+    fw_snapshot.bufreq[2] = (struct hfi_buffer_requirements) {};
+    CHECK(intbufs_alloc_iris1_encoder(i) == 0);
+    CHECK(snapshot_queries == 1 && size_calls == 1 && intbuf_calls == 3);
+    CHECK(unset_calls == 0 && start_step == 3);
+    CHECK(intbuf_types_seen == (
+        BIT(HFI_BUFFER_INTERNAL_SCRATCH(HFI_VERSION_4XX)) |
+        BIT(HFI_BUFFER_INTERNAL_SCRATCH_1(HFI_VERSION_4XX)) |
+        BIT(HFI_BUFFER_INTERNAL_SCRATCH_2(HFI_VERSION_4XX))));
+    CHECK(!(intbuf_types_seen & BIT(TEST_HFI_BUFFER_INTERNAL_RECON)));
+
+    reset_start_snapshot(i);
+    snapshot_error = -EIO;
+    CHECK(intbufs_alloc_iris1_encoder(i) == -EIO);
+    CHECK(snapshot_queries == 1 && !size_calls && !intbuf_calls);
+
+    reset_start_snapshot(i);
+    i->m2m_ctx->output.bufs[3]->size = 230399;
+    CHECK(intbufs_alloc_iris1_encoder(i) == -EINVAL);
+    CHECK(snapshot_queries == 1 && !size_calls && !intbuf_calls);
+
+    reset_start_snapshot(i);
+    fw_snapshot.bufreq[6].type = HFI_BUFFER_INPUT;
+    CHECK(intbufs_alloc_iris1_encoder(i) == -EINVAL);
+    CHECK(snapshot_queries == 1 && !size_calls && !intbuf_calls);
+
+    reset_start_snapshot(i);
+    fw_snapshot.bufreq[2] = (struct hfi_buffer_requirements) {};
+    size_error = -EIO;
+    CHECK(intbufs_alloc_iris1_encoder(i) == -EIO);
+    CHECK(snapshot_queries == 1 && size_calls == 1 && !intbuf_calls);
+
+    reset_start_snapshot(i);
+    fw_snapshot.bufreq[2] = (struct hfi_buffer_requirements) {};
+    intbuf_error = -ENOMEM;
+    CHECK(intbufs_alloc_iris1_encoder(i) == -ENOMEM);
+    CHECK(snapshot_queries == 1 && size_calls == 1 && intbuf_calls == 1);
+    CHECK(unset_calls == 1);
 }
 
 struct device { int unused; };
@@ -301,7 +787,9 @@ int main(void)
     queues.input=(struct vb2_queue){ .type=V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE, .drv_priv=&inst };
     queues.output=(struct vb2_queue){ .type=V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, .drv_priv=&inst };
     packet_tests(); route_tests(&inst); format_tests(&inst);
+    property_replay_tests(&inst); secure_persist_tests(&inst);
     queue_tests(&inst, &queues.input); queue_tests(&inst, &queues.output);
+    start_contract_tests(&inst);
     power_policy_tests(&core);
     printf("PASS: %u assertions against real HFI packetizer and codec functions (host mocks, no hardware)\n", assertions);
     return 0;

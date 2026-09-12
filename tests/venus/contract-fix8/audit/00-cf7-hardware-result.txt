@@ -1,0 +1,62 @@
+CF7 hardware result received 2026-09-12
+
+boot_id=611f97fa-0790-4977-bf77-354bb301f9a9
+module_version=iris1-startcontract7-20260912
+probe_pid=29926
+phone_output_lines=111
+phone_output_bytes=7916
+phone_output_sha256=A860AEA86BEA35CF44DB736EAC8033D2E027A4CE7335DE62DBB1F8EAD911025C
+windows_log_lines=1169
+windows_log_bytes=167768
+windows_log_sha256=D4F2D143EF6660BD0B0EBA051131A77F0554A9EAB7E596A136851668B45E6118
+phone_log_dir=/var/tmp/venus-startcontract7.MwyvVz/encoder-single-frame.WGbBG0
+
+Verified progress:
+- CF7 core and encoder loaded and bound with the expected identity.
+- The 640x480 H264 CAPTURE allocation contract remained 230400 bytes.
+- Four CAPTURE buffers and one filled OUTPUT buffer were queued.
+- The first property suite completed once during REQBUFS.
+- CF7 omitted H264 VUI timing on IRIS1.
+- The second STREAMON reused state 5 and did not replay the property suite.
+- Final input/output counts were both 4 and BUFFER_COUNT_ACTUAL completed.
+- One post-count GET_BUFFER_REQUIREMENTS returned a valid 244-byte, seven-row
+  snapshot and both queues passed validation.
+- Property 0x20100c completed for OUTPUT size 230400.
+- Scratch types 6, 7 and 8 and persist type 4 were allocated and registered.
+- Type 9 RECON was correctly treated as downstream-style host bookkeeping;
+  Android Q does not allocate or register DMA for it.
+- OPP and both codec clocks selected 200000000 Hz.
+- video-mem ICC vote 6533000 completed.
+- HFI LOAD_RESOURCES command 0x211001 was posted.
+- HFI LOAD_RESOURCES_DONE 0x221001 arrived with fw_error=0.
+- The waiter returned successfully and hfi_session_load_res changed state to
+  INST_LOAD_RESOURCES.
+
+Final boundary:
+The final line is:
+VENUS_BROAD1 ... venus_helper_vb2_start_streaming state=4 ...
+HELPER_START LOAD_RES AFTER rc=0
+
+The immediately following source marker is SD LOAD_RESOURCES AFTER, followed by
+B1 HELPER_START HFI_START BEFORE. Neither appears. There is no HFI START packet,
+START_DONE, FTB, ETB, or userspace second-STREAMON return.
+
+No RPMh timeout, SMMU/IOMMU fault, NoC error, watchdog, Oops, BUG, panic, HFI
+system error, or firmware error was captured.
+
+Diagnosis:
+CF7 falsifies H264 VUI timing and unchanged property replay as the immediate
+reset boundary. It also executes and validates the CF6 count, snapshot, size,
+and internal-buffer changes. The reset now lies in the post-LOAD_RESOURCES
+encoder resource-activation window, before the recorded HFI START command.
+
+The highest-priority fault class is an encoder-only hardware resource activation
+failure: either the firmware's first access to registered internal-buffer IOVAs
+or an IRIS1 codec-island/bridge/power transition. Prior successful hardware
+decode makes the common HFI queue, parent firmware, and basic IOMMU path less
+likely, but does not prove the encoder-specific resource path correct.
+
+This log does not identify which of those two hardware contracts is wrong.
+Do not build or run another candidate from the last line alone. First obtain
+reset-reason/previous-boot evidence if available and complete an exact
+downstream comparison of internal-buffer mapping and LOAD resource power state.

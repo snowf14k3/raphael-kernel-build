@@ -1,0 +1,10 @@
+Published AgentDock artifact
+Date: 2026-09-12
+artifact_id=db3dd8e952f2c4d03820a8783e02c0d8
+filename=raphael-cf8-secure-persist-7.1.0-sm8150-gaa4f267dd65c.tar.gz
+sha256=6a1b7f37934aa86c205a0d0530aaaac8a65742f90e8e7d295a606ab7c6e73473
+size_bytes=34321008
+expires_at=2026-09-19T13:00:34Z
+
+The temporary signed URL is intentionally not persisted in the repository.
+The immutable artifact hash matches the locally extracted and verified archive.

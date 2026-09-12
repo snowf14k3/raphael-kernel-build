@@ -1,0 +1,19 @@
+Pre-implementation secure-persist capability audit (before patches 0034-0038)
+
+CONFIG_QCOM_SCM=y
+qcom_scm_assign_mem=present_and_exported
+QCOM_SCM_VMID_CP_NON_PIXEL=present
+CONFIG_DMABUF_HEAPS=y
+CONFIG_DMABUF_HEAPS_SYSTEM=y
+CONFIG_DMABUF_HEAPS_CMA=y
+qualcomm_secure_dma_heap=absent
+upstream_arm_smmu_secure_vmid_domain=absent
+downstream_arm_smmu_DOMAIN_ATTR_SECURE_VMID=present_only_in_android_q
+downstream_secure_page_table_assignment=present_only_in_android_q
+current_venus_secure_nonpixel_sid=absent
+current_venus_secure_persist_allocator=absent
+
+Conclusion:
+The SCM page-ownership call alone cannot implement the Android Q contract.
+The full fix requires kernel, SMMU, Venus and DT integration. A hot module can
+only add a fail-closed guard, not a secure context-bank attachment.

@@ -1,0 +1,90 @@
+From 92d6dad4aba2dcee1a3a39aeb254fc381a0077b1 Mon Sep 17 00:00:00 2001
+From: snowf14k3 <60956553+snowf14k3@users.noreply.github.com>
+Date: Sat, 12 Sep 2026 19:26:06 +0800
+Subject: [PATCH] dt-bindings: media: qcom,sm8150-venus: add secure context
+
+SM8150 V2 exposes a dedicated secure non-pixel stream for encoder
+persistent memory. Describe the child context, its CP_NON_PIXEL VMID,
+its IOMMU attachment and its IOVA reservation.
+
+Require address and size cells plus a child DMA range so the auxiliary
+device's DMA API is limited to the downstream secure non-pixel aperture.
+
+Signed-off-by: snowf14k3 <60956553+snowf14k3@users.noreply.github.com>
+---
+ .../bindings/media/qcom,sm8150-venus.yaml     | 41 +++++++++++++++++++
+ 1 file changed, 41 insertions(+)
+
+diff --git a/Documentation/devicetree/bindings/media/qcom,sm8150-venus.yaml b/Documentation/devicetree/bindings/media/qcom,sm8150-venus.yaml
+index d845ab183..b5da4d351 100644
+--- a/Documentation/devicetree/bindings/media/qcom,sm8150-venus.yaml
++++ b/Documentation/devicetree/bindings/media/qcom,sm8150-venus.yaml
+@@ -17,9 +17,20 @@ allOf:
+   - $ref: qcom,venus-common.yaml#
+ 
+ properties:
++  '#address-cells':
++    const: 2
++
++  '#size-cells':
++    const: 2
++
+   compatible:
+     const: qcom,sm8150-venus
+ 
++  ranges: true
++
++  dma-ranges:
++    maxItems: 1
++
+   clocks:
+     maxItems: 7
+ 
+@@ -78,8 +89,37 @@ properties:
+   opp-table:
+     type: object
+ 
++  secure-non-pixel:
++    type: object
++    additionalProperties: false
++
++    properties:
++      compatible:
++        const: qcom,venus-secure-context
++
++      iommus:
++        maxItems: 1
++
++      qcom,secure-vmid:
++        $ref: /schemas/types.yaml#/definitions/uint32
++        description: Secure world VMID allowed to read the context page tables.
++        const: 11
++
++      memory-region:
++        maxItems: 1
++
++    required:
++      - compatible
++      - iommus
++      - qcom,secure-vmid
++      - memory-region
++
+ required:
++  - '#address-cells'
++  - '#size-cells'
+   - compatible
++  - ranges
++  - dma-ranges
+   - resets
+   - reset-names
+   - power-domain-names
+@@ -88,5 +128,6 @@ required:
+   - interconnects
+   - interconnect-names
+   - operating-points-v2
++  - secure-non-pixel
+ 
+ unevaluatedProperties: false
+-- 
+2.43.0
+

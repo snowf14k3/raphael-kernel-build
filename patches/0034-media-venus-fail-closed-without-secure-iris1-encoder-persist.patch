@@ -1,0 +1,54 @@
+From ed6882fd623f5565085aa6dacdd709f46118ab8d Mon Sep 17 00:00:00 2001
+From: snowf14k3 <60956553+snowf14k3@users.noreply.github.com>
+Date: Sat, 12 Sep 2026 19:10:48 +0800
+Subject: [PATCH] media: venus: fail closed without secure IRIS1 encoder
+ persist
+
+SM8150 firmware requires encoder INTERNAL_PERSIST memory in the secure
+CP_NON_PIXEL domain even for non-secure userspace sessions. The current
+Venus port only has a normal DMA device on the non-secure SID.
+
+CF7 registered PERSIST at 0xdeff0000 and reset immediately after a
+successful LOAD_RESOURCES reply, before the recorded START command.
+Android Q instead forces this buffer through its secure non-pixel heap
+and SID.
+
+Reject the start transaction after validating the final requirements but
+before registering any internal buffer. This preserves decoder support
+and prevents an unsupported encoder path from reaching the hard-reset
+boundary while the secure allocator and context bank are being ported.
+
+Signed-off-by: snowf14k3 <60956553+snowf14k3@users.noreply.github.com>
+---
+ drivers/media/platform/qcom/venus/helpers.c | 15 +++++++++++++++
+ 1 file changed, 15 insertions(+)
+
+diff --git a/drivers/media/platform/qcom/venus/helpers.c b/drivers/media/platform/qcom/venus/helpers.c
+index 5673f2ba4..6cef3f130 100644
+--- a/drivers/media/platform/qcom/venus/helpers.c
++++ b/drivers/media/platform/qcom/venus/helpers.c
+@@ -470,6 +470,21 @@ static int intbufs_alloc_iris1_encoder(struct venus_inst *inst)
+ 	if (ret)
+ 		return ret;
+ 
++	/*
++	 * SM8150 firmware requires encoder PERSIST memory in the secure
++	 * CP_NON_PIXEL domain even for a non-secure userspace session.  The
++	 * upstream Venus path has no secure allocator or context-bank device;
++	 * handing firmware a normal DMA address can hard-reset the platform
++	 * when LOAD_RESOURCES activates the encoder.  Fail before registering
++	 * any internal buffer until that complete contract is available.
++	 */
++	req = intbufs_find_req(&snapshot, HFI_BUFFER_INTERNAL_PERSIST);
++	if (req && req->size) {
++		dev_err(inst->core->dev,
++			"IRIS1 encoder requires secure CP_NON_PIXEL persist memory\n");
++		return -EOPNOTSUPP;
++	}
++
+ 	/*
+ 	 * Downstream calls this BUFFER_SIZE_MINIMUM; Venus names the same
+ 	 * 0x20100c two-u32 wire property BUFFER_SIZE_ACTUAL.  Tell firmware the
+-- 
+2.43.0
+

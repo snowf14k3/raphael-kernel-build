@@ -1,0 +1,45 @@
+From: Venus CF6 <cf6@localhost>
+Date: Sat, 12 Sep 2026 18:05:00 +0800
+Subject: [PATCH] media: venus: set IRIS1 encoder output buffer size
+
+Android Q sends HFI property 0x20100c with the negotiated encoder CAPTURE
+plane size after it obtains buffer requirements and before it prepares
+internal buffers.  It calls this property BUFFER_SIZE_MINIMUM.  Venus
+already exposes the same wire ID and two-u32 BUFFER_SIZE_ACTUAL payload.
+Only the decoder uses its existing helper.
+
+Send the exact firmware-backed encoder CAPTURE allocation size after the
+single post-count requirements snapshot validates both queues.  Send it
+before any internal buffer is registered.  At 640x480 H.264 this is the
+already verified 230400-byte contract.  Limit the change to the IRIS1
+encoder-specific path.
+
+Signed-off-by: Venus CF6 <cf6@localhost>
+---
+ drivers/media/platform/qcom/venus/helpers.c | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+diff --git a/drivers/media/platform/qcom/venus/helpers.c b/drivers/media/platform/qcom/venus/helpers.c
+index b67f1a1c6..5673f2ba4 100644
+--- a/drivers/media/platform/qcom/venus/helpers.c
++++ b/drivers/media/platform/qcom/venus/helpers.c
+@@ -470,6 +470,17 @@ static int intbufs_alloc_iris1_encoder(struct venus_inst *inst)
+ 	if (ret)
+ 		return ret;
+ 
++	/*
++	 * Downstream calls this BUFFER_SIZE_MINIMUM; Venus names the same
++	 * 0x20100c two-u32 wire property BUFFER_SIZE_ACTUAL.  Tell firmware the
++	 * exact compressed CAPTURE extent before registering internal buffers.
++	 */
++	ret = venus_helper_set_bufsize(inst,
++				       inst->output_buf_size,
++				       HFI_BUFFER_OUTPUT);
++	if (ret)
++		return ret;
++
+ 	for (i = 0; i < ARRAY_SIZE(intbuf_types_4xx); i++) {
+ 		req = intbufs_find_req(&snapshot, intbuf_types_4xx[i]);
+ 		if (!req || !req->size)
+-- 
+2.43.0

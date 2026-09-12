@@ -1,0 +1,163 @@
+From 1f6ace96e63d29bba5489be5bfc389836dffb618 Mon Sep 17 00:00:00 2001
+From: snowf14k3 <60956553+snowf14k3@users.noreply.github.com>
+Date: Sat, 12 Sep 2026 19:27:17 +0800
+Subject: [PATCH] arm64: dts: qcom: add SM8150 Venus secure non-pixel stream
+
+Add the SM8150 V2 secure non-pixel SID 0x2304 beside the existing
+non-secure SID 0x2300. Limit child DMA to the downstream
+[0x01000000, 0x25800000) aperture and reserve its null/low range.
+
+Create an auxiliary platform device carrying the CP_NON_PIXEL VMID.
+Have Venus retain that device only after its IOMMU domain is attached,
+and release the reference before depopulating child devices. IRIS1 probe
+fails closed when the secure context is absent; other platforms keep
+their current behavior.
+
+Signed-off-by: snowf14k3 <60956553+snowf14k3@users.noreply.github.com>
+---
+ arch/arm64/boot/dts/qcom/sm8150.dtsi     | 16 +++++++++
+ drivers/media/platform/qcom/venus/core.c | 46 ++++++++++++++++++++++++
+ drivers/media/platform/qcom/venus/core.h |  1 +
+ 3 files changed, 63 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8150.dtsi b/arch/arm64/boot/dts/qcom/sm8150.dtsi
+index 654a7e512..de3442ce6 100644
+--- a/arch/arm64/boot/dts/qcom/sm8150.dtsi
++++ b/arch/arm64/boot/dts/qcom/sm8150.dtsi
+@@ -759,6 +759,10 @@ venus_iova: venus-iova {
+ 			iommu-addresses = <&venus 0 0 0 0x25800000>;
+ 		};
+ 
++		venus_secure_nonpixel_iova: venus-secure-nonpixel-iova {
++			iommu-addresses = <&venus_secure_nonpixel 0 0 0 0x1000000>;
++		};
++
+ 		venus_mem: memory@96e00000 {
+ 			reg = <0x0 0x96e00000 0x0 0x500000>;
+ 			no-map;
+@@ -3823,6 +3827,11 @@ venus: video-codec@aa00000 {
+ 			compatible = "qcom,sm8150-venus";
+ 			reg = <0 0x0aa00000 0 0x100000>;
+ 			interrupts = <GIC_SPI 174 IRQ_TYPE_LEVEL_HIGH>;
++			#address-cells = <2>;
++			#size-cells = <2>;
++			ranges;
++			dma-ranges = <0 0x01000000 0 0x01000000
++				      0 0x24800000>;
+ 
+ 			clocks = <&gcc GCC_VIDEO_AXIC_CLK>,
+ 				 <&gcc GCC_VIDEO_AXI0_CLK>,
+@@ -3858,6 +3867,13 @@ venus: video-codec@aa00000 {
+ 
+ 			status = "disabled";
+ 
++			venus_secure_nonpixel: secure-non-pixel {
++				compatible = "qcom,venus-secure-context";
++				iommus = <&apps_smmu 0x2304 0x60>;
++				qcom,secure-vmid = <QCOM_SCM_VMID_CP_NON_PIXEL>;
++				memory-region = <&venus_secure_nonpixel_iova>;
++			};
++
+ 			venus_opp_table: opp-table {
+ 				compatible = "operating-points-v2";
+ 
+diff --git a/drivers/media/platform/qcom/venus/core.c b/drivers/media/platform/qcom/venus/core.c
+index bd5325915..725861fec 100644
+--- a/drivers/media/platform/qcom/venus/core.c
++++ b/drivers/media/platform/qcom/venus/core.c
+@@ -5,6 +5,7 @@
+  */
+ #include <linux/init.h>
+ #include <linux/interconnect.h>
++#include <linux/iommu.h>
+ #include <linux/io.h>
+ #include <linux/ioctl.h>
+ #include <linux/delay.h>
+@@ -374,6 +375,45 @@ static int venus_add_dynamic_nodes(struct venus_core *core)
+ static void venus_remove_dynamic_nodes(struct venus_core *core) {}
+ #endif
+ 
++static int venus_get_secure_nonpixel_device(struct venus_core *core)
++{
++	struct device_node *np;
++	struct platform_device *pdev;
++
++	if (!IS_IRIS1(core))
++		return 0;
++
++	np = of_get_compatible_child(core->dev->of_node,
++				     "qcom,venus-secure-context");
++	if (!np) {
++		dev_warn(core->dev,
++			 "secure non-pixel context absent; IRIS1 encoder disabled\n");
++		return 0;
++	}
++
++	pdev = of_find_device_by_node(np);
++	of_node_put(np);
++	if (!pdev)
++		return -EPROBE_DEFER;
++
++	if (!iommu_get_domain_for_dev(&pdev->dev)) {
++		put_device(&pdev->dev);
++		return -EPROBE_DEFER;
++	}
++
++	core->secure_nonpixel_dev = &pdev->dev;
++	return 0;
++}
++
++static void venus_put_secure_nonpixel_device(struct venus_core *core)
++{
++	if (!core->secure_nonpixel_dev)
++		return;
++
++	put_device(core->secure_nonpixel_dev);
++	core->secure_nonpixel_dev = NULL;
++}
++
+ static int venus_probe(struct platform_device *pdev)
+ {
+ 	struct device *dev = &pdev->dev;
+@@ -487,6 +527,10 @@ static int venus_probe(struct platform_device *pdev)
+ 	if (ret)
+ 		goto err_remove_dynamic_nodes;
+ 
++	ret = venus_get_secure_nonpixel_device(core);
++	if (ret)
++		goto err_of_depopulate;
++
+ 	ret = venus_enumerate_codecs(core, VIDC_SESSION_TYPE_DEC);
+ 	if (ret)
+ 		goto err_of_depopulate;
+@@ -506,6 +550,7 @@ static int venus_probe(struct platform_device *pdev)
+ 	return 0;
+ 
+ err_of_depopulate:
++	venus_put_secure_nonpixel_device(core);
+ 	of_platform_depopulate(dev);
+ err_remove_dynamic_nodes:
+ 	venus_remove_dynamic_nodes(core);
+@@ -543,6 +588,7 @@ static void venus_remove(struct platform_device *pdev)
+ 	WARN_ON(ret);
+ 
+ 	venus_shutdown(core);
++	venus_put_secure_nonpixel_device(core);
+ 	of_platform_depopulate(dev);
+ 
+ 	venus_firmware_deinit(core);
+diff --git a/drivers/media/platform/qcom/venus/core.h b/drivers/media/platform/qcom/venus/core.h
+index b434b7cb3..e3b615312 100644
+--- a/drivers/media/platform/qcom/venus/core.h
++++ b/drivers/media/platform/qcom/venus/core.h
+@@ -208,6 +208,7 @@ struct venus_core {
+ 	struct device *dev;
+ 	struct device *dev_dec;
+ 	struct device *dev_enc;
++	struct device *secure_nonpixel_dev;
+ 	unsigned int use_tz;
+ 	struct video_firmware {
+ 		struct device *dev;
+-- 
+2.43.0
+

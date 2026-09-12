@@ -1,0 +1,147 @@
+From 4ce791ce596d442ddbea91cf5f2f19b2ce225532 Mon Sep 17 00:00:00 2001
+From: snowf14k3 <60956553+snowf14k3@users.noreply.github.com>
+Date: Sat, 12 Sep 2026 18:42:04 +0800
+Subject: [PATCH 32/33] media: venus: avoid unchanged IRIS1 encoder property
+ replay
+
+IRIS1 queue setup creates the firmware session and applies the encoder
+property suite before STREAMON. Replaying the unchanged suite at the
+second STREAMON is unnecessary. The CF6 hardware log stopped during
+that replay before it reached either CF6 buffer-contract change.
+
+Track a successfully configured IRIS1 session and invalidate that state
+after accepted control, format, crop, or frame-rate changes. Apply the
+suite once before start when it is dirty. Keep the existing behavior on
+other VPU generations.
+
+Signed-off-by: snowf14k3 <60956553+snowf14k3@users.noreply.github.com>
+---
+ drivers/media/platform/qcom/venus/core.h      |  1 +
+ drivers/media/platform/qcom/venus/venc.c      | 31 +++++++++++++++++--
+ drivers/media/platform/qcom/venus/venc.h      |  1 +
+ .../media/platform/qcom/venus/venc_ctrls.c    |  2 ++
+ 4 files changed, 33 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/media/platform/qcom/venus/core.h b/drivers/media/platform/qcom/venus/core.h
+index 3ea69bfb3..b434b7cb3 100644
+--- a/drivers/media/platform/qcom/venus/core.h
++++ b/drivers/media/platform/qcom/venus/core.h
+@@ -366,6 +366,7 @@ enum venus_enc_state {
+ 	VENUS_ENC_STATE_ENCODING	= 2,
+ 	VENUS_ENC_STATE_STOPPED		= 3,
+ 	VENUS_ENC_STATE_DRAIN		= 4,
++	VENUS_ENC_STATE_CONFIGURED	= 5,
+ };
+ 
+ struct venus_ts_metadata {
+diff --git a/drivers/media/platform/qcom/venus/venc.c b/drivers/media/platform/qcom/venus/venc.c
+index 302386f81..2500c902f 100644
+--- a/drivers/media/platform/qcom/venus/venc.c
++++ b/drivers/media/platform/qcom/venus/venc.c
+@@ -234,6 +234,13 @@ static int venc_try_fmt(struct file *file, void *fh, struct v4l2_format *f)
+ 	return 0;
+ }
+ 
++void venc_mark_config_dirty(struct venus_inst *inst)
++{
++	if (IS_IRIS1(inst->core) &&
++	    inst->enc_state == VENUS_ENC_STATE_CONFIGURED)
++		inst->enc_state = VENUS_ENC_STATE_INIT;
++}
++
+ static int venc_s_fmt(struct file *file, void *fh, struct v4l2_format *f)
+ {
+ 	struct venus_inst *inst = to_inst(file);
+@@ -298,6 +305,8 @@ static int venc_s_fmt(struct file *file, void *fh, struct v4l2_format *f)
+ 		inst->output_buf_size = pixmp->plane_fmt[0].sizeimage;
+ 	}
+ 
++	venc_mark_config_dirty(inst);
++
+ 	return 0;
+ }
+ 
+@@ -399,6 +408,8 @@ venc_s_selection(struct file *file, void *fh, struct v4l2_selection *s)
+ 		return -EINVAL;
+ 	}
+ 
++	venc_mark_config_dirty(inst);
++
+ 	return 0;
+ }
+ 
+@@ -431,6 +442,7 @@ static int venc_s_parm(struct file *file, void *fh, struct v4l2_streamparm *a)
+ 
+ 	inst->timeperframe = *timeperframe;
+ 	inst->fps = fps;
++	venc_mark_config_dirty(inst);
+ 
+ 	return 0;
+ }
+@@ -1064,6 +1076,21 @@ static int venc_set_properties(struct venus_inst *inst)
+ 	return 0;
+ }
+ 
++static int venc_set_properties_if_needed(struct venus_inst *inst)
++{
++	int ret;
++
++	if (IS_IRIS1(inst->core) &&
++	    inst->enc_state == VENUS_ENC_STATE_CONFIGURED)
++		return 0;
++
++	ret = venc_set_properties(inst);
++	if (!ret && IS_IRIS1(inst->core))
++		inst->enc_state = VENUS_ENC_STATE_CONFIGURED;
++
++	return ret;
++}
++
+ static int venc_init_session(struct venus_inst *inst)
+ {
+ 	int ret;
+@@ -1094,7 +1121,7 @@ static int venc_init_session(struct venus_inst *inst)
+ 	if (ret)
+ 		goto deinit;
+ 
+-	ret = venc_set_properties(inst);
++	ret = venc_set_properties_if_needed(inst);
+ 	if (ret)
+ 		goto deinit;
+ 
+@@ -1427,7 +1454,7 @@ static int venc_start_streaming(struct vb2_queue *q, unsigned int count)
+ 	if (ret)
+ 		goto error;
+ 
+-	ret = venc_set_properties(inst);
++	ret = venc_set_properties_if_needed(inst);
+ 	if (ret)
+ 		goto error;
+ 
+diff --git a/drivers/media/platform/qcom/venus/venc.h b/drivers/media/platform/qcom/venus/venc.h
+index 719d0f73b..445b041df 100644
+--- a/drivers/media/platform/qcom/venus/venc.h
++++ b/drivers/media/platform/qcom/venus/venc.h
+@@ -9,5 +9,6 @@
+ struct venus_inst;
+ 
+ int venc_ctrl_init(struct venus_inst *inst);
++void venc_mark_config_dirty(struct venus_inst *inst);
+ 
+ #endif
+diff --git a/drivers/media/platform/qcom/venus/venc_ctrls.c b/drivers/media/platform/qcom/venus/venc_ctrls.c
+index 4d36c44f9..604ec412e 100644
+--- a/drivers/media/platform/qcom/venus/venc_ctrls.c
++++ b/drivers/media/platform/qcom/venus/venc_ctrls.c
+@@ -399,6 +399,8 @@ static int venc_op_s_ctrl(struct v4l2_ctrl *ctrl)
+ 		return -EINVAL;
+ 	}
+ 
++	venc_mark_config_dirty(inst);
++
+ 	return 0;
+ }
+ 
+-- 
+2.43.0
+

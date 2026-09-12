@@ -1,0 +1,72 @@
+make: 进入目录“/home/snowflake/linux/.venus-secure-persist-src”
+make[1]: 进入目录“/home/snowflake/linux/raphael-kernel-venus/out/venus-validation/secure-persist-build/kernel-build”
+make[1]: 离开目录“/home/snowflake/linux/raphael-kernel-venus/out/venus-validation/secure-persist-build/kernel-build”
+make: 离开目录“/home/snowflake/linux/.venus-secure-persist-src”
+--- DTB SHA-256 ---
+c26ff5b21f0add5e0f355442bde83753be9ad330830899dd7b16eb52391a5ca9  /home/snowflake/linux/raphael-kernel-venus/out/venus-validation/secure-persist-build/kernel-build/arch/arm64/boot/dts/qcom/sm8150-xiaomi-raphael.dtb
+--- secure child ---
+3810-			firmware-name = "qcom/sm8150/Xiaomi/raphael/venus.mbn";
+3811-			phandle = <0x28>;
+3812-
+3813:			secure-non-pixel {
+3814-				compatible = "qcom,venus-secure-context";
+3815-				iommus = <0x2f 0x2304 0x60>;
+3816-				qcom,secure-vmid = <0x0b>;
+3817-				memory-region = <0xcc>;
+3818-				phandle = <0x29>;
+3819-			};
+3820-
+3821-			opp-table {
+--- secure low-IOVA reservation ---
+787-		};
+788-
+789:		venus-secure-nonpixel-iova {
+790-			iommu-addresses = <0x29 0x00 0x00 0x00 0x1000000>;
+791-			phandle = <0xcc>;
+792-		};
+--- Venus DMA aperture ---
+3786-			};
+3787-		};
+3788-
+3789:		video-codec@aa00000 {
+3790-			compatible = "qcom,sm8150-venus";
+3791-			reg = <0x00 0xaa00000 0x00 0x100000>;
+3792-			interrupts = <0x00 0xae 0x04>;
+3793-			#address-cells = <0x02>;
+3794-			#size-cells = <0x02>;
+3795-			ranges;
+3796-			dma-ranges = <0x00 0x1000000 0x00 0x1000000 0x00 0x24800000>;
+3797-			clocks = <0x03 0xc3 0x03 0xc1 0x03 0xc2 0xc7 0x04 0xc7 0x02 0xc7 0x03 0xc7 0x00>;
+3798-			clock-names = "iface", "vcodec0_bus", "cvp_bus", "core", "vcodec0_core", "cvp_core", "bus";
+3799-			power-domains = <0xc7 0x00 0xc7 0x01 0xc7 0x02 0x7a 0x09>;
+3800-			power-domain-names = "venus", "vcodec0", "cvp", "mmcx";
+3801-			operating-points-v2 = <0xc8>;
+--- decompile warnings (pre-existing board warnings) ---
+/tmp/sm8150-xiaomi-raphael-secure-final.dts: Warning (simple_bus_reg): /soc@0/ipa@1e00000: simple-bus unit address format error, expected "1e40000"
+/tmp/sm8150-xiaomi-raphael-secure-final.dts: Warning (avoid_unnecessary_addr_size): /soc@0/display-subsystem@ae00000/dsi@ae96000: unnecessary #address-cells/#size-cells without "ranges", "dma-ranges" or child "reg" or "ranges" property
+/tmp/sm8150-xiaomi-raphael-secure-final.dts: Warning (avoid_unnecessary_addr_size): /soc@0/spmi@c440000/pmic@3: unnecessary #address-cells/#size-cells without "ranges", "dma-ranges" or child "reg" or "ranges" property
+/tmp/sm8150-xiaomi-raphael-secure-final.dts: Warning (unique_unit_address): /soc@0/geniqup@8c0000/i2c@880000: duplicate unit-address (also used in node /soc@0/geniqup@8c0000/spi@880000)
+/tmp/sm8150-xiaomi-raphael-secure-final.dts: Warning (unique_unit_address): /soc@0/geniqup@8c0000/i2c@884000: duplicate unit-address (also used in node /soc@0/geniqup@8c0000/spi@884000)
+/tmp/sm8150-xiaomi-raphael-secure-final.dts: Warning (unique_unit_address): /soc@0/geniqup@8c0000/i2c@888000: duplicate unit-address (also used in node /soc@0/geniqup@8c0000/spi@888000)
+/tmp/sm8150-xiaomi-raphael-secure-final.dts: Warning (unique_unit_address): /soc@0/geniqup@8c0000/i2c@88c000: duplicate unit-address (also used in node /soc@0/geniqup@8c0000/spi@88c000)
+/tmp/sm8150-xiaomi-raphael-secure-final.dts: Warning (unique_unit_address): /soc@0/geniqup@8c0000/i2c@890000: duplicate unit-address (also used in node /soc@0/geniqup@8c0000/spi@890000)
+/tmp/sm8150-xiaomi-raphael-secure-final.dts: Warning (unique_unit_address): /soc@0/geniqup@8c0000/i2c@894000: duplicate unit-address (also used in node /soc@0/geniqup@8c0000/spi@894000)
+/tmp/sm8150-xiaomi-raphael-secure-final.dts: Warning (unique_unit_address): /soc@0/geniqup@8c0000/i2c@898000: duplicate unit-address (also used in node /soc@0/geniqup@8c0000/spi@898000)
+/tmp/sm8150-xiaomi-raphael-secure-final.dts: Warning (unique_unit_address): /soc@0/geniqup@8c0000/i2c@89c000: duplicate unit-address (also used in node /soc@0/geniqup@8c0000/spi@89c000)
+/tmp/sm8150-xiaomi-raphael-secure-final.dts: Warning (unique_unit_address): /soc@0/geniqup@ac0000/i2c@a80000: duplicate unit-address (also used in node /soc@0/geniqup@ac0000/spi@a80000)
+/tmp/sm8150-xiaomi-raphael-secure-final.dts: Warning (unique_unit_address): /soc@0/geniqup@ac0000/i2c@a84000: duplicate unit-address (also used in node /soc@0/geniqup@ac0000/spi@a84000)
+/tmp/sm8150-xiaomi-raphael-secure-final.dts: Warning (unique_unit_address): /soc@0/geniqup@ac0000/i2c@a84000: duplicate unit-address (also used in node /soc@0/geniqup@ac0000/serial@a84000)
+/tmp/sm8150-xiaomi-raphael-secure-final.dts: Warning (unique_unit_address): /soc@0/geniqup@ac0000/spi@a84000: duplicate unit-address (also used in node /soc@0/geniqup@ac0000/serial@a84000)
+/tmp/sm8150-xiaomi-raphael-secure-final.dts: Warning (unique_unit_address): /soc@0/geniqup@ac0000/i2c@a88000: duplicate unit-address (also used in node /soc@0/geniqup@ac0000/spi@a88000)
+/tmp/sm8150-xiaomi-raphael-secure-final.dts: Warning (unique_unit_address): /soc@0/geniqup@ac0000/i2c@a8c000: duplicate unit-address (also used in node /soc@0/geniqup@ac0000/spi@a8c000)
+/tmp/sm8150-xiaomi-raphael-secure-final.dts: Warning (unique_unit_address): /soc@0/geniqup@ac0000/serial@a90000: duplicate unit-address (also used in node /soc@0/geniqup@ac0000/i2c@a90000)
+/tmp/sm8150-xiaomi-raphael-secure-final.dts: Warning (unique_unit_address): /soc@0/geniqup@ac0000/serial@a90000: duplicate unit-address (also used in node /soc@0/geniqup@ac0000/spi@a90000)
+/tmp/sm8150-xiaomi-raphael-secure-final.dts: Warning (unique_unit_address): /soc@0/geniqup@ac0000/i2c@a90000: duplicate unit-address (also used in node /soc@0/geniqup@ac0000/spi@a90000)
+/tmp/sm8150-xiaomi-raphael-secure-final.dts: Warning (unique_unit_address): /soc@0/geniqup@cc0000/i2c@c80000: duplicate unit-address (also used in node /soc@0/geniqup@cc0000/spi@c80000)
+/tmp/sm8150-xiaomi-raphael-secure-final.dts: Warning (unique_unit_address): /soc@0/geniqup@cc0000/i2c@c84000: duplicate unit-address (also used in node /soc@0/geniqup@cc0000/spi@c84000)
+/tmp/sm8150-xiaomi-raphael-secure-final.dts: Warning (unique_unit_address): /soc@0/geniqup@cc0000/i2c@c88000: duplicate unit-address (also used in node /soc@0/geniqup@cc0000/spi@c88000)
+/tmp/sm8150-xiaomi-raphael-secure-final.dts: Warning (unique_unit_address): /soc@0/geniqup@cc0000/i2c@c8c000: duplicate unit-address (also used in node /soc@0/geniqup@cc0000/spi@c8c000)
+/tmp/sm8150-xiaomi-raphael-secure-final.dts: Warning (unique_unit_address): /soc@0/geniqup@cc0000/i2c@c8c000: duplicate unit-address (also used in node /soc@0/geniqup@cc0000/serial@c8c000)
+/tmp/sm8150-xiaomi-raphael-secure-final.dts: Warning (unique_unit_address): /soc@0/geniqup@cc0000/spi@c8c000: duplicate unit-address (also used in node /soc@0/geniqup@cc0000/serial@c8c000)
+/tmp/sm8150-xiaomi-raphael-secure-final.dts: Warning (unique_unit_address): /soc@0/geniqup@cc0000/i2c@c90000: duplicate unit-address (also used in node /soc@0/geniqup@cc0000/spi@c90000)
+/tmp/sm8150-xiaomi-raphael-secure-final.dts: Warning (unique_unit_address): /soc@0/geniqup@cc0000/i2c@c94000: duplicate unit-address (also used in node /soc@0/geniqup@cc0000/spi@c94000)

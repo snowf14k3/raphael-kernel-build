@@ -1,0 +1,8 @@
+make: 进入目录“/home/snowflake/linux/.venus-secure-persist-src”
+make[1]: 进入目录“/home/snowflake/linux/raphael-kernel-venus/out/venus-validation/secure-persist-build/kernel-build”
+  UPD     include/config/kernel.release
+  UPD     include/generated/utsrelease.h
+  CC [M]  drivers/media/platform/qcom/venus/helpers.o
+  LD [M]  drivers/media/platform/qcom/venus/venus-core.o
+make[1]: 离开目录“/home/snowflake/linux/raphael-kernel-venus/out/venus-validation/secure-persist-build/kernel-build”
+make: 离开目录“/home/snowflake/linux/.venus-secure-persist-src”

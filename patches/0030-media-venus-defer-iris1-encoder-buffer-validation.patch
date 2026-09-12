@@ -1,0 +1,94 @@
+From: Venus CF6 <cf6@localhost>
+Date: Sat, 12 Sep 2026 18:00:00 +0800
+Subject: [PATCH] media: venus: defer IRIS1 encoder buffer validation
+
+The IRIS1 encoder performs two synchronous firmware requirement queries in
+venc_verify_conf(), then sends counts, and performs a third query while
+preparing internal buffers.  Android Q sends final counts first.  It then
+uses one complete requirement snapshot to validate both queues and allocate
+all internal buffers.
+
+Keep only local VB2 count collection in venc_verify_conf().  The existing
+IRIS1 internal-buffer path takes a post-count snapshot and validates both
+queue counts, every allocated extent, duplicate requirement types and all
+internal requirements before registering memory.  Full validation there
+removes the two pre-count GET_PROPERTY transactions.
+The start gate remains intact.
+
+This is limited to IRIS1.  Other Venus generations retain their existing
+validation path.
+
+Signed-off-by: Venus CF6 <cf6@localhost>
+---
+ drivers/media/platform/qcom/venus/venc.c | 40 ++++++++++---------------
+ 1 file changed, 16 insertions(+), 24 deletions(-)
+
+diff --git a/drivers/media/platform/qcom/venus/venc.c b/drivers/media/platform/qcom/venus/venc.c
+index b677c8912..302386f81 100644
+--- a/drivers/media/platform/qcom/venus/venc.c
++++ b/drivers/media/platform/qcom/venus/venc.c
+@@ -1330,34 +1330,19 @@ static void venc_buf_cleanup(struct vb2_buffer *vb)
+ 		venc_release_session(inst);
+ }
+ 
+-static int venc_verify_queue_iris1(struct venus_inst *inst, u32 type)
++static int venc_set_queue_count_iris1(struct venus_inst *inst, u32 type)
+ {
+-	struct hfi_buffer_requirements req;
+ 	struct vb2_queue *q = v4l2_m2m_get_vq(inst->m2m_ctx, type);
+-	bool input = V4L2_TYPE_IS_OUTPUT(type);
+-	struct vb2_buffer *vb;
+-	unsigned int minimum, i, count = vb2_get_num_buffers(q);
+-	int ret;
+-
+-	ret = venus_helper_get_bufreq(inst,
+-				      input ? HFI_BUFFER_INPUT : HFI_BUFFER_OUTPUT,
+-				      &req);
+-	if (ret)
+-		return ret;
++	unsigned int count;
+ 
+-	minimum = max3(req.count_actual,
+-		       hfi_bufreq_get_count_min(&req, HFI_VERSION_4XX),
+-		       hfi_bufreq_get_count_min_host(&req, HFI_VERSION_4XX));
+-	if (!req.size || !minimum || count < minimum)
++	if (!q)
+ 		return -EINVAL;
+ 
+-	for (i = 0; i < q->max_num_buffers; i++) {
+-		vb = vb2_get_buffer(q, i);
+-		if (vb && vb2_plane_size(vb, 0) < req.size)
+-			return -EINVAL;
+-	}
++	count = vb2_get_num_buffers(q);
++	if (!count)
++		return -EINVAL;
+ 
+-	if (input)
++	if (V4L2_TYPE_IS_OUTPUT(type))
+ 		inst->num_input_bufs = count;
+ 	else
+ 		inst->num_output_bufs = count;
+@@ -1372,11 +1357,18 @@ static int venc_verify_conf(struct venus_inst *inst)
+ 	int ret;
+ 
+ 	if (IS_IRIS1(inst->core)) {
+-		ret = venc_verify_queue_iris1(inst, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE);
++		/*
++		 * Capture the negotiated VB2 counts before sending BUFFER_COUNT_ACTUAL.
++		 * The single post-count requirements snapshot used for full count and
++		 * extent validation is taken by the IRIS1 internal-buffer path.
++		 */
++		ret = venc_set_queue_count_iris1(inst,
++						 V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE);
+ 		if (ret)
+ 			return ret;
+ 
+-		return venc_verify_queue_iris1(inst, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE);
++		return venc_set_queue_count_iris1(inst,
++						   V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE);
+ 	}
+ 
+ 	if (!inst->num_input_bufs || !inst->num_output_bufs)
+-- 
+2.43.0

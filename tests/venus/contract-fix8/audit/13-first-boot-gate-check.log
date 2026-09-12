@@ -1,0 +1,4 @@
+bash_syntax=PASS
+encoder_device_access=ABSENT
+mode=755
+f4218427cbf72c8df8ef819db53600cdd34a5b4b1f478c5c179ae2d0bca4a2d4  tests/venus/contract-fix8/first-boot-secure-gate.sh

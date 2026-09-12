@@ -1,0 +1,15 @@
+total: 0 errors, 0 warnings, 21 lines checked
+
+/home/snowflake/linux/raphael-kernel-venus/patches/0034-media-venus-fail-closed-without-secure-iris1-encoder-persist.patch has no obvious style problems and is ready for submission.
+total: 0 errors, 0 warnings, 406 lines checked
+
+/home/snowflake/linux/raphael-kernel-venus/patches/0035-iommu-arm-smmu-share-qcom-secure-domain-page-tables.patch has no obvious style problems and is ready for submission.
+total: 0 errors, 0 warnings, 63 lines checked
+
+/home/snowflake/linux/raphael-kernel-venus/patches/0036-dt-bindings-media-qcom-sm8150-venus-add-secure-context.patch has no obvious style problems and is ready for submission.
+total: 0 errors, 0 warnings, 117 lines checked
+
+/home/snowflake/linux/raphael-kernel-venus/patches/0037-arm64-dts-qcom-add-sm8150-venus-secure-nonpixel-stream.patch has no obvious style problems and is ready for submission.
+total: 0 errors, 0 warnings, 298 lines checked
+
+/home/snowflake/linux/raphael-kernel-venus/patches/0038-media-venus-allocate-iris1-encoder-persist-securely.patch has no obvious style problems and is ready for submission.

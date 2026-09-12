@@ -1,0 +1,62 @@
+Subject: [PATCH 26/26] media: venus: align IRIS1 encoder internal extents
+
+Android Q msm_smem.c:alloc_dma_mem() rounds the allocation size to 4 KiB
+and stores it in msm_smem.size. set_internal_buf_on_fw() sends that size
+as both buffer_size and min_buffer_size; release uses the same handle.
+
+For the IRIS1 encoder, use one rounded extent for DMA allocation,
+registration, release and free. Widen the rounding and reject values
+that cannot be represented by the 32-bit HFI size fields. Leave decoder
+and non-IRIS1 behavior unchanged. No DMA pool, address, attribute,
+frequency, bandwidth or command-order policy is changed here.
+
+This aligns a concrete downstream protocol difference. The CF1 capture
+shows the first SCRATCH command consumed but does not establish this
+length difference as the cause of the subsequent system reset.
+
+Reference: Android Q 192eca8550f95c2eec58a474793d1d93fc1b3b67,
+msm_smem.c:352-353,406-409; msm_vidc_common.c:3795-3826;
+hfi_packetization.c:669-673.
+
+diff --git a/drivers/media/platform/qcom/venus/helpers.c b/drivers/media/platform/qcom/venus/helpers.c
+index 887f31b..0250104 100644
+--- a/drivers/media/platform/qcom/venus/helpers.c
++++ b/drivers/media/platform/qcom/venus/helpers.c
+@@ -7,6 +7,7 @@
+ #include <linux/list.h>
+ #include <linux/mutex.h>
+ #include <linux/slab.h>
++#include <linux/sizes.h>
+ #include <linux/kernel.h>
+ #include <media/videobuf2-dma-contig.h>
+ #include <media/v4l2-mem2mem.h>
+@@ -237,12 +238,20 @@ static int intbufs_set_buffer_req(struct venus_inst *inst,
+ 	struct device *dev = core->dev;
+ 	struct hfi_buffer_desc bd;
+ 	struct intbuf *buf;
++	u64 alloc_size = bufreq->size;
+ 	unsigned int i;
+ 	int ret;
+ 
+ 	if (!bufreq->size)
+ 		return 0;
+ 
++	/* Android Q registers the allocation extent, rounded to 4 KiB. */
++	if (IS_IRIS1(core) && inst->session_type == VIDC_SESSION_TYPE_ENC) {
++		alloc_size = ALIGN(alloc_size, SZ_4K);
++		if (alloc_size > U32_MAX)
++			return -EOVERFLOW;
++	}
++
+ 	for (i = 0; i < bufreq->count_actual; i++) {
+ 		buf = kzalloc_obj(*buf);
+ 		if (!buf) {
+@@ -251,7 +260,7 @@ static int intbufs_set_buffer_req(struct venus_inst *inst,
+ 		}
+ 
+ 		buf->type = bufreq->type;
+-		buf->size = bufreq->size;
++		buf->size = alloc_size;
+ 		buf->attrs = DMA_ATTR_WRITE_COMBINE |
+ 			     DMA_ATTR_NO_KERNEL_MAPPING;
+ 		buf->va = dma_alloc_attrs(dev, buf->size, &buf->da, GFP_KERNEL,

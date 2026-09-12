@@ -1,0 +1,28 @@
+Ramoops recovery plan for the first secure-persist boot
+
+Observed current boot:
+- pstorefs is mounted.
+- pstore backend is "(null)".
+- ramoops module parameters have mem_address=0 and mem_size=0.
+- No ramoops platform device and no live-device-tree ramoops node exist.
+- Therefore the CF7 reset could not leave a persistent kernel record.
+
+Do not copy a physical ramoops address from another SM8150 board. The OnePlus
+0xa9800000 node has not been validated against Raphael memory reservations.
+
+Linux 7.1 in this fixed tree supports dynamic reserved memory by name. Add this
+to the target's persistent kernel command line before the first encoder test:
+
+reserve_mem=2M:4096:ramoops ramoops.mem_name=ramoops ramoops.record_size=262144 ramoops.console_size=262144 ramoops.pmsg_size=262144
+
+First-boot gate:
+1. Boot the new kernel without opening /dev/video0.
+2. Confirm uname, DTB identity, secure child/IOMMU attachment, and a non-null
+   pstore backend.
+3. Reboot once without encoder activity and verify pstore remains healthy.
+4. Only then run a secure allocation/start diagnostic.
+5. Preserve /sys/fs/pstore and /var/lib/systemd/pstore immediately after any
+   reset.
+
+The dynamic address is best effort and may change between boots. Record
+/proc/iomem and the ramoops registration line on every test boot.

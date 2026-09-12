@@ -1,0 +1,36 @@
+From: Venus CF4 <cf4@localhost>
+Date: Sat, 12 Sep 2026 15:20:00 +0800
+Subject: [PATCH] media: venus: report exact IRIS1 encoder capture size
+
+After the IRIS1 encoder starts using firmware's compressed-output requirement
+as the authoritative CAPTURE allocation size, G_FMT must report that same
+negotiated size for an allocated CAPTURE queue. The older max() rule now
+re-inflates firmware's 230400-byte requirement to the generic 1843200-byte
+estimate and contradicts QUERYBUF.
+
+Keep the raw OUTPUT side conservative, where the Venus raw-frame layout can
+legitimately exceed firmware's minimum, but report the cached firmware-backed
+CAPTURE allocation exactly once the queue is busy. This mirrors downstream's
+stored CAPTURE plane size and restores G_FMT/REQBUFS/QUERYBUF consistency
+without relaxing userspace validation.
+
+Signed-off-by: Venus CF4 <cf4@localhost>
+---
+--- a/drivers/media/platform/qcom/venus/venc.c
++++ b/drivers/media/platform/qcom/venus/venc.c
+@@ -335,10 +335,11 @@
+ 
+ 	if (IS_IRIS1(inst->core) &&
+ 	    vb2_is_busy(v4l2_m2m_get_vq(inst->m2m_ctx, f->type))) {
+-		u32 size = V4L2_TYPE_IS_OUTPUT(f->type) ? inst->input_buf_size :
+-							      inst->output_buf_size;
+-
+-		pixmp->plane_fmt[0].sizeimage = max(pixmp->plane_fmt[0].sizeimage, size);
++		if (V4L2_TYPE_IS_OUTPUT(f->type))
++			pixmp->plane_fmt[0].sizeimage =
++				max(pixmp->plane_fmt[0].sizeimage, inst->input_buf_size);
++		else
++			pixmp->plane_fmt[0].sizeimage = inst->output_buf_size;
+ 	}
+ 
+ 	return 0;

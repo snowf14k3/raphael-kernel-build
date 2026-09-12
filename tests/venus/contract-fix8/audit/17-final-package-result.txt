@@ -1,0 +1,30 @@
+Final package result
+Date: 2026-09-12
+status=PASS
+kernel_release=7.1.0-sm8150-gaa4f267dd65c
+package_source_head=aa4f267dd65c056d2e37d4db3a769472a849b91c
+series_source_head=dc1ec24da5f331518551a10e921c5b4d01eabf43
+series_source_tree=3745d717722fc591fb49d39f8878431fab8b85e7
+
+image=linux-image-7.1.0-sm8150-gaa4f267dd65c_7.1.0-gaa4f267dd65c-1_arm64.deb
+image_sha256=5b1d2bb231526dad36f98160a473fe6c3fb00c8210b5ee1e7d13c4f6bf90c979
+headers=linux-headers-7.1.0-sm8150-gaa4f267dd65c_7.1.0-gaa4f267dd65c-1_arm64.deb
+headers_sha256=b0c87764d0a8e372f26aafa3c35a0fa69685635f6043303e00e96a8c69fc7430
+raphael_dtb_sha256=c26ff5b21f0add5e0f355442bde83753be9ad330830899dd7b16eb52391a5ca9
+kernel_config_sha256=bb9f463555046565076041a13422606aced5db56779d6b97fb0d18601a87e8e2
+venus_core_sha256=ad34a4db647f2b592914ee2c3e999797e35f37265c0a280e56611cb89835a9fa
+vmlinuz_sha256=5b95c50c676ca731fffc8be4abfcac52d3809480e924ce508d5771740a12cff0
+
+Verified:
+- bindeb-pkg exited 0 after the full build.
+- image and headers package names match the kernel release.
+- both packages are arm64.
+- Venus module vermagic begins with the exact kernel release.
+- build-tree, /boot, and /usr/lib Raphael DTBs are byte-identical.
+- Image contains QCOM_SMMU_SECURE_PGTABLE READY.
+- venus-core.ko contains VENUS_SECURE_PERSIST ASSIGN and RECLAIM.
+- first-boot gate contains no encoder-device access.
+
+Hardware boundary:
+No phone has booted this kernel. This package is ready for a guarded first
+boot, not for a claim of working hardware encoding.

@@ -1,0 +1,7 @@
+make: 进入目录“/home/snowflake/linux/.venus-secure-persist-src”
+make[1]: 进入目录“/home/snowflake/linux/raphael-kernel-venus/out/venus-validation/secure-persist-build/kernel-build”
+  SCHEMA  Documentation/devicetree/bindings/processed-schema.json
+  CHKDT   /home/snowflake/linux/.venus-secure-persist-src/Documentation/devicetree/bindings
+warning: python package 'yamllint' not installed, skipping
+make[1]: 离开目录“/home/snowflake/linux/raphael-kernel-venus/out/venus-validation/secure-persist-build/kernel-build”
+make: 离开目录“/home/snowflake/linux/.venus-secure-persist-src”

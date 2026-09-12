@@ -1,0 +1,35 @@
+result=PASS
+kernel_release=7.1.0-sm8150-gaa4f267dd65c
+package_source_head=aa4f267dd65c056d2e37d4db3a769472a849b91c
+series_source_head=dc1ec24da5f331518551a10e921c5b4d01eabf43
+series_source_tree=3745d717722fc591fb49d39f8878431fab8b85e7
+image=linux-image-7.1.0-sm8150-gaa4f267dd65c_7.1.0-gaa4f267dd65c-1_arm64.deb
+headers=linux-headers-7.1.0-sm8150-gaa4f267dd65c_7.1.0-gaa4f267dd65c-1_arm64.deb
+image_package=linux-image-7.1.0-sm8150-gaa4f267dd65c
+image_arch=arm64
+headers_package=linux-headers-7.1.0-sm8150-gaa4f267dd65c
+headers_arch=arm64
+venus_module=lib/modules/7.1.0-sm8150-gaa4f267dd65c/kernel/drivers/media/platform/qcom/venus/venus-core.ko
+venus_vermagic=7.1.0-sm8150-gaa4f267dd65c SMP preempt mod_unload aarch64
+--- artifact SHA-256 ---
+5b1d2bb231526dad36f98160a473fe6c3fb00c8210b5ee1e7d13c4f6bf90c979  /home/snowflake/linux/raphael-kernel-venus/out/venus-validation/secure-persist-build/linux-image-7.1.0-sm8150-gaa4f267dd65c_7.1.0-gaa4f267dd65c-1_arm64.deb
+b0c87764d0a8e372f26aafa3c35a0fa69685635f6043303e00e96a8c69fc7430  /home/snowflake/linux/raphael-kernel-venus/out/venus-validation/secure-persist-build/linux-headers-7.1.0-sm8150-gaa4f267dd65c_7.1.0-gaa4f267dd65c-1_arm64.deb
+c26ff5b21f0add5e0f355442bde83753be9ad330830899dd7b16eb52391a5ca9  /home/snowflake/linux/raphael-kernel-venus/out/venus-validation/secure-persist-build/final-package-build-v5/arch/arm64/boot/dts/qcom/sm8150-xiaomi-raphael.dtb
+bb9f463555046565076041a13422606aced5db56779d6b97fb0d18601a87e8e2  /home/snowflake/linux/raphael-kernel-venus/out/venus-validation/secure-persist-build/final-package-build-v5/.config
+ad34a4db647f2b592914ee2c3e999797e35f37265c0a280e56611cb89835a9fa  /tmp/venus-cf8-verify.GNOsRQ/image/lib/modules/7.1.0-sm8150-gaa4f267dd65c/kernel/drivers/media/platform/qcom/venus/venus-core.ko
+c26ff5b21f0add5e0f355442bde83753be9ad330830899dd7b16eb52391a5ca9  /tmp/venus-cf8-verify.GNOsRQ/image/boot/dtbs/qcom/sm8150-xiaomi-raphael.dtb
+c26ff5b21f0add5e0f355442bde83753be9ad330830899dd7b16eb52391a5ca9  /tmp/venus-cf8-verify.GNOsRQ/image/usr/lib/linux-image-7.1.0-sm8150-gaa4f267dd65c/qcom/sm8150-xiaomi-raphael.dtb
+5b95c50c676ca731fffc8be4abfcac52d3809480e924ce508d5771740a12cff0  /tmp/venus-cf8-verify.GNOsRQ/image/boot/vmlinuz-7.1.0-sm8150-gaa4f267dd65c
+--- evidence strings ---
+QCOM_SMMU_SECURE_PGTABLE READY vmid=%u
+VENUS_SECURE_PERSIST ASSIGN iova=%pad size=%zu vmid=%u
+VENUS_SECURE_PERSIST RECLAIM iova=%pad size=%zu vmid=%u
+--- config gates ---
+CONFIG_CMA=y
+CONFIG_QCOM_SCM=y
+CONFIG_VIDEO_QCOM_VENUS=m
+CONFIG_IOMMU_DMA=y
+CONFIG_ARM_SMMU=y
+CONFIG_PSTORE=y
+CONFIG_PSTORE_RAM=y
+CONFIG_DMA_CMA=y

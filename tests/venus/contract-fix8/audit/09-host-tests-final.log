@@ -1,0 +1,4 @@
+PASS: replay, VUI, and secure-persist policy are wired into the staged source
+PASS: 535 assertions against real HFI packetizer and codec functions (host mocks, no hardware)
+source_commit=ab4ce59a1826b18ba200b33f6a32d04d749a7ea5
+series_sha256=5852b2259117dafebb5414ecf3345f7eab3e502735897b194609f058bd6bc41d

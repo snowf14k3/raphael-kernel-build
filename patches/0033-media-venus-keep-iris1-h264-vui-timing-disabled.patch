@@ -1,0 +1,49 @@
+From 51f5cf08ad20e7f2a6851e0c2b978f79aaf48e31 Mon Sep 17 00:00:00 2001
+From: snowf14k3 <60956553+snowf14k3@users.noreply.github.com>
+Date: Sat, 12 Sep 2026 18:42:04 +0800
+Subject: [PATCH 33/33] media: venus: keep H.264 VUI timing disabled on IRIS1
+
+The Android Q encoder exposes VUI timing as a control that defaults to
+disabled. The Venus driver currently enables and sends it
+unconditionally for H.264.
+
+Omit that property on IRIS1 while retaining the generic Venus behavior.
+The CF6 log ended while sending a second VUI property, but that boundary
+alone does not establish VUI timing as the reset cause.
+
+Signed-off-by: snowf14k3 <60956553+snowf14k3@users.noreply.github.com>
+---
+ drivers/media/platform/qcom/venus/venc.c | 16 +++++++++-------
+ 1 file changed, 9 insertions(+), 7 deletions(-)
+
+diff --git a/drivers/media/platform/qcom/venus/venc.c b/drivers/media/platform/qcom/venus/venc.c
+index 2500c902f..43b073193 100644
+--- a/drivers/media/platform/qcom/venus/venc.c
++++ b/drivers/media/platform/qcom/venus/venc.c
+@@ -745,14 +745,16 @@ static int venc_set_properties(struct venus_inst *inst)
+ 		struct hfi_h264_db_control deblock;
+ 		struct hfi_h264_8x8_transform h264_transform;
+ 
+-		ptype = HFI_PROPERTY_PARAM_VENC_H264_VUI_TIMING_INFO;
+-		info.enable = 1;
+-		info.fixed_framerate = 1;
+-		info.time_scale = NSEC_PER_SEC;
++		if (!IS_IRIS1(inst->core)) {
++			ptype = HFI_PROPERTY_PARAM_VENC_H264_VUI_TIMING_INFO;
++			info.enable = 1;
++			info.fixed_framerate = 1;
++			info.time_scale = NSEC_PER_SEC;
+ 
+-		ret = hfi_session_set_property(inst, ptype, &info);
+-		if (ret)
+-			return ret;
++			ret = hfi_session_set_property(inst, ptype, &info);
++			if (ret)
++				return ret;
++		}
+ 
+ 		ptype = HFI_PROPERTY_PARAM_VENC_H264_ENTROPY_CONTROL;
+ 		entropy.entropy_mode = venc_v4l2_to_hfi(
+-- 
+2.43.0
+

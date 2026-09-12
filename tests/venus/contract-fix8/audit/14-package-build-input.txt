@@ -1,0 +1,15 @@
+package_source_head=aa4f267dd65c056d2e37d4db3a769472a849b91c
+secure_patch_head=dc1ec24da5f331518551a10e921c5b4d01eabf43
+package_source_tree=a98f2ace6e8c377d9e4f2241b20f4aec7d2ac98f
+series_only_tree=3745d717722fc591fb49d39f8878431fab8b85e7
+package_source_status=clean
+3c1f4b97486935b759fedd6620ade87a9053e698a767a69469e46a63ae2e85ea  /home/snowflake/linux/.venus-secure-persist-package-dc1ec24d/arch/arm64/configs/raphael.config
+3c1f4b97486935b759fedd6620ade87a9053e698a767a69469e46a63ae2e85ea  /home/snowflake/linux/raphael-kernel-venus/raphael.config
+aa4f267dd65c056d2e37d4db3a769472a849b91c 2026-09-12T20:32:49+08:00 build: stage Raphael secure-persist test package
+dc1ec24da5f331518551a10e921c5b4d01eabf43 2026-09-12T20:29:18+08:00 media: venus: allocate IRIS1 encoder persist from secure memory
+101:	buf->attrs = DMA_ATTR_FORCE_CONTIGUOUS |
+102:		     DMA_ATTR_NO_KERNEL_MAPPING;
+109:	buf->pa = iommu_iova_to_phys(domain, buf->da);
+116:		if (iommu_iova_to_phys(domain, buf->da + offset) != expected_pa) {
+344:			     DMA_ATTR_NO_KERNEL_MAPPING;
+415:				     DMA_ATTR_NO_KERNEL_MAPPING;

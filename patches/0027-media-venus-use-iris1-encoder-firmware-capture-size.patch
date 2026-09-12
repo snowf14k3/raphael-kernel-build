@@ -1,0 +1,30 @@
+From bbf4aa25f29ee78986c9569c7c4d18866415be99 Mon Sep 17 00:00:00 2001
+From: Venus CF3 <cf3@localhost>
+Date: Sat, 12 Sep 2026 14:53:34 +0800
+Subject: [PATCH] Use firmware IRIS1 encoder capture size
+
+---
+ drivers/media/platform/qcom/venus/venc.c | 7 +++++--
+ 1 file changed, 5 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/media/platform/qcom/venus/venc.c b/drivers/media/platform/qcom/venus/venc.c
+index c60328a..c42a3e8 100644
+--- a/drivers/media/platform/qcom/venus/venc.c
++++ b/drivers/media/platform/qcom/venus/venc.c
+@@ -1156,8 +1156,11 @@ static int venc_queue_setup_iris1(struct vb2_queue *q, unsigned int *num_buffers
+ 		size = max(size, venus_helper_get_framesz(inst->fmt_out->pixfmt,
+ 							  inst->out_width,
+ 							  inst->out_height));
+-	else
+-		size = max(size, inst->output_buf_size);
++	/*
++	 * SM8150 downstream treats the encoder compressed-output requirement
++	 * returned by firmware as authoritative. Do not inflate CAPTURE with
++	 * the generic compressed-frame heuristic used by other platforms.
++	 */
+ 
+ 	if (*num_planes) {
+ 		if (sizes[0] < size) {
+-- 
+2.43.0
+

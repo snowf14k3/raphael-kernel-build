@@ -1,0 +1,34 @@
+Final patch and host validation
+Date: 2026-09-12
+
+Patch series:
+count=38
+series_sha256=5852b2259117dafebb5414ecf3345f7eab3e502735897b194609f058bd6bc41d
+replayed_tree=3745d717722fc591fb49d39f8878431fab8b85e7
+staged_tree=3745d717722fc591fb49d39f8878431fab8b85e7
+result=PASS
+
+Patch SHA-256:
+0034 76945810318c2a7a572663628abec38b4f786cb87371bfb47702ba08406b571c
+0035 193fd99096316e5fdca10bc876fbe3691f1a6da24133c03b68005c4886e352d5
+0036 b943601b3f8eed20e4bc0a3eda7a37f966d89f530d4ed918bdc6071c11ab007c
+0037 494f2980df9800e3e1df5caef005c16120e072a3fe4e5a1ae8e191bc5be1ad32
+0038 f365cf4b049783142d2efad5699aff90e38ccd15527a6ea121ccd4d372a99f62
+
+checkpatch:
+0034: 0 errors, 0 warnings, 21 lines
+0035: 0 errors, 0 warnings, 406 lines
+0036: 0 errors, 0 warnings, 63 lines
+0037: 0 errors, 0 warnings, 117 lines
+0038: 0 errors, 0 warnings, 298 lines
+
+Executable host tests:
+- 535 assertions against the real staged HFI packetizer and extracted codec
+  functions: PASS.
+- 66 staged-source integration assertions: PASS.
+
+Coverage includes SMMU lifecycle, page-granular SCM page-table extents, DT
+aperture, decoder-preserving fail closed, forced-contiguous allocation,
+page-by-page IOVA-to-PA validation, assignment/reclaim order, failure
+retention, locked allocation snapshots, and hardware evidence markers.
+No test accesses hardware.

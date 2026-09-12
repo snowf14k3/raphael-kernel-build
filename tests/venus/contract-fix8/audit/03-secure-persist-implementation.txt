@@ -1,0 +1,50 @@
+Secure-persist implementation snapshot
+Date: 2026-09-12
+
+Fixed source base:
+ab4ce59a1826b18ba200b33f6a32d04d749a7ea5
+
+Staged commits:
+ed6882fd623f5565085aa6dacdd709f46118ab8d fail closed without secure encoder persist
+a19ca5bc6ca0e5575ed21353bf9b07b9441f15bb share Qualcomm secure-domain page tables
+92d6dad4aba2dcee1a3a39aeb254fc381a0077b1 add secure-context DT binding
+1f6ace96e63d29bba5489be5bfc389836dffb618 add SM8150 secure non-pixel stream
+dc1ec24da5f331518551a10e921c5b4d01eabf43 allocate encoder persist from secure memory
+
+Staged source tree:
+3745d717722fc591fb49d39f8878431fab8b85e7
+
+Implemented contract:
+- IRIS1 encoder start fails with -EOPNOTSUPP if firmware requests
+  HFI_BUFFER_INTERNAL_PERSIST and the secure auxiliary device is unavailable.
+- A missing secure DT child keeps the proven decoder available; the encoder
+  remains blocked by the fail-closed guard.
+- SM8150 V2 uses a separate platform child on SID 0x2304.
+- The child DMA aperture is [0x01000000, 0x25800000); low IOVA space is
+  reserved explicitly.
+- Only a consumer declaring qcom,secure-vmid=CP_NON_PIXEL activates the new
+  ARM SMMU ownership path.
+- Every page-table allocation and SCM ownership extent is PAGE_ALIGN(size).
+  This covers a 32-bit-IAS top-level table that can request only 64 bytes.
+- Newly allocated page-table pages stay HLOS read/write and are shared
+  CP_NON_PIXEL read-only through qcom_scm_assign_mem().
+- Freed page-table pages are returned only after IOTLB invalidation. Ownership
+  rollback failure poisons the domain and retains the affected pages.
+- The page-table free callback copies allocation size while holding its lock;
+  it does not dereference the tracking object after a racing sync may free it.
+- IRIS1 encoder INTERNAL_PERSIST uses
+  DMA_ATTR_FORCE_CONTIGUOUS|DMA_ATTR_NO_KERNEL_MAPPING.
+- The driver resolves and verifies every 4 KiB IOVA-to-physical step across
+  the allocation before making one contiguous SCM ownership transfer.
+- The buffer is zeroed by the DMA allocator, lies inside the secure aperture,
+  and is transferred HLOS -> CP_NON_PIXEL read/write before HFI_SET_BUFFERS.
+- Teardown performs HFI_UNSET_BUFFERS, returns data ownership to HLOS, then
+  removes the DMA mapping and frees memory.
+- If HFI unregister or SCM ownership rollback fails, the buffer is retained.
+- Scratch and all non-persist buffers keep their existing non-secure DMA path.
+- Boot/runtime markers expose secure-page-table READY and persist
+  ASSIGN/RECLAIM with VMID, IOVA, and extent.
+
+Scope boundary:
+These are source and build facts. No phone has booted this implementation and
+no hardware encoder success is claimed.

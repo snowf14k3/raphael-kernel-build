@@ -1,0 +1,66 @@
+CF7 encoder persist security-domain diagnosis
+
+Observed CF7 buffer:
+HFI type=4 (INTERNAL_PERSIST)
+firmware_required_size=64768
+allocated_size=65536
+registered_iova=0xdeff0000
+allocator=dma_alloc_attrs(core->dev, normal non-secure DMA domain)
+
+Fixed Android Q contract at commit
+192eca8550f95c2eec58a474793d1d93fc1b3b67:
+
+1. drivers/media/platform/msm/vidc/msm_smem.c alloc_dma_mem()
+   forces secure allocation when:
+   buffer_type == HAL_BUFFER_INTERNAL_PERSIST &&
+   session_type == MSM_VIDC_ENCODER
+   This applies even when the userspace encoder session is non-secure.
+
+2. That path sets ION_FLAG_SECURE plus ION_FLAG_CP_NON_PIXEL and uses the
+   secure heap.
+
+3. msm_smem_get_context_bank() rewrites encoder PERSIST to PERSIST_1 for
+   secure context-bank selection.
+
+4. sm8150-v2 selects:
+   non-secure SID 0x2300, IOVA [0x25800000, 0xe0000000)
+   secure non-pixel SID 0x2304, IOVA [0x01000000, 0x25800000)
+
+Current Linux contract:
+- sm8150 Venus DT attaches only non-secure SID 0x2300.
+- The driver reserves [0, 0x25800000) from that DMA domain.
+- It advertises cp_nonpixel [0x01000000, 0x25800000) to secure firmware.
+- intbufs_set_buffer_req() nevertheless allocates encoder PERSIST from the
+  normal non-secure domain.
+- 0xdeff0000 is outside cp_nonpixel and lies in the non-secure pool.
+
+Boundary fit:
+- Registration commands succeed because they only place descriptors on HFI.
+- LOAD_RESOURCES_DONE returns fw_error=0.
+- The system resets immediately after that completion and before the recorded
+  HFI START command.
+- LOAD resource activation is the first point where secure firmware/hardware
+  can validate or access the registered encoder persist buffer.
+- A secure-context/XPU violation can reset outside HLOS and need not emit a
+  Linux SMMU fault, matching the missing kernel diagnostics.
+- Prior successful decode is consistent: the downstream unconditional secure
+  persist special case is encoder-only.
+
+Conclusion:
+The highest-confidence root cause is that the SM8150 encoder INTERNAL_PERSIST
+buffer is mapped in the non-secure SID/IOVA domain instead of the mandatory
+secure CP_NON_PIXEL domain. This is an architectural DT/IOMMU/secure-memory
+gap, not another property-order issue.
+
+Confidence boundary:
+No reset-reason register or secure-world fault record was captured, so this is
+not an absolute hardware post-mortem. It is, however, the first source mismatch
+that is encoder-only, security-relevant, and lands exactly at the observed
+LOAD_RESOURCES activation boundary.
+
+Implementation consequence:
+Do not patch only the address or reserve a lower IOVA. A correct fix needs an
+actual secure non-pixel context (SM8150 V2 SID 0x2304), secure memory ownership,
+and a dedicated encoder-persist allocator/lifecycle. That likely requires a
+full kernel and DT change; the existing hot-module package cannot add the
+missing IOMMU attachment safely.

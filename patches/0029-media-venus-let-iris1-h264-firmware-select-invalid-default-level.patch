@@ -1,0 +1,66 @@
+From: Venus CF5 <cf5@localhost>
+Date: Sat, 12 Sep 2026 16:10:00 +0800
+Subject: [PATCH] media: venus: let IRIS1 firmware select invalid default H264 level
+
+SM8150 downstream uses an unspecified H.264 level by default and lets
+firmware select a level for the active stream.  Generic Venus instead
+defaults the V4L2 H.264 level control to Level 1.0 and the HFI 1.x
+packetizer rewrites a zero/unspecified level back to Level 1.
+
+That produces an invalid default contract as soon as an IRIS1 encoder
+stream exceeds H.264 Level 1 MaxFS or MaxMBPS.  For example 640x480 at
+15 fps is 1200 macroblocks per frame and 18000 macroblocks per second,
+well above Level 1's 99 and 1485 limits.
+
+For IRIS1 H.264 encoding only, keep an explicitly valid Level 1 stream
+unchanged, but convert the generic Level 1 default to firmware-auto when
+the active dimensions or frame rate exceed Level 1.  Preserve that zero
+level in the HFI packetizer for this IRIS1 encoder case, matching the
+SM8150 downstream profile/level contract.  Other codecs, decoders and
+Venus platforms retain the existing fallback behavior.
+
+Signed-off-by: Venus CF5 <cf5@localhost>
+---
+--- a/drivers/media/platform/qcom/venus/helpers.c
++++ b/drivers/media/platform/qcom/venus/helpers.c
+@@ -1089,6 +1089,26 @@
+ 
+ 	hfi_id_profile_level(inst->hfi_codec, profile, level, &pl);
+ 
++	/*
++	 * SM8150 downstream leaves the default H.264 level unspecified so
++	 * firmware can choose a level which satisfies the active frame rate
++	 * and dimensions.  The generic Venus V4L2 control instead defaults to
++	 * Level 1.0.  Do not force that level on IRIS1 when the active stream
++	 * already exceeds Level 1's MaxFS/MaxMBPS constraints.
++	 */
++	if (IS_IRIS1(inst->core) &&
++	    inst->session_type == VIDC_SESSION_TYPE_ENC &&
++	    inst->hfi_codec == HFI_VIDEO_CODEC_H264 &&
++	    level == V4L2_MPEG_VIDEO_H264_LEVEL_1_0) {
++		u64 mbpf = (u64)DIV_ROUND_UP(inst->width, 16) *
++			   DIV_ROUND_UP(inst->height, 16);
++		u64 mbps = mbpf * inst->fps;
++
++		if (mbpf > 99 || mbps > 1485)
++			/* Host-only marker; packetization turns it into wire level 0. */
++			pl.level = ~0U;
++	}
++
+ 	return hfi_session_set_property(inst, ptype, &pl);
+ }
+ EXPORT_SYMBOL_GPL(venus_helper_set_profile_level);
+--- a/drivers/media/platform/qcom/venus/hfi_cmds.c
++++ b/drivers/media/platform/qcom/venus/hfi_cmds.c
+@@ -626,7 +626,10 @@
+ 			/* Profile not supported, falling back to high */
+ 			pl->profile = HFI_H264_PROFILE_HIGH;
+ 
+-		if (!pl->level)
++		if (pl->level == ~0U)
++			/* Host-only IRIS1 H.264 auto-level marker. */
++			pl->level = 0;
++		else if (!pl->level)
+ 			/* Level not supported, falling back to 1 */
+ 			pl->level = 1;
+ 
