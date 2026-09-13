@@ -1,0 +1,59 @@
+From 87168a1330a13e9385098998f3bf0ba8b95f2b53 Mon Sep 17 00:00:00 2001
+From: snowf14k3 <60956553+snowf14k3@users.noreply.github.com>
+Date: Sun, 13 Sep 2026 11:51:13 +0800
+Subject: [PATCH] media: venus: enable IRIS1 VP8 low latency mode
+
+---
+ drivers/media/platform/qcom/venus/hfi_cmds.c   |  1 +
+ drivers/media/platform/qcom/venus/hfi_helper.h |  1 +
+ drivers/media/platform/qcom/venus/venc.c       | 10 ++++++++++
+ 3 files changed, 12 insertions(+)
+
+diff --git a/drivers/media/platform/qcom/venus/hfi_cmds.c b/drivers/media/platform/qcom/venus/hfi_cmds.c
+index 2370ab085..886ae5710 100644
+--- a/drivers/media/platform/qcom/venus/hfi_cmds.c
++++ b/drivers/media/platform/qcom/venus/hfi_cmds.c
+@@ -902,6 +902,7 @@ static int pkt_session_set_property_1x(struct hfi_session_set_property_pkt *pkt,
+ 		pkt->shdr.hdr.size += sizeof(u32) + sizeof(*en);
+ 		break;
+ 	}
++	case HFI_PROPERTY_PARAM_VENC_LOW_LATENCY_MODE:
+ 	case HFI_PROPERTY_PARAM_VENC_PRESERVE_TEXT_QUALITY: {
+ 		struct hfi_enable *in = pdata, *en = prop_data;
+ 
+diff --git a/drivers/media/platform/qcom/venus/hfi_helper.h b/drivers/media/platform/qcom/venus/hfi_helper.h
+index f44059f19..b2b510e5d 100644
+--- a/drivers/media/platform/qcom/venus/hfi_helper.h
++++ b/drivers/media/platform/qcom/venus/hfi_helper.h
+@@ -516,6 +516,7 @@
+ #define HFI_PROPERTY_PARAM_VENC_VC1_PERF_CFG			0x200501f
+ #define HFI_PROPERTY_PARAM_VENC_MAX_NUM_B_FRAMES		0x2005020
+ #define HFI_PROPERTY_PARAM_VENC_H264_VUI_BITSTREAM_RESTRC	0x2005021
++#define HFI_PROPERTY_PARAM_VENC_LOW_LATENCY_MODE		0x2005022
+ #define HFI_PROPERTY_PARAM_VENC_PRESERVE_TEXT_QUALITY		0x2005023
+ #define HFI_PROPERTY_PARAM_VENC_H264_TRANSFORM_8X8			0x2005025
+ #define HFI_PROPERTY_PARAM_VENC_HIER_P_MAX_NUM_ENH_LAYER	0x2005026
+diff --git a/drivers/media/platform/qcom/venus/venc.c b/drivers/media/platform/qcom/venus/venc.c
+index 3d5b0d118..a69ad67a9 100644
+--- a/drivers/media/platform/qcom/venus/venc.c
++++ b/drivers/media/platform/qcom/venus/venc.c
+@@ -731,6 +731,16 @@ static int venc_set_properties(struct venus_inst *inst)
+ 	if (ret)
+ 		return ret;
+ 
++	/* SM8150 downstream couples VP8 work mode 1 with low latency. */
++	if (IS_IRIS1(inst->core) && inst->hfi_codec == HFI_VIDEO_CODEC_VP8) {
++		en.enable = 1;
++		ret = hfi_session_set_property(inst,
++					       HFI_PROPERTY_PARAM_VENC_LOW_LATENCY_MODE,
++					       &en);
++		if (ret)
++			return ret;
++	}
++
+ 	ret = venc_set_work_route(inst);
+ 	if (ret)
+ 		return ret;
+-- 
+2.43.0
+

@@ -37,3 +37,7 @@
 0037-arm64-dts-qcom-add-sm8150-venus-secure-nonpixel-stream.patch
 0038-media-venus-allocate-iris1-encoder-persist-securely.patch
 0039-arm64-dts-qcom-cover-reserved-venus-iova-in-dma-range.patch
+0040-media-venus-preserve-encoder-visible-frame-size.patch
+0041-media-venus-bound-IRIS1-encoder-raw-queue-depth.patch
+0042-media-venus-enable-IRIS1-VP8-low-latency-mode.patch
+0043-media-venus-use-mapped-IRIS1-decoder-EOS-buffer.patch

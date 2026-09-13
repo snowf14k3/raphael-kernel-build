@@ -1,0 +1,32 @@
+From 7f801dfed0d71cfd400e2d644063a20e91f552f9 Mon Sep 17 00:00:00 2001
+From: snowf14k3 <60956553+snowf14k3@users.noreply.github.com>
+Date: Sun, 13 Sep 2026 11:50:47 +0800
+Subject: [PATCH] media: venus: preserve encoder visible frame size
+
+---
+ drivers/media/platform/qcom/venus/venc.c | 8 ++++++--
+ 1 file changed, 6 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/media/platform/qcom/venus/venc.c b/drivers/media/platform/qcom/venus/venc.c
+index 43b073193..36148ffca 100644
+--- a/drivers/media/platform/qcom/venus/venc.c
++++ b/drivers/media/platform/qcom/venus/venc.c
+@@ -201,9 +201,13 @@ venc_try_fmt_common(struct venus_inst *inst, struct v4l2_format *f)
+ 	pixmp->height = clamp(pixmp->height, frame_height_min(inst),
+ 			      frame_height_max(inst));
+ 
+-	pixmp->width = ALIGN(pixmp->width, 128);
+-	pixmp->height = ALIGN(pixmp->height, 32);
++	/* Raw input buffers use the Venus stride and scanline alignment. */
++	if (f->type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) {
++		pixmp->width = ALIGN(pixmp->width, 128);
++		pixmp->height = ALIGN(pixmp->height, 32);
++	}
+ 
++	/* Keep the compressed CAPTURE size at the visible coded dimensions. */
+ 	pixmp->width = ALIGN(pixmp->width, 2);
+ 	pixmp->height = ALIGN(pixmp->height, 2);
+ 
+-- 
+2.43.0
+
