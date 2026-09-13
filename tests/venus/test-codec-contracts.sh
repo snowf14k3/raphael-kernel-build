@@ -125,7 +125,16 @@ assert function_body("venc_start_streaming").count(
 assert "if (!IS_IRIS1(inst->core)) {\n\t\t\tptype = " \
        "HFI_PROPERTY_PARAM_VENC_H264_VUI_TIMING_INFO;" in function_body(
            "venc_set_properties")
-print("PASS: replay, VUI, and secure-persist policy are wired into the staged source")
+cbr = function_body("venc_set_iris1_cbr_properties")
+for prop in (
+    "HFI_PROPERTY_CONFIG_VENC_VBV_HRD_BUF_SIZE",
+    "HFI_PROPERTY_PARAM_VENC_LOW_LATENCY_MODE",
+    "HFI_PROPERTY_PARAM_VENC_BITRATE_SAVINGS",
+):
+    assert prop in cbr, prop
+helpers = open(sys.argv[1].replace("venc.c", "helpers.c"), encoding="utf-8").read()
+assert "V4L2_MPEG_VIDEO_BITRATE_MODE_CBR" in helpers
+print("PASS: replay, VUI, CBR, and secure-persist policy are wired into the staged source")
 PY
 "$CC" -std=gnu11 -Wall -Wextra -Werror -Wno-unused-parameter -O1 \
     -fsanitize=undefined -I "$TMP" -I "$TMP/src" -include "$TMP/host.h" \

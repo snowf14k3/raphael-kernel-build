@@ -459,6 +459,34 @@ static void packet_tests(void)
     }
     pkt_set_version(HFI_VERSION_4XX);
 
+    /* SM8150 CBR uses one-word VBV, low-latency and bitrate-savings payloads. */
+    {
+        const u32 enable_properties[] = {
+            HFI_PROPERTY_PARAM_VENC_LOW_LATENCY_MODE,
+            HFI_PROPERTY_PARAM_VENC_BITRATE_SAVINGS,
+        };
+        struct hfi_enable enable = { .enable = 1 };
+        u32 vbv_hrd_size = 1000;
+
+        memset(packet, 0x5a, sizeof(packet));
+        CHECK(pkt_session_set_property(
+                  p, cookie, HFI_PROPERTY_CONFIG_VENC_VBV_HRD_BUF_SIZE,
+                  &vbv_hrd_size) == 0);
+        CHECK(packet[0] == 24 && packet[1] == HFI_CMD_SESSION_SET_PROPERTY);
+        CHECK(packet[4] == HFI_PROPERTY_CONFIG_VENC_VBV_HRD_BUF_SIZE);
+        CHECK(packet[5] == 1000 && packet[6] == 0x5a5a5a5a);
+
+        for (unsigned int n = 0; n < ARRAY_SIZE(enable_properties); n++) {
+            memset(packet, 0x5a, sizeof(packet));
+            CHECK(pkt_session_set_property(p, cookie, enable_properties[n],
+                                           &enable) == 0);
+            CHECK(packet[0] == 24 &&
+                  packet[1] == HFI_CMD_SESSION_SET_PROPERTY);
+            CHECK(packet[4] == enable_properties[n]);
+            CHECK(packet[5] == 1 && packet[6] == 0x5a5a5a5a);
+        }
+    }
+
     /* Downstream BUFFER_SIZE_MINIMUM is Venus BUFFER_SIZE_ACTUAL on wire. */
     {
         struct hfi_buffer_size_actual size = {
