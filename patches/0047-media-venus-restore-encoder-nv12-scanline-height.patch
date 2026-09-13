@@ -1,0 +1,52 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: snowf14k3 <60956553+snowf14k3@users.noreply.github.com>
+Date: Mon, 14 Sep 2026 01:08:00 +0800
+Subject: [PATCH] media: venus: restore encoder NV12 scanline height
+
+The SM8150 Venus encoder consumes linear NV12 with a Venus-specific
+scanline layout. For 1080p the firmware expects the UV plane to begin
+after 1088 Y scanlines, not after the 1080 visible lines.
+
+Android-Q downstream reports the Venus Y scanline count explicitly, while
+the generic qcom/venus V4L2 path historically communicated the same raw
+layout by returning a 32-line-aligned OUTPUT height. Patch 0044 kept the
+raw V4L2 height visible while HFI still used the aligned height. Generic
+userspace can then place UV at the visible-height offset while firmware
+reads it at the aligned offset, producing vertical ghosting/corruption.
+
+Restore 32-line alignment only for the raw OUTPUT queue. Keep the visible
+width with bytesperline carrying horizontal stride, and keep compressed
+CAPTURE dimensions at the visible coded size.
+
+Signed-off-by: snowf14k3 <60956553+snowf14k3@users.noreply.github.com>
+---
+ drivers/media/platform/qcom/venus/venc.c | 14 +++++++++++---
+ 1 file changed, 11 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/media/platform/qcom/venus/venc.c b/drivers/media/platform/qcom/venus/venc.c
+index c6de48295..e2bfde08b 100644
+--- a/drivers/media/platform/qcom/venus/venc.c
++++ b/drivers/media/platform/qcom/venus/venc.c
+@@ -202,9 +202,17 @@ venc_try_fmt_common(struct venus_inst *inst, struct v4l2_format *f)
+ 			      frame_height_max(inst));
+ 
+ 	/*
+-	 * Keep V4L2 dimensions visible.  Raw stride and scanline padding belong
+-	 * in bytesperline/sizeimage and the HFI plane constraints; exposing the
+-	 * padded height makes userspace copy past the end of a software frame.
++	 * Linear NV12 uses Venus scanline padding. With a single V4L2 plane,
++	 * generic userspace has no standard field for the Y-plane scanline count.
++	 * Expose the 32-line-aligned raw height so the UV plane starts where the
++	 * firmware expects it; this matches the Android-Q Venus contract.
++	 */
++	if (f->type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE)
++		pixmp->height = ALIGN(pixmp->height, 32);
++
++	/*
++	 * Keep the visible width; horizontal padding remains in bytesperline.
++	 * Compressed CAPTURE dimensions stay at the visible coded size.
+ 	 */
+ 	pixmp->width = ALIGN(pixmp->width, 2);
+ 	pixmp->height = ALIGN(pixmp->height, 2);
+-- 
+2.43.0

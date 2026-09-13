@@ -43,3 +43,4 @@
 0044-media-venus-keep-encoder-raw-format-dimensions-visib.patch
 0045-media-venus-complete-iris1-legacy-decoder-contract.patch
 0046-media-venus-complete-iris1-cbr-encoder-contract.patch
+0047-media-venus-restore-encoder-nv12-scanline-height.patch
