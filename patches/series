@@ -42,3 +42,4 @@
 0042-media-venus-enable-IRIS1-VP8-low-latency-mode.patch
 0043-media-venus-use-mapped-IRIS1-decoder-EOS-buffer.patch
 0044-media-venus-keep-encoder-raw-format-dimensions-visib.patch
+0045-media-venus-set-IRIS1-decoder-input-frame-size.patch

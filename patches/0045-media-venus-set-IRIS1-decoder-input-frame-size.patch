@@ -1,0 +1,41 @@
+From a353b6e9f5a31ee4225380fd3115dd34642b244c Mon Sep 17 00:00:00 2001
+From: snowf14k3 <60956553+snowf14k3@users.noreply.github.com>
+Date: Sun, 13 Sep 2026 12:43:15 +0800
+Subject: [PATCH] media: venus: set IRIS1 decoder input frame size
+
+---
+ drivers/media/platform/qcom/venus/vdec.c | 11 +++++++++--
+ 1 file changed, 9 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/media/platform/qcom/venus/vdec.c b/drivers/media/platform/qcom/venus/vdec.c
+index 17fa9f499..6dce2aae5 100644
+--- a/drivers/media/platform/qcom/venus/vdec.c
++++ b/drivers/media/platform/qcom/venus/vdec.c
+@@ -922,6 +922,8 @@ static int vdec_output_conf(struct venus_inst *inst)
+ 
+ static int vdec_session_init(struct venus_inst *inst)
+ {
++	u32 width = frame_width_min(inst);
++	u32 height = frame_height_min(inst);
+ 	int ret;
+ 
+ 	ret = venus_helper_session_init(inst);
+@@ -930,8 +932,13 @@ static int vdec_session_init(struct venus_inst *inst)
+ 	else if (ret)
+ 		return ret;
+ 
+-	ret = venus_helper_set_input_resolution(inst, frame_width_min(inst),
+-						frame_height_min(inst));
++	/* SM8150 downstream configures the compressed input's real frame size. */
++	if (IS_IRIS1(inst->core)) {
++		width = inst->out_width;
++		height = inst->out_height;
++	}
++
++	ret = venus_helper_set_input_resolution(inst, width, height);
+ 	if (ret)
+ 		goto deinit;
+ 
+-- 
+2.43.0
+
