@@ -475,6 +475,42 @@ static void packet_tests(void)
         CHECK(packet[7] == 0x5a5a5a5a);
     }
 
+    /* HFI4 carries count_min_host separately from count_actual. */
+    {
+        struct hfi_buffer_count_actual count = {
+            .type = HFI_BUFFER_OUTPUT2,
+            .count_actual = 20,
+            .count_min_host = 6,
+        };
+        memset(packet, 0x5a, sizeof(packet));
+        CHECK(pkt_session_set_property(p, cookie,
+                                       HFI_PROPERTY_PARAM_BUFFER_COUNT_ACTUAL,
+                                       &count) == 0);
+        CHECK(packet[0] == 32 && packet[1] == HFI_CMD_SESSION_SET_PROPERTY);
+        CHECK(packet[4] == HFI_PROPERTY_PARAM_BUFFER_COUNT_ACTUAL);
+        CHECK(packet[5] == HFI_BUFFER_OUTPUT2 && packet[6] == 20);
+        CHECK(packet[7] == 6 && packet[8] == 0x5a5a5a5a);
+    }
+
+    /* SM8150 OMX output-crop extradata uses a two-word HFI payload. */
+    {
+        struct hfi_index_extradata_config extra = {
+            .enable = 1,
+            .index_extra_data_id = HFI_INDEX_EXTRADATA_OUTPUT_CROP,
+        };
+        memset(packet, 0x5a, sizeof(packet));
+        CHECK(pkt_session_set_property(p, cookie,
+                                       HFI_PROPERTY_PARAM_INDEX_EXTRADATA,
+                                       &extra) == 0);
+        CHECK(packet[0] == 28 && packet[1] == HFI_CMD_SESSION_SET_PROPERTY);
+        CHECK(packet[4] == HFI_PROPERTY_PARAM_INDEX_EXTRADATA);
+        CHECK(packet[5] == 1);
+        CHECK(packet[6] == HFI_INDEX_EXTRADATA_OUTPUT_CROP);
+        CHECK(packet[7] == 0x5a5a5a5a);
+        CHECK(HFI_PROPERTY_PARAM_VDEC_DPB_COUNTS_4XX == 0x100300b);
+        CHECK(sizeof(struct hfi_dpb_counts_4xx) == 3 * sizeof(u32));
+    }
+
     /* Generic zero level keeps the historical fallback to H.264 Level 1. */
     {
         struct hfi_profile_level pl = {

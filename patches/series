@@ -41,3 +41,4 @@
 0041-media-venus-bound-IRIS1-encoder-raw-queue-depth.patch
 0042-media-venus-enable-IRIS1-VP8-low-latency-mode.patch
 0044-media-venus-keep-encoder-raw-format-dimensions-visib.patch
+0045-media-venus-complete-iris1-legacy-decoder-contract.patch

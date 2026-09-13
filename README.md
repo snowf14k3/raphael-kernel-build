@@ -36,9 +36,9 @@
 
 已从固定 `ab4ce59` 连续迁移共享 SM8150/VPU5/HFI4 平台依赖、基本 decoder 和基本 encoder。Raphael V2 设备树已启用 Venus，两个 codec 子节点由驱动创建；详见 [本批次改动、依据与验收边界](docs/venus/codec-stage1.md)。[首次缺口审计](docs/venus/audit-ab4ce59.md) 保留为迁移前快照，不代表这些接入项仍然缺失。
 
-Venus core/decoder/encoder 的 ARM64 目标编译和 Raphael DTB 编译通过。主机回归包括 IRQ 1,069 个用例、实际 HFI packetizer/codec 函数 136 项断言、PM/reset 535 项断言；这些不是实机测试。
+Venus core/decoder/encoder 的 ARM64 目标编译和 Raphael DTB 编译通过。主机回归包括 IRQ 1,069 个用例、实际 HFI packetizer/codec 函数 548 项断言、PM/reset 535 项断言；这些检查本身不代替实机测试。
 
-**尚未进行本批次实机编解码验证。固件路径要求为 `qcom/sm8150/Xiaomi/raphael/venus.mbn`，文件实际存在性及版本必须在目标机核实。不能把模块、格式枚举或主机测试通过写成硬解/硬编已可用。**
+Raphael 已通过热替换模块完成 H.264、HEVC 和 VP8 的阶段性实机编解码验证。`cf10-msmvidc-omx1` 进一步确认 VP8 640x480、15 fps、连续 30 帧硬件解码成功：FFmpeg 退出码为 0，硬件与软件解码均输出 13,824,000 字节 NV12，逐字节一致。对应修复和证据见 [IRIS1 legacy decoder buffer contract](docs/venus/iris1-legacy-decoder-contract.md)。VP9、MPEG2、长时间稳定性、并发及休眠恢复仍未完成实机确认。
 
 回归入口在 `tests/venus/`，不会操作硬件，也不往内核加入 diagnostic 代码。完整包是否生成，以当前 `out/raphael-venus-hwaccel/last-build.env` 和 `build-info.txt` 为准。
 

@@ -1,0 +1,1046 @@
+From a0fd073a263b7b08e0a606b3b53eb7a8475ecac3 Mon Sep 17 00:00:00 2001
+From: snowf14k3 <60956553+snowf14k3@users.noreply.github.com>
+Date: Sun, 13 Sep 2026 16:10:40 +0800
+Subject: [PATCH] media: venus: complete IRIS1 legacy decoder buffer contract
+
+SM8150 HFI4 legacy decoders rely on the split-output and extradata
+contract used by Qualcomm msm/vidc and the Android OMX client. Align
+VP8, VP9 and MPEG2 setup with that contract: use the real input
+geometry, order and size DPB/OPB properties correctly, preserve HFI4
+count_min_host, parse the HFI4 DPB-count event, and submit
+firmware-sized DPB buffers.
+
+Enable the default decoder extradata set and attach a private 16 KiB
+DMA extradata buffer to every userspace capture buffer. Legacy sessions
+use zero output tags and recover FBD and release-reference ownership by
+packet-buffer address, matching downstream behavior without exposing
+an extra V4L2 plane.
+
+Validated on Xiaomi Raphael with Venus VP8 hardware decoding of 30
+frames. Hardware and software NV12 output matched byte-for-byte at
+13,824,000 bytes.
+
+Signed-off-by: snowf14k3 <60956553+snowf14k3@users.noreply.github.com>
+---
+ drivers/media/platform/qcom/venus/core.h      |   4 +
+ drivers/media/platform/qcom/venus/helpers.c   | 178 +++++++++++-
+ drivers/media/platform/qcom/venus/helpers.h   |  16 ++
+ drivers/media/platform/qcom/venus/hfi.h       |   5 +-
+ drivers/media/platform/qcom/venus/hfi_cmds.c  |  24 +-
+ .../media/platform/qcom/venus/hfi_helper.h    |  15 +
+ drivers/media/platform/qcom/venus/hfi_msgs.c  |  17 +-
+ drivers/media/platform/qcom/venus/vdec.c      | 257 +++++++++++++++---
+ drivers/media/platform/qcom/venus/venc.c      |   5 +-
+ 9 files changed, 472 insertions(+), 49 deletions(-)
+
+diff --git a/drivers/media/platform/qcom/venus/core.h b/drivers/media/platform/qcom/venus/core.h
+index e3b615312..a054a4951 100644
+--- a/drivers/media/platform/qcom/venus/core.h
++++ b/drivers/media/platform/qcom/venus/core.h
+@@ -335,6 +335,10 @@ struct venus_buffer {
+ 	struct list_head list;
+ 	dma_addr_t dma_addr;
+ 	u32 size;
++	void *extradata_va;
++	dma_addr_t extradata_dma_addr;
++	u32 extradata_size;
++	unsigned long extradata_attrs;
+ 	struct list_head reg_list;
+ 	u32 flags;
+ 	struct list_head ref_list;
+diff --git a/drivers/media/platform/qcom/venus/helpers.c b/drivers/media/platform/qcom/venus/helpers.c
+index f5425cbb8..176ef3197 100644
+--- a/drivers/media/platform/qcom/venus/helpers.c
++++ b/drivers/media/platform/qcom/venus/helpers.c
+@@ -45,8 +45,20 @@ struct intbuf {
+ 	bool hfi_registered;
+ 	enum dpb_buf_owner owned_by;
+ 	u32 dpb_out_tag;
++	u32 dpb_data_size;
++	u32 dpb_extra_size;
+ };
+ 
++static bool is_iris1_legacy_decoder(struct venus_inst *inst)
++{
++	if (!IS_IRIS1(inst->core) || inst->session_type != VIDC_SESSION_TYPE_DEC)
++		return false;
++
++	return inst->hfi_codec == HFI_VIDEO_CODEC_VP8 ||
++	       inst->hfi_codec == HFI_VIDEO_CODEC_VP9 ||
++	       inst->hfi_codec == HFI_VIDEO_CODEC_MPEG2;
++}
++
+ static int intbuf_secure_assign(struct intbuf *buf)
+ {
+ 	const struct qcom_scm_vmperm perm = {
+@@ -255,20 +267,25 @@ int venus_helper_queue_dpb_bufs(struct venus_inst *inst)
+ 		struct hfi_frame_data fdata;
+ 
+ 		memset(&fdata, 0, sizeof(fdata));
+-		fdata.alloc_len = buf->size;
++		fdata.alloc_len = buf->dpb_data_size ?: buf->size;
+ 		fdata.device_addr = buf->da;
+ 		fdata.buffer_type = buf->type;
++		if (is_iris1_legacy_decoder(inst)) {
++			fdata.extradata_addr = buf->da + fdata.alloc_len;
++			fdata.extradata_size = buf->dpb_extra_size;
++		}
+ 
+ 		if (buf->owned_by == FIRMWARE)
+ 			continue;
+ 
+ 		/* free buffer from previous sequence which was released later */
+-		if (dpb_size > buf->size) {
++		if (dpb_size + buf->dpb_extra_size > buf->size) {
+ 			free_dpb_buf(inst, buf);
+ 			continue;
+ 		}
+ 
+-		fdata.clnt_data = buf->dpb_out_tag;
++		if (!is_iris1_legacy_decoder(inst))
++			fdata.clnt_data = buf->dpb_out_tag;
+ 
+ 		ret = hfi_session_process_buf(inst, &fdata);
+ 		if (ret)
+@@ -304,9 +321,11 @@ int venus_helper_alloc_dpb_bufs(struct venus_inst *inst)
+ 	struct venus_core *core = inst->core;
+ 	struct device *dev = core->dev;
+ 	enum hfi_version ver = core->res->hfi_version;
+-	struct hfi_buffer_requirements bufreq;
++	struct hfi_buffer_requirements bufreq, extra_req;
+ 	u32 buftype = inst->dpb_buftype;
+ 	unsigned int dpb_size = 0;
++	u32 extra_type = 0, extra_size = 0;
++	size_t alloc_size;
+ 	struct intbuf *buf;
+ 	unsigned int i;
+ 	u32 count;
+@@ -329,6 +348,20 @@ int venus_helper_alloc_dpb_bufs(struct venus_inst *inst)
+ 	if (ret)
+ 		return ret;
+ 
++	if (!bufreq.size || bufreq.size > dpb_size)
++		return -EINVAL;
++
++	if (is_iris1_legacy_decoder(inst)) {
++		extra_type = buftype == HFI_BUFFER_OUTPUT ?
++			HFI_BUFFER_EXTRADATA_OUTPUT(ver) :
++			HFI_BUFFER_EXTRADATA_OUTPUT2(ver);
++		ret = venus_helper_get_bufreq(inst, extra_type, &extra_req);
++		if (ret)
++			return ret;
++		extra_size = extra_req.size;
++	}
++	alloc_size = dpb_size + extra_size;
++
+ 	count = hfi_bufreq_get_count_min(&bufreq, ver);
+ 
+ 	for (i = 0; i < count; i++) {
+@@ -339,7 +372,9 @@ int venus_helper_alloc_dpb_bufs(struct venus_inst *inst)
+ 		}
+ 
+ 		buf->type = buftype;
+-		buf->size = dpb_size;
++		buf->size = alloc_size;
++		buf->dpb_data_size = dpb_size;
++		buf->dpb_extra_size = extra_size;
+ 		buf->attrs = DMA_ATTR_WRITE_COMBINE |
+ 			     DMA_ATTR_NO_KERNEL_MAPPING;
+ 		buf->va = dma_alloc_attrs(dev, buf->size, &buf->da, GFP_KERNEL,
+@@ -873,6 +908,11 @@ session_process_buf(struct venus_inst *inst, struct vb2_v4l2_buffer *vbuf)
+ 			fdata.buffer_type = inst->opb_buftype;
+ 		fdata.filled_len = 0;
+ 		fdata.offset = 0;
++		if (is_iris1_legacy_decoder(inst)) {
++			fdata.clnt_data = 0;
++			fdata.extradata_addr = buf->extradata_dma_addr;
++			fdata.extradata_size = buf->extradata_size;
++		}
+ 	}
+ 
+ 	return hfi_session_process_buf(inst, &fdata);
+@@ -1577,16 +1617,21 @@ int venus_helper_set_format_constraints(struct venus_inst *inst)
+ }
+ EXPORT_SYMBOL_GPL(venus_helper_set_format_constraints);
+ 
+-int venus_helper_set_num_bufs(struct venus_inst *inst, unsigned int input_bufs,
+-			      unsigned int output_bufs,
+-			      unsigned int output2_bufs)
++int venus_helper_set_num_bufs_min_host(struct venus_inst *inst,
++				       unsigned int input_bufs,
++				       unsigned int input_min_host,
++				       unsigned int output_bufs,
++				       unsigned int output_min_host,
++				       unsigned int output2_bufs,
++				       unsigned int output2_min_host)
+ {
+ 	u32 ptype = HFI_PROPERTY_PARAM_BUFFER_COUNT_ACTUAL;
+-	struct hfi_buffer_count_actual buf_count;
++	struct hfi_buffer_count_actual buf_count = {0};
+ 	int ret;
+ 
+ 	buf_count.type = HFI_BUFFER_INPUT;
+ 	buf_count.count_actual = input_bufs;
++	buf_count.count_min_host = input_min_host;
+ 
+ 	ret = hfi_session_set_property(inst, ptype, &buf_count);
+ 	if (ret)
+@@ -1594,6 +1639,7 @@ int venus_helper_set_num_bufs(struct venus_inst *inst, unsigned int input_bufs,
+ 
+ 	buf_count.type = HFI_BUFFER_OUTPUT;
+ 	buf_count.count_actual = output_bufs;
++	buf_count.count_min_host = output_min_host;
+ 
+ 	ret = hfi_session_set_property(inst, ptype, &buf_count);
+ 	if (ret)
+@@ -1602,12 +1648,23 @@ int venus_helper_set_num_bufs(struct venus_inst *inst, unsigned int input_bufs,
+ 	if (output2_bufs) {
+ 		buf_count.type = HFI_BUFFER_OUTPUT2;
+ 		buf_count.count_actual = output2_bufs;
++		buf_count.count_min_host = output2_min_host;
+ 
+ 		ret = hfi_session_set_property(inst, ptype, &buf_count);
+ 	}
+ 
+ 	return ret;
+ }
++EXPORT_SYMBOL_GPL(venus_helper_set_num_bufs_min_host);
++
++int venus_helper_set_num_bufs(struct venus_inst *inst, unsigned int input_bufs,
++			      unsigned int output_bufs,
++			      unsigned int output2_bufs)
++{
++	return venus_helper_set_num_bufs_min_host(inst, input_bufs, input_bufs,
++						 output_bufs, output_bufs,
++						 output2_bufs, output2_bufs);
++}
+ EXPORT_SYMBOL_GPL(venus_helper_set_num_bufs);
+ 
+ int venus_helper_set_raw_format(struct venus_inst *inst, u32 hfi_format,
+@@ -1649,6 +1706,25 @@ int venus_helper_set_multistream(struct venus_inst *inst, bool out_en,
+ 	u32 ptype = HFI_PROPERTY_PARAM_VDEC_MULTI_STREAM;
+ 	int ret;
+ 
++	/*
++	 * The SM8150 downstream contract enables the secondary stream before
++	 * disabling the primary stream.  Avoid a transient state where both
++	 * output streams are disabled for legacy IRIS1 decoders.
++	 */
++	if (is_iris1_legacy_decoder(inst) && !out_en && out2_en) {
++		multi.buffer_type = HFI_BUFFER_OUTPUT2;
++		multi.enable = true;
++
++		ret = hfi_session_set_property(inst, ptype, &multi);
++		if (ret)
++			return ret;
++
++		multi.buffer_type = HFI_BUFFER_OUTPUT;
++		multi.enable = false;
++
++		return hfi_session_set_property(inst, ptype, &multi);
++	}
++
+ 	multi.buffer_type = HFI_BUFFER_OUTPUT;
+ 	multi.enable = out_en;
+ 
+@@ -1753,6 +1829,22 @@ void venus_helper_release_buf_ref(struct venus_inst *inst, unsigned int idx)
+ }
+ EXPORT_SYMBOL_GPL(venus_helper_release_buf_ref);
+ 
++void venus_helper_release_buf_ref_by_addr(struct venus_inst *inst,
++					  dma_addr_t addr)
++{
++	struct venus_buffer *buf;
++
++	list_for_each_entry(buf, &inst->registeredbufs, reg_list) {
++		if (buf->dma_addr != addr)
++			continue;
++
++		buf->flags &= ~HFI_BUFFERFLAG_READONLY;
++		schedule_work(&inst->delayed_process_work);
++		break;
++	}
++}
++EXPORT_SYMBOL_GPL(venus_helper_release_buf_ref_by_addr);
++
+ void venus_helper_acquire_buf_ref(struct vb2_v4l2_buffer *vbuf)
+ {
+ 	struct venus_buffer *buf = to_venus_buffer(vbuf);
+@@ -1786,6 +1878,42 @@ venus_helper_find_buf(struct venus_inst *inst, unsigned int type, u32 idx)
+ }
+ EXPORT_SYMBOL_GPL(venus_helper_find_buf);
+ 
++struct vb2_v4l2_buffer *
++venus_helper_find_buf_by_addr(struct venus_inst *inst, unsigned int type,
++			      dma_addr_t addr)
++{
++	struct venus_buffer *buf;
++
++	list_for_each_entry(buf, &inst->registeredbufs, reg_list) {
++		if (buf->vb.vb2_buf.type != type || buf->dma_addr != addr)
++			continue;
++
++		return venus_helper_find_buf(inst, type, buf->vb.vb2_buf.index);
++	}
++
++	return NULL;
++}
++EXPORT_SYMBOL_GPL(venus_helper_find_buf_by_addr);
++
++void venus_helper_change_dpb_owner_by_addr(struct venus_inst *inst,
++					   unsigned int buf_type,
++					   dma_addr_t addr)
++{
++	struct intbuf *dpb_buf;
++
++	if (buf_type != inst->dpb_buftype)
++		return;
++
++	list_for_each_entry(dpb_buf, &inst->dpbbufs, list) {
++		if (dpb_buf->da != addr)
++			continue;
++
++		dpb_buf->owned_by = DRIVER;
++		break;
++	}
++}
++EXPORT_SYMBOL_GPL(venus_helper_change_dpb_owner_by_addr);
++
+ void venus_helper_change_dpb_owner(struct venus_inst *inst,
+ 				   struct vb2_v4l2_buffer *vbuf, unsigned int type,
+ 				   unsigned int buf_type, u32 tag)
+@@ -1809,10 +1937,24 @@ int venus_helper_vb2_buf_init(struct vb2_buffer *vb)
+ 	struct venus_inst *inst = vb2_get_drv_priv(vb->vb2_queue);
+ 	struct vb2_v4l2_buffer *vbuf = to_vb2_v4l2_buffer(vb);
+ 	struct venus_buffer *buf = to_venus_buffer(vbuf);
++	struct device *dev = inst->core->dev;
+ 
+ 	buf->size = vb2_plane_size(vb, 0);
+ 	buf->dma_addr = vb2_dma_contig_plane_dma_addr(vb, 0);
+ 
++	if (vb->type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE &&
++	    is_iris1_legacy_decoder(inst)) {
++		buf->extradata_size = SZ_16K;
++		buf->extradata_attrs = DMA_ATTR_WRITE_COMBINE |
++				       DMA_ATTR_NO_KERNEL_MAPPING;
++		buf->extradata_va = dma_alloc_attrs(dev, buf->extradata_size,
++						   &buf->extradata_dma_addr,
++						   GFP_KERNEL,
++						   buf->extradata_attrs);
++		if (!buf->extradata_va)
++			return -ENOMEM;
++	}
++
+ 	if (vb->type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE)
+ 		list_add_tail(&buf->reg_list, &inst->registeredbufs);
+ 
+@@ -1820,6 +1962,24 @@ int venus_helper_vb2_buf_init(struct vb2_buffer *vb)
+ }
+ EXPORT_SYMBOL_GPL(venus_helper_vb2_buf_init);
+ 
++void venus_helper_vb2_buf_cleanup(struct vb2_buffer *vb)
++{
++	struct venus_inst *inst = vb2_get_drv_priv(vb->vb2_queue);
++	struct vb2_v4l2_buffer *vbuf = to_vb2_v4l2_buffer(vb);
++	struct venus_buffer *buf = to_venus_buffer(vbuf);
++
++	if (!buf->extradata_va)
++		return;
++
++	dma_free_attrs(inst->core->dev, buf->extradata_size,
++		       buf->extradata_va, buf->extradata_dma_addr,
++		       buf->extradata_attrs);
++	buf->extradata_va = NULL;
++	buf->extradata_dma_addr = 0;
++	buf->extradata_size = 0;
++}
++EXPORT_SYMBOL_GPL(venus_helper_vb2_buf_cleanup);
++
+ int venus_helper_vb2_buf_prepare(struct vb2_buffer *vb)
+ {
+ 	struct venus_inst *inst = vb2_get_drv_priv(vb->vb2_queue);
+diff --git a/drivers/media/platform/qcom/venus/helpers.h b/drivers/media/platform/qcom/venus/helpers.h
+index 358e4f39c..c1d12d26d 100644
+--- a/drivers/media/platform/qcom/venus/helpers.h
++++ b/drivers/media/platform/qcom/venus/helpers.h
+@@ -14,12 +14,19 @@ struct venus_core;
+ bool venus_helper_check_codec(struct venus_inst *inst, u32 v4l2_pixfmt);
+ struct vb2_v4l2_buffer *venus_helper_find_buf(struct venus_inst *inst,
+ 					      unsigned int type, u32 idx);
++struct vb2_v4l2_buffer *venus_helper_find_buf_by_addr(struct venus_inst *inst,
++						      unsigned int type,
++						      dma_addr_t addr);
++void venus_helper_change_dpb_owner_by_addr(struct venus_inst *inst,
++					   unsigned int buf_type,
++					   dma_addr_t addr);
+ void venus_helper_change_dpb_owner(struct venus_inst *inst,
+ 				   struct vb2_v4l2_buffer *vbuf, unsigned int type,
+ 				   unsigned int buf_type, u32 idx);
+ void venus_helper_buffers_done(struct venus_inst *inst, unsigned int type,
+ 			       enum vb2_buffer_state state);
+ int venus_helper_vb2_buf_init(struct vb2_buffer *vb);
++void venus_helper_vb2_buf_cleanup(struct vb2_buffer *vb);
+ int venus_helper_vb2_buf_prepare(struct vb2_buffer *vb);
+ void venus_helper_vb2_buf_queue(struct vb2_buffer *vb);
+ void venus_helper_vb2_stop_streaming(struct vb2_queue *q);
+@@ -41,6 +48,13 @@ int venus_helper_set_format_constraints(struct venus_inst *inst);
+ int venus_helper_set_num_bufs(struct venus_inst *inst, unsigned int input_bufs,
+ 			      unsigned int output_bufs,
+ 			      unsigned int output2_bufs);
++int venus_helper_set_num_bufs_min_host(struct venus_inst *inst,
++				       unsigned int input_bufs,
++				       unsigned int input_min_host,
++				       unsigned int output_bufs,
++				       unsigned int output_min_host,
++				       unsigned int output2_bufs,
++				       unsigned int output2_min_host);
+ int venus_helper_set_raw_format(struct venus_inst *inst, u32 hfi_format,
+ 				u32 buftype);
+ int venus_helper_set_color_format(struct venus_inst *inst, u32 fmt);
+@@ -51,6 +65,8 @@ int venus_helper_set_multistream(struct venus_inst *inst, bool out_en,
+ unsigned int venus_helper_get_opb_size(struct venus_inst *inst);
+ void venus_helper_acquire_buf_ref(struct vb2_v4l2_buffer *vbuf);
+ void venus_helper_release_buf_ref(struct venus_inst *inst, unsigned int idx);
++void venus_helper_release_buf_ref_by_addr(struct venus_inst *inst,
++					  dma_addr_t addr);
+ void venus_helper_init_instance(struct venus_inst *inst);
+ int venus_helper_session_init(struct venus_inst *inst);
+ int venus_helper_get_out_fmts(struct venus_inst *inst, u32 fmt, u32 *out_fmt,
+diff --git a/drivers/media/platform/qcom/venus/hfi.h b/drivers/media/platform/qcom/venus/hfi.h
+index 0338841d5..981d216dc 100644
+--- a/drivers/media/platform/qcom/venus/hfi.h
++++ b/drivers/media/platform/qcom/venus/hfi.h
+@@ -98,8 +98,9 @@ struct hfi_core_ops {
+ 
+ struct hfi_inst_ops {
+ 	void (*buf_done)(struct venus_inst *inst, unsigned int buf_type,
+-			 u32 tag, u32 bytesused, u32 data_offset, u32 flags,
+-			 u32 hfi_flags, u64 timestamp_us);
++			 u32 tag, u32 packet_buffer, u32 bytesused,
++			 u32 data_offset, u32 flags, u32 hfi_flags,
++			 u64 timestamp_us);
+ 	void (*event_notify)(struct venus_inst *inst, u32 event,
+ 			     struct hfi_event_data *data);
+ 	void (*flush_done)(struct venus_inst *inst);
+diff --git a/drivers/media/platform/qcom/venus/hfi_cmds.c b/drivers/media/platform/qcom/venus/hfi_cmds.c
+index 886ae5710..ed9e8ca05 100644
+--- a/drivers/media/platform/qcom/venus/hfi_cmds.c
++++ b/drivers/media/platform/qcom/venus/hfi_cmds.c
+@@ -267,6 +267,8 @@ int pkt_session_etb_decoder(struct hfi_session_empty_buffer_compressed_pkt *pkt,
+ 	if (!cookie)
+ 		return -EINVAL;
+ 
++	memset(pkt, 0, sizeof(*pkt));
++
+ 	pkt->shdr.hdr.size = sizeof(*pkt);
+ 	pkt->shdr.hdr.pkt_type = HFI_CMD_SESSION_EMPTY_BUFFER;
+ 	pkt->shdr.session_id = hash32_ptr(cookie);
+@@ -291,6 +293,8 @@ int pkt_session_etb_encoder(
+ 	if (!cookie || !in_frame->device_addr)
+ 		return -EINVAL;
+ 
++	memset(pkt, 0, sizeof(*pkt));
++
+ 	pkt->shdr.hdr.size = sizeof(*pkt);
+ 	pkt->shdr.hdr.pkt_type = HFI_CMD_SESSION_EMPTY_BUFFER;
+ 	pkt->shdr.session_id = hash32_ptr(cookie);
+@@ -316,6 +320,8 @@ int pkt_session_ftb(struct hfi_session_fill_buffer_pkt *pkt, void *cookie,
+ 	if (!cookie || !out_frame || !out_frame->device_addr)
+ 		return -EINVAL;
+ 
++	memset(pkt, 0, sizeof(*pkt));
++
+ 	pkt->shdr.hdr.size = sizeof(*pkt);
+ 	pkt->shdr.hdr.pkt_type = HFI_CMD_SESSION_FILL_BUFFER;
+ 	pkt->shdr.session_id = hash32_ptr(cookie);
+@@ -459,7 +465,8 @@ static int pkt_session_set_property_1x(struct hfi_session_set_property_pkt *pkt,
+ 		break;
+ 	}
+ 	case HFI_PROPERTY_PARAM_BUFFER_COUNT_ACTUAL: {
+-		struct hfi_buffer_count_actual *in = pdata, *count = prop_data;
++		struct hfi_buffer_count_actual *in = pdata;
++		struct hfi_buffer_count_actual_1xx *count = prop_data;
+ 
+ 		count->count_actual = in->count_actual;
+ 		count->type = in->type;
+@@ -474,6 +481,19 @@ static int pkt_session_set_property_1x(struct hfi_session_set_property_pkt *pkt,
+ 		pkt->shdr.hdr.size += sizeof(u32) + sizeof(*sz);
+ 		break;
+ 	}
++	case HFI_PROPERTY_PARAM_INDEX_EXTRADATA:
++	case HFI_PROPERTY_PARAM_VDEC_INTERLACE_VIDEO_EXTRADATA:
++	case HFI_PROPERTY_PARAM_VDEC_MPEG2_SEQDISP_EXTRADATA:
++	case HFI_PROPERTY_PARAM_VDEC_VPX_COLORSPACE_EXTRADATA:
++	case HFI_PROPERTY_PARAM_VDEC_UBWC_CR_STAT_INFO_EXTRADATA: {
++		struct hfi_index_extradata_config *in = pdata;
++		struct hfi_index_extradata_config *extra = prop_data;
++
++		extra->enable = in->enable;
++		extra->index_extra_data_id = in->index_extra_data_id;
++		pkt->shdr.hdr.size += sizeof(u32) + sizeof(*extra);
++		break;
++	}
+ 	case HFI_PROPERTY_PARAM_BUFFER_DISPLAY_HOLD_COUNT_ACTUAL: {
+ 		struct hfi_buffer_display_hold_count_actual *in = pdata;
+ 		struct hfi_buffer_display_hold_count_actual *count = prop_data;
+@@ -1218,7 +1238,7 @@ pkt_session_set_property_4xx(struct hfi_session_set_property_pkt *pkt,
+ 
+ 		count->count_actual = in->count_actual;
+ 		count->type = in->type;
+-		count->count_min_host = in->count_actual;
++		count->count_min_host = in->count_min_host;
+ 		pkt->shdr.hdr.size += sizeof(u32) + sizeof(*count);
+ 		break;
+ 	}
+diff --git a/drivers/media/platform/qcom/venus/hfi_helper.h b/drivers/media/platform/qcom/venus/hfi_helper.h
+index b2b510e5d..8755be446 100644
+--- a/drivers/media/platform/qcom/venus/hfi_helper.h
++++ b/drivers/media/platform/qcom/venus/hfi_helper.h
+@@ -168,6 +168,7 @@
+ #define HFI_PROPERTY_PARAM_VDEC_THUMBNAIL_MODE			0x120300d
+ #define HFI_PROPERTY_PARAM_VDEC_FRAME_ASSEMBLY			0x120300e
+ #define HFI_PROPERTY_PARAM_VDEC_DPB_COUNTS				0x120300e
++#define HFI_PROPERTY_PARAM_VDEC_DPB_COUNTS_4XX			0x100300b
+ #define HFI_PROPERTY_PARAM_VDEC_VC1_FRAMEDISP_EXTRADATA		0x1203011
+ #define HFI_PROPERTY_PARAM_VDEC_VC1_SEQDISP_EXTRADATA		0x1203012
+ #define HFI_PROPERTY_PARAM_VDEC_TIMESTAMP_EXTRADATA		0x1203013
+@@ -178,6 +179,8 @@
+ #define HFI_PROPERTY_PARAM_VDEC_FRAME_QP_EXTRADATA		0x1203018
+ #define HFI_PROPERTY_PARAM_VDEC_FRAME_BITS_INFO_EXTRADATA	0x1203019
+ #define HFI_PROPERTY_PARAM_VDEC_SCS_THRESHOLD			0x120301a
++#define HFI_PROPERTY_PARAM_VDEC_VPX_COLORSPACE_EXTRADATA	0x120301d
++#define HFI_PROPERTY_PARAM_VDEC_UBWC_CR_STAT_INFO_EXTRADATA	0x1203022
+ 
+ /*
+  * HFI_PROPERTY_CONFIG_VDEC_OX_START
+@@ -965,6 +968,12 @@ struct hfi_dpb_counts {
+ 	u32 fw_min_cnt;
+ };
+ 
++struct hfi_dpb_counts_4xx {
++	u32 max_dpb_count;
++	u32 max_ref_count;
++	u32 max_dec_buffering;
++};
++
+ #define HFI_COLOR_FORMAT_MONOCHROME		0x01
+ #define HFI_COLOR_FORMAT_NV12			0x02
+ #define HFI_COLOR_FORMAT_NV21			0x03
+@@ -1153,6 +1162,12 @@ struct hfi_batch_info {
+ struct hfi_buffer_count_actual {
+ 	u32 type;
+ 	u32 count_actual;
++	u32 count_min_host;
++};
++
++struct hfi_buffer_count_actual_1xx {
++	u32 type;
++	u32 count_actual;
+ };
+ 
+ struct hfi_buffer_count_actual_4xx {
+diff --git a/drivers/media/platform/qcom/venus/hfi_msgs.c b/drivers/media/platform/qcom/venus/hfi_msgs.c
+index fd712205a..ab0be0121 100644
+--- a/drivers/media/platform/qcom/venus/hfi_msgs.c
++++ b/drivers/media/platform/qcom/venus/hfi_msgs.c
+@@ -135,6 +135,13 @@ static void event_seq_changed(struct venus_core *core, struct venus_inst *inst,
+ 			event.input_crop.height = crop->height;
+ 			size_read = sizeof(struct hfi_extradata_input_crop);
+ 			break;
++		case HFI_PROPERTY_PARAM_VDEC_DPB_COUNTS_4XX:
++			if (ver != HFI_VERSION_4XX ||
++			    rem_bytes < sizeof(struct hfi_dpb_counts_4xx))
++				goto error;
++
++			size_read = sizeof(struct hfi_dpb_counts_4xx);
++			break;
+ 		case HFI_PROPERTY_PARAM_VDEC_DPB_COUNTS:
+ 			if (rem_bytes < sizeof(struct hfi_dpb_counts))
+ 				goto error;
+@@ -543,7 +550,8 @@ static void hfi_session_etb_done(struct venus_core *core,
+ 
+ 	inst->error = pkt->error_type;
+ 	inst->ops->buf_done(inst, HFI_BUFFER_INPUT, pkt->input_tag,
+-			    pkt->filled_len, pkt->offset, 0, 0, 0);
++			    pkt->packet_buffer, pkt->filled_len, pkt->offset,
++			    0, 0, 0);
+ }
+ 
+ static void hfi_session_ftb_done(struct venus_core *core,
+@@ -555,6 +563,7 @@ static void hfi_session_ftb_done(struct venus_core *core,
+ 	unsigned int error;
+ 	u32 flags = 0, hfi_flags = 0, offset = 0, filled_len = 0;
+ 	u32 pic_type = 0, buffer_type = 0, output_tag = -1;
++	u32 packet_buffer = 0;
+ 
+ 	if (session_type == VIDC_SESSION_TYPE_ENC) {
+ 		struct hfi_msg_session_fbd_compressed_pkt *pkt = packet;
+@@ -566,6 +575,7 @@ static void hfi_session_ftb_done(struct venus_core *core,
+ 		filled_len = pkt->filled_len;
+ 		pic_type = pkt->picture_type;
+ 		output_tag = pkt->output_tag;
++		packet_buffer = pkt->packet_buffer;
+ 		buffer_type = HFI_BUFFER_OUTPUT;
+ 
+ 		error = pkt->error_type;
+@@ -580,6 +590,7 @@ static void hfi_session_ftb_done(struct venus_core *core,
+ 		filled_len = pkt->filled_len;
+ 		pic_type = pkt->picture_type;
+ 		output_tag = pkt->output_tag;
++		packet_buffer = pkt->packet_buffer;
+ 
+ 		if (pkt->stream_id == 0)
+ 			buffer_type = HFI_BUFFER_OUTPUT;
+@@ -623,8 +634,8 @@ static void hfi_session_ftb_done(struct venus_core *core,
+ 
+ done:
+ 	inst->error = error;
+-	inst->ops->buf_done(inst, buffer_type, output_tag, filled_len,
+-			    offset, flags, hfi_flags, timestamp_us);
++	inst->ops->buf_done(inst, buffer_type, output_tag, packet_buffer,
++			    filled_len, offset, flags, hfi_flags, timestamp_us);
+ }
+ 
+ static void hfi_session_start_done(struct venus_core *core,
+diff --git a/drivers/media/platform/qcom/venus/vdec.c b/drivers/media/platform/qcom/venus/vdec.c
+index 553554fcd..dba6b5ebe 100644
+--- a/drivers/media/platform/qcom/venus/vdec.c
++++ b/drivers/media/platform/qcom/venus/vdec.c
+@@ -181,6 +181,35 @@ find_format_by_index(struct venus_inst *inst, unsigned int index, u32 type)
+ 	return &fmt[i];
+ }
+ 
++#define IRIS1_LEGACY_DEC_MIN_INPUT_BUFS 4
++
++static bool vdec_iris1_legacy_codec(struct venus_inst *inst)
++{
++	if (!IS_IRIS1(inst->core))
++		return false;
++
++	return inst->hfi_codec == HFI_VIDEO_CODEC_VP8 ||
++	       inst->hfi_codec == HFI_VIDEO_CODEC_VP9 ||
++	       inst->hfi_codec == HFI_VIDEO_CODEC_MPEG2;
++}
++
++static u32 vdec_get_framesz(struct venus_inst *inst, u32 pixfmt,
++			    u32 width, u32 height)
++{
++	u32 stride, y_scanlines, uv_scanlines;
++
++	if (!vdec_iris1_legacy_codec(inst) || pixfmt != V4L2_PIX_FMT_NV12)
++		return venus_helper_get_framesz(pixfmt, width, height);
++
++	/* Match VENUS_BUFFER_SIZE(COLOR_FMT_NV12) from the SM8150 driver. */
++	stride = ALIGN(width, 128);
++	y_scanlines = ALIGN(height, 32);
++	uv_scanlines = ALIGN((height + 1) >> 1, 16);
++
++	return ALIGN(stride * y_scanlines + stride * uv_scanlines + SZ_4K,
++		     SZ_4K);
++}
++
+ static const struct venus_format *
+ vdec_try_fmt_common(struct venus_inst *inst, struct v4l2_format *f)
+ {
+@@ -218,8 +247,8 @@ vdec_try_fmt_common(struct venus_inst *inst, struct v4l2_format *f)
+ 	pixmp->num_planes = fmt->num_planes;
+ 	pixmp->flags = 0;
+ 
+-	szimage = venus_helper_get_framesz(pixmp->pixelformat, pixmp->width,
+-					   pixmp->height);
++	szimage = vdec_get_framesz(inst, pixmp->pixelformat, pixmp->width,
++				  pixmp->height);
+ 
+ 	if (f->type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) {
+ 		unsigned int stride = pixmp->width;
+@@ -383,7 +412,8 @@ static int vdec_s_fmt(struct file *file, void *fh, struct v4l2_format *f)
+ 	else if (f->type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) {
+ 		inst->fmt_cap = fmt;
+ 		inst->output2_buf_size =
+-			venus_helper_get_framesz(pixfmt_cap, orig_pixmp.width, orig_pixmp.height);
++			vdec_get_framesz(inst, pixfmt_cap, orig_pixmp.width,
++					  orig_pixmp.height);
+ 	}
+ 
+ 	return 0;
+@@ -751,7 +781,6 @@ static int vdec_set_work_route(struct venus_inst *inst)
+ #define is_10bit_ubwc_fmt(fmt) (!!((fmt) & HFI_COLOR_FORMAT_10_BIT_BASE & \
+ 				 HFI_COLOR_FORMAT_UBWC_BASE))
+ 
+-
+ static int vdec_output_conf(struct venus_inst *inst)
+ {
+ 	struct venus_core *core = inst->core;
+@@ -761,16 +790,19 @@ static int vdec_output_conf(struct venus_inst *inst)
+ 	u32 height = inst->height;
+ 	u32 out_fmt, out2_fmt;
+ 	bool ubwc = false;
++	bool legacy_codec = vdec_iris1_legacy_codec(inst);
+ 	u32 ptype;
+ 	int ret;
+ 
+-	ret = venus_helper_set_work_mode(inst);
+-	if (ret)
+-		return ret;
++	if (!legacy_codec) {
++		ret = venus_helper_set_work_mode(inst);
++		if (ret)
++			return ret;
+ 
+-	ret = vdec_set_work_route(inst);
+-	if (ret)
+-		return ret;
++		ret = vdec_set_work_route(inst);
++		if (ret)
++			return ret;
++	}
+ 
+ 	if (core->res->hfi_version == HFI_VERSION_1XX) {
+ 		ptype = HFI_PROPERTY_PARAM_VDEC_CONTINUE_DATA_TRANSFER;
+@@ -813,9 +845,22 @@ static int vdec_output_conf(struct venus_inst *inst)
+ 		inst->dpb_buftype = 0;
+ 		inst->dpb_fmt = 0;
+ 	}
++	if (legacy_codec && inst->opb_fmt == HFI_COLOR_FORMAT_NV12) {
++		u32 opb_size = vdec_get_framesz(inst, V4L2_PIX_FMT_NV12,
++						 width, height);
++
++		if (inst->opb_buftype == HFI_BUFFER_OUTPUT2)
++			inst->output2_buf_size = opb_size;
++		else
++			inst->output_buf_size = opb_size;
++	}
+ 
+-	ret = venus_helper_set_raw_format(inst, inst->opb_fmt,
+-					  inst->opb_buftype);
++	if (legacy_codec && inst->dpb_fmt)
++		ret = venus_helper_set_raw_format(inst, inst->dpb_fmt,
++						  inst->dpb_buftype);
++	else
++		ret = venus_helper_set_raw_format(inst, inst->opb_fmt,
++						  inst->opb_buftype);
+ 	if (ret)
+ 		return ret;
+ 
+@@ -828,8 +873,12 @@ static int vdec_output_conf(struct venus_inst *inst)
+ 		if (ret)
+ 			return ret;
+ 
+-		ret = venus_helper_set_raw_format(inst, inst->dpb_fmt,
+-						  inst->dpb_buftype);
++		if (legacy_codec)
++			ret = venus_helper_set_raw_format(inst, inst->opb_fmt,
++							  inst->opb_buftype);
++		else
++			ret = venus_helper_set_raw_format(inst, inst->dpb_fmt,
++							  inst->dpb_buftype);
+ 		if (ret)
+ 			return ret;
+ 
+@@ -839,6 +888,16 @@ static int vdec_output_conf(struct venus_inst *inst)
+ 			return ret;
+ 	}
+ 
++	if (legacy_codec) {
++		ret = venus_helper_set_work_mode(inst);
++		if (ret)
++			return ret;
++
++		ret = vdec_set_work_route(inst);
++		if (ret)
++			return ret;
++	}
++
+ 	if (IS_V3(core) || IS_V4(core) || IS_V6(core)) {
+ 		ret = venus_helper_get_bufreq(inst, HFI_BUFFER_OUTPUT, &bufreq);
+ 		if (ret)
+@@ -846,6 +905,8 @@ static int vdec_output_conf(struct venus_inst *inst)
+ 
+ 		if (bufreq.size > inst->output_buf_size)
+ 			return -EINVAL;
++		if (legacy_codec && inst->dpb_buftype == HFI_BUFFER_OUTPUT)
++			inst->output_buf_size = bufreq.size;
+ 
+ 		if (inst->dpb_fmt) {
+ 			ret = venus_helper_get_bufreq(inst, HFI_BUFFER_OUTPUT2,
+@@ -855,6 +916,22 @@ static int vdec_output_conf(struct venus_inst *inst)
+ 
+ 			if (bufreq.size > inst->output2_buf_size)
+ 				return -EINVAL;
++			if (legacy_codec && inst->dpb_buftype == HFI_BUFFER_OUTPUT2)
++				inst->output2_buf_size = bufreq.size;
++		}
++
++		if (legacy_codec && inst->dpb_fmt) {
++			u32 extra_type;
++
++			extra_type = inst->opb_buftype == HFI_BUFFER_OUTPUT ?
++				HFI_BUFFER_EXTRADATA_OUTPUT(core->res->hfi_version) :
++				HFI_BUFFER_EXTRADATA_OUTPUT2(core->res->hfi_version);
++			ret = venus_helper_get_bufreq(inst, extra_type, &bufreq);
++			if (ret)
++				return ret;
++			if (!bufreq.size || bufreq.size > SZ_16K)
++				return -EINVAL;
++
+ 		}
+ 
+ 		if (inst->output2_buf_size) {
+@@ -881,6 +958,51 @@ static int vdec_output_conf(struct venus_inst *inst)
+ 	return 0;
+ }
+ 
++static int vdec_enable_extradata(struct venus_inst *inst, u32 ptype, u32 id)
++{
++	struct hfi_index_extradata_config extra = {
++		.enable = 1,
++		.index_extra_data_id = id,
++	};
++
++	return hfi_session_set_property(inst, ptype, &extra);
++}
++
++static int vdec_enable_legacy_extradata(struct venus_inst *inst)
++{
++	u32 display_ptype;
++	int ret;
++
++	if (!vdec_iris1_legacy_codec(inst))
++		return 0;
++
++	ret = vdec_enable_extradata(inst,
++			HFI_PROPERTY_PARAM_VDEC_INTERLACE_VIDEO_EXTRADATA,
++			HFI_PROPERTY_PARAM_VDEC_INTERLACE_VIDEO_EXTRADATA);
++	if (ret)
++		return ret;
++
++	ret = vdec_enable_extradata(inst, HFI_PROPERTY_PARAM_INDEX_EXTRADATA,
++				    HFI_INDEX_EXTRADATA_OUTPUT_CROP);
++	if (ret)
++		return ret;
++
++	ret = vdec_enable_extradata(inst,
++			HFI_PROPERTY_PARAM_VDEC_UBWC_CR_STAT_INFO_EXTRADATA,
++			HFI_PROPERTY_PARAM_VDEC_UBWC_CR_STAT_INFO_EXTRADATA);
++	if (ret)
++		return ret;
++
++	if (inst->hfi_codec == HFI_VIDEO_CODEC_MPEG2)
++		display_ptype =
++			HFI_PROPERTY_PARAM_VDEC_MPEG2_SEQDISP_EXTRADATA;
++	else
++		display_ptype =
++			HFI_PROPERTY_PARAM_VDEC_VPX_COLORSPACE_EXTRADATA;
++
++	return vdec_enable_extradata(inst, display_ptype, display_ptype);
++}
++
+ static int vdec_session_init(struct venus_inst *inst)
+ {
+ 	int ret;
+@@ -891,8 +1013,16 @@ static int vdec_session_init(struct venus_inst *inst)
+ 	else if (ret)
+ 		return ret;
+ 
+-	ret = venus_helper_set_input_resolution(inst, frame_width_min(inst),
+-						frame_height_min(inst));
++	if (vdec_iris1_legacy_codec(inst))
++		ret = venus_helper_set_input_resolution(inst, inst->out_width,
++							inst->out_height);
++	else
++		ret = venus_helper_set_input_resolution(inst, frame_width_min(inst),
++							frame_height_min(inst));
++	if (ret)
++		goto deinit;
++
++	ret = vdec_enable_legacy_extradata(inst);
+ 	if (ret)
+ 		goto deinit;
+ 
+@@ -986,9 +1116,8 @@ static int vdec_queue_setup(struct vb2_queue *q,
+ 	switch (q->type) {
+ 	case V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE:
+ 		*num_planes = inst->fmt_out->num_planes;
+-		sizes[0] = venus_helper_get_framesz(inst->fmt_out->pixfmt,
+-						    inst->out_width,
+-						    inst->out_height);
++		sizes[0] = vdec_get_framesz(inst, inst->fmt_out->pixfmt,
++					      inst->out_width, inst->out_height);
+ 		sizes[0] = max(sizes[0], inst->input_buf_size);
+ 		inst->input_buf_size = sizes[0];
+ 		*num_buffers = max(*num_buffers, in_num);
+@@ -997,9 +1126,8 @@ static int vdec_queue_setup(struct vb2_queue *q,
+ 		break;
+ 	case V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE:
+ 		*num_planes = inst->fmt_cap->num_planes;
+-		sizes[0] = venus_helper_get_framesz(inst->fmt_cap->pixfmt,
+-						    inst->width,
+-						    inst->height);
++		sizes[0] = vdec_get_framesz(inst, inst->fmt_cap->pixfmt,
++					      inst->width, inst->height);
+ 		inst->output_buf_size = sizes[0];
+ 		*num_buffers = max(*num_buffers, out_num);
+ 		inst->num_output_bufs = *num_buffers;
+@@ -1048,6 +1176,54 @@ static int vdec_verify_conf(struct venus_inst *inst)
+ 	return 0;
+ }
+ 
++static int vdec_set_num_bufs(struct venus_inst *inst)
++{
++	enum hfi_version ver = inst->core->res->hfi_version;
++	struct hfi_buffer_requirements input_req, dpb_req, opb_req;
++	u32 input_min, dpb_min, opb_min;
++	u32 output, output_min;
++	u32 output2, output2_min;
++	int ret;
++
++	if (!vdec_iris1_legacy_codec(inst) || !inst->dpb_fmt)
++		return venus_helper_set_num_bufs(inst, inst->num_input_bufs,
++						 VB2_MAX_FRAME, VB2_MAX_FRAME);
++
++	ret = venus_helper_get_bufreq(inst, HFI_BUFFER_INPUT, &input_req);
++	if (ret)
++		return ret;
++
++	ret = venus_helper_get_bufreq(inst, inst->opb_buftype, &opb_req);
++	if (ret)
++		return ret;
++
++	input_min = max_t(u32, hfi_bufreq_get_count_min(&input_req, ver),
++			  IRIS1_LEGACY_DEC_MIN_INPUT_BUFS);
++	opb_min = hfi_bufreq_get_count_min(&opb_req, ver);
++
++	ret = venus_helper_get_bufreq(inst, inst->dpb_buftype, &dpb_req);
++	if (ret)
++		return ret;
++	dpb_min = hfi_bufreq_get_count_min(&dpb_req, ver);
++
++	if (inst->dpb_buftype == HFI_BUFFER_OUTPUT) {
++		output = dpb_min;
++		output_min = dpb_min;
++		output2 = inst->num_output_bufs;
++		output2_min = opb_min;
++	} else {
++		output = inst->num_output_bufs;
++		output_min = opb_min;
++		output2 = dpb_min;
++		output2_min = dpb_min;
++	}
++
++	return venus_helper_set_num_bufs_min_host(inst,
++						  inst->num_input_bufs, input_min,
++						  output, output_min,
++						  output2, output2_min);
++}
++
+ static int vdec_start_capture(struct venus_inst *inst)
+ {
+ 	int ret;
+@@ -1073,8 +1249,7 @@ static int vdec_start_capture(struct venus_inst *inst)
+ 	if (ret)
+ 		return ret;
+ 
+-	ret = venus_helper_set_num_bufs(inst, inst->num_input_bufs,
+-					VB2_MAX_FRAME, VB2_MAX_FRAME);
++	ret = vdec_set_num_bufs(inst);
+ 	if (ret)
+ 		return ret;
+ 
+@@ -1169,8 +1344,7 @@ static int vdec_start_output(struct venus_inst *inst)
+ 	if (ret)
+ 		return ret;
+ 
+-	ret = venus_helper_set_num_bufs(inst, inst->num_input_bufs,
+-					VB2_MAX_FRAME, VB2_MAX_FRAME);
++	ret = vdec_set_num_bufs(inst);
+ 	if (ret)
+ 		return ret;
+ 
+@@ -1355,10 +1529,15 @@ static void vdec_session_release(struct venus_inst *inst)
+ static int vdec_buf_init(struct vb2_buffer *vb)
+ {
+ 	struct venus_inst *inst = vb2_get_drv_priv(vb->vb2_queue);
++	int ret;
+ 
+ 	inst->buf_count++;
+ 
+-	return venus_helper_vb2_buf_init(vb);
++	ret = venus_helper_vb2_buf_init(vb);
++	if (ret)
++		inst->buf_count--;
++
++	return ret;
+ }
+ 
+ static void vdec_buf_cleanup(struct vb2_buffer *vb)
+@@ -1371,6 +1550,7 @@ static void vdec_buf_cleanup(struct vb2_buffer *vb)
+ 	if (vb->type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE)
+ 		if (!list_empty(&inst->registeredbufs))
+ 			list_del_init(&buf->reg_list);
++	venus_helper_vb2_buf_cleanup(vb);
+ 	mutex_unlock(&inst->lock);
+ 
+ 	inst->buf_count--;
+@@ -1416,8 +1596,9 @@ static const struct vb2_ops vdec_vb2_ops = {
+ };
+ 
+ static void vdec_buf_done(struct venus_inst *inst, unsigned int buf_type,
+-			  u32 tag, u32 bytesused, u32 data_offset, u32 flags,
+-			  u32 hfi_flags, u64 timestamp_us)
++			  u32 tag, u32 packet_buffer, u32 bytesused,
++			  u32 data_offset, u32 flags, u32 hfi_flags,
++			  u64 timestamp_us)
+ {
+ 	enum vb2_buffer_state state = VB2_BUF_STATE_DONE;
+ 	struct vb2_v4l2_buffer *vbuf;
+@@ -1431,7 +1612,17 @@ static void vdec_buf_done(struct venus_inst *inst, unsigned int buf_type,
+ 	else
+ 		type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+ 
+-	vbuf = venus_helper_find_buf(inst, type, tag);
++	if (vdec_iris1_legacy_codec(inst) &&
++	    buf_type == inst->dpb_buftype) {
++		venus_helper_change_dpb_owner_by_addr(inst, buf_type,
++						      packet_buffer);
++		return;
++	}
++
++	if (vdec_iris1_legacy_codec(inst) && V4L2_TYPE_IS_CAPTURE(type))
++		vbuf = venus_helper_find_buf_by_addr(inst, type, packet_buffer);
++	else
++		vbuf = venus_helper_find_buf(inst, type, tag);
+ 	if (!vbuf) {
+ 		venus_helper_change_dpb_owner(inst, vbuf, type, buf_type, tag);
+ 		return;
+@@ -1598,7 +1789,11 @@ static void vdec_event_notify(struct venus_inst *inst, u32 event,
+ 			vdec_event_change(inst, data, false);
+ 			break;
+ 		case HFI_EVENT_RELEASE_BUFFER_REFERENCE:
+-			venus_helper_release_buf_ref(inst, data->tag);
++			if (vdec_iris1_legacy_codec(inst))
++				venus_helper_release_buf_ref_by_addr(inst,
++								    data->packet_buffer);
++			else
++				venus_helper_release_buf_ref(inst, data->tag);
+ 			break;
+ 		default:
+ 			break;
+diff --git a/drivers/media/platform/qcom/venus/venc.c b/drivers/media/platform/qcom/venus/venc.c
+index c6a5eedb1..3c36e5376 100644
+--- a/drivers/media/platform/qcom/venus/venc.c
++++ b/drivers/media/platform/qcom/venus/venc.c
+@@ -1545,8 +1545,9 @@ static const struct vb2_ops venc_vb2_ops = {
+ };
+ 
+ static void venc_buf_done(struct venus_inst *inst, unsigned int buf_type,
+-			  u32 tag, u32 bytesused, u32 data_offset, u32 flags,
+-			  u32 hfi_flags, u64 timestamp_us)
++			  u32 tag, u32 packet_buffer, u32 bytesused,
++			  u32 data_offset, u32 flags, u32 hfi_flags,
++			  u64 timestamp_us)
+ {
+ 	struct vb2_v4l2_buffer *vbuf;
+ 	struct vb2_buffer *vb;
+-- 
+2.43.0
+
