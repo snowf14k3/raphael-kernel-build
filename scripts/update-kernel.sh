@@ -265,7 +265,7 @@ if (( EUID != 0 )); then
     exit 1
 fi
 
-for cmd in dpkg dpkg-query dpkg-deb update-initramfs systemctl cp mv rm mkdir sync df; do
+for cmd in dpkg dpkg-query dpkg-deb update-initramfs systemctl cp mv rm mkdir install sync df; do
     need_cmd "$cmd"
 done
 
@@ -279,6 +279,24 @@ if [[ -z "${BACKUP_ROOT}" ]]; then
         BACKUP_ROOT="/var/backups/raphael-kernel"
     fi
 fi
+
+package_installed_exact() {
+    local package="$1"
+    local version="$2"
+    local record
+
+    record="$(dpkg-query -W -f='${Status}\t${Version}' "${package}" 2>/dev/null || true)"
+    [[ "${record}" == "install ok installed"$'\t'"${version}" ]]
+}
+
+package_version_exact() {
+    local package="$1"
+    local version="$2"
+    local installed
+
+    installed="$(dpkg-query -W -f='${Version}' "${package}" 2>/dev/null || true)"
+    [[ "${installed}" == "${version}" ]]
+}
 
 cleanup_noncurrent() {
     local current="$1"
@@ -389,12 +407,14 @@ HEADERS_ARCH="$(dpkg-deb -f "${HEADERS_DEB}" Architecture)"
 
 IMAGE_PACKAGE="$(dpkg-deb -f "${IMAGE_DEB}" Package)"
 HEADERS_PACKAGE="$(dpkg-deb -f "${HEADERS_DEB}" Package)"
+IMAGE_VERSION="$(dpkg-deb -f "${IMAGE_DEB}" Version)"
+HEADERS_VERSION="$(dpkg-deb -f "${HEADERS_DEB}" Version)"
 
 echo "=== 更新计划 ==="
 echo "当前运行: ${CURRENT_KERNEL}"
 echo "目标内核: ${TARGET_KERNEL}"
-echo "image: ${IMAGE_PACKAGE}"
-echo "headers: ${HEADERS_PACKAGE}"
+echo "image: ${IMAGE_PACKAGE} (${IMAGE_VERSION})"
+echo "headers: ${HEADERS_PACKAGE} (${HEADERS_VERSION})"
 echo "boot: $(df -h /boot | tail -n1)"
 
 if [[ "$(uname -m)" != "aarch64" && "$(uname -m)" != "arm64" ]]; then
@@ -471,27 +491,77 @@ if (( FREE_BOOT_KB < 55000 )); then
     exit 1
 fi
 
-# 该 /boot 文件系统不允许 dpkg 创建覆盖备份链接；先备份并移走共享 DTB 目录，
-# 再用 --force-overwrite 安装新 image。
-echo "=== 安装新内核包 ==="
-rm -rf /boot/dtbs/qcom
-
-if ! dpkg -i --force-overwrite "${IMAGE_DEB}"; then
-    echo "image 安装失败，恢复旧 DTB。" >&2
-    rm -rf /boot/dtbs/qcom
-    mkdir -p /boot/dtbs
-    [[ -d "${BACKUP_DIR}/dtbs-qcom" ]] && cp -a "${BACKUP_DIR}/dtbs-qcom" /boot/dtbs/qcom
-    exit 1
-fi
-
-if ! dpkg -i "${HEADERS_DEB}"; then
-    echo "headers 安装失败。image 已安装但尚未切换固定启动文件。" >&2
-    exit 1
-fi
-
 TARGET_VMLINUZ="/boot/vmlinuz-${TARGET_KERNEL}"
 TARGET_INITRD="/boot/initrd.img-${TARGET_KERNEL}"
 TARGET_DTB="/boot/dtbs/qcom/sm8150-xiaomi-raphael.dtb"
+TARGET_MODULES="/lib/modules/${TARGET_KERNEL}"
+TARGET_HEADERS="/usr/src/linux-headers-${TARGET_KERNEL}"
+
+# /boot 可能不支持 dpkg 为已存在文件创建备份链接。同版本重跑 updater 时，
+# 若精确版本已经成功安装且关键文件存在，直接复用现有安装，不再重复解包。
+# 若版本一致但 dpkg 状态不完整，先尝试仅 configure，避免再次触碰 /boot 文件。
+echo "=== 安装/复用新内核包 ==="
+IMAGE_READY=0
+if package_installed_exact "${IMAGE_PACKAGE}" "${IMAGE_VERSION}" &&
+   [[ -s "${TARGET_VMLINUZ}" && -d "${TARGET_MODULES}" ]]; then
+    IMAGE_READY=1
+    echo "image 已是目标精确版本，跳过重复 dpkg -i: ${IMAGE_PACKAGE} ${IMAGE_VERSION}"
+elif package_version_exact "${IMAGE_PACKAGE}" "${IMAGE_VERSION}" &&
+     [[ -s "${TARGET_VMLINUZ}" && -d "${TARGET_MODULES}" ]]; then
+    echo "image 文件和版本已存在，但 dpkg 状态不完整；尝试仅 configure。"
+    dpkg --configure "${IMAGE_PACKAGE}" || true
+    if package_installed_exact "${IMAGE_PACKAGE}" "${IMAGE_VERSION}"; then
+        IMAGE_READY=1
+        echo "image configure 完成，继续复用现有文件。"
+    else
+        echo "image configure 未恢复完整状态。" >&2
+        dpkg-query -W -f='${db:Status-Abbrev} ${Version} ${binary:Package}\n' \
+            "${IMAGE_PACKAGE}" 2>/dev/null || true
+        if [[ "${CURRENT_KERNEL}" == "${TARGET_KERNEL}" ]]; then
+            echo "目标内核正在运行，拒绝删除其 /boot 文件重装；请先从其他内核启动后再修复。" >&2
+            exit 1
+        fi
+        echo "目标内核当前未运行，将清理其版本化 /boot 文件后重新解包修复。"
+    fi
+fi
+
+if (( IMAGE_READY == 0 )); then
+    # 旧 builddeb.patch 的 image 会写共享 /boot/dtbs/qcom。真正安装/修复
+    # 未运行的目标版本时，先移走共享 DTB，并删除目标版本已有的 /boot 文件，
+    # 避免不支持链接的 /boot 上触发 dpkg 的备份链接创建。
+    rm -rf /boot/dtbs/qcom
+    if [[ "${CURRENT_KERNEL}" != "${TARGET_KERNEL}" ]]; then
+        for prefix in vmlinuz initrd.img config System.map; do
+            rm -f -- "/boot/${prefix}-${TARGET_KERNEL}"
+        done
+    fi
+    if ! dpkg -i --force-overwrite "${IMAGE_DEB}"; then
+        echo "image 安装失败，恢复旧 DTB。" >&2
+        rm -rf /boot/dtbs/qcom
+        mkdir -p /boot/dtbs
+        [[ -d "${BACKUP_DIR}/dtbs-qcom" ]] && cp -a "${BACKUP_DIR}/dtbs-qcom" /boot/dtbs/qcom
+        exit 1
+    fi
+fi
+
+HEADERS_READY=0
+if package_installed_exact "${HEADERS_PACKAGE}" "${HEADERS_VERSION}" &&
+   [[ -d "${TARGET_HEADERS}" ]]; then
+    HEADERS_READY=1
+    echo "headers 已是目标精确版本，跳过重复 dpkg -i: ${HEADERS_PACKAGE} ${HEADERS_VERSION}"
+elif package_version_exact "${HEADERS_PACKAGE}" "${HEADERS_VERSION}" &&
+     [[ -d "${TARGET_HEADERS}" ]]; then
+    echo "headers 文件和版本已存在，但 dpkg 状态不完整；尝试仅 configure。"
+    dpkg --configure "${HEADERS_PACKAGE}" || true
+    package_installed_exact "${HEADERS_PACKAGE}" "${HEADERS_VERSION}" && HEADERS_READY=1
+fi
+
+if (( HEADERS_READY == 0 )); then
+    if ! dpkg -i "${HEADERS_DEB}"; then
+        echo "headers 安装失败。image 已安装但尚未切换固定启动文件。" >&2
+        exit 1
+    fi
+fi
 
 [[ -s "${TARGET_VMLINUZ}" ]] || {
     echo "缺少 ${TARGET_VMLINUZ}" >&2
@@ -590,13 +660,25 @@ for dir in /lib/modules/*sm8150-*; do
     rm -rf -- "${dir}"
 done
 
-# purge 旧包可能再次触碰共享 DTB；用缓存的新 image 重新确认目标包与 DTB。
-if [[ -s "${CACHE_DIR}/image.deb" ]]; then
-    dpkg -i --force-overwrite "${CACHE_DIR}/image.deb"
-fi
-if [[ -s "${CACHE_DIR}/headers.deb" ]]; then
-    dpkg -i "${CACHE_DIR}/headers.deb" || true
-fi
+# purge 旧包可能再次触碰共享 DTB。不要在目标内核已经启动后重新安装
+# 同版本 image；/boot 可能无法为已存在的 System.map/vmlinuz 创建备份链接。
+# 直接使用缓存且已通过 Release SHA256SUMS 校验的 DTB 原子恢复固定路径。
+CACHED_DTB="${CACHE_DIR}/sm8150-xiaomi-raphael.dtb"
+TARGET_DTB="/boot/dtbs/qcom/sm8150-xiaomi-raphael.dtb"
+[[ -s "${CACHED_DTB}" ]] || {
+    echo "finalize: 缓存 Raphael DTB 缺失，保留状态供人工处理" >&2
+    exit 1
+}
+mkdir -p "$(dirname "${TARGET_DTB}")"
+install -m 0644 "${CACHED_DTB}" "${TARGET_DTB}.new"
+sync
+mv -f "${TARGET_DTB}.new" "${TARGET_DTB}"
+sync
+[[ "$(sha256sum "${TARGET_DTB}" | awk '{print $1}')" == \
+   "$(sha256sum "${CACHED_DTB}" | awk '{print $1}')" ]] || {
+    echo "finalize: Raphael DTB 校验失败，保留状态供人工处理" >&2
+    exit 1
+}
 
 VMLINUZ="/boot/vmlinuz-${TARGET_KERNEL}"
 INITRD="/boot/initrd.img-${TARGET_KERNEL}"
