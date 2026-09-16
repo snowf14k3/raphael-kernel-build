@@ -505,6 +505,17 @@ fi
     echo "缺少 ${TARGET_INITRD}" >&2
     exit 1
 }
+
+# 新版直接源码 bindeb-pkg 会把 DTB 安装到 /usr/lib/linux-image-<release>/qcom，
+# 而旧 builddeb.patch 产物会直接写 /boot/dtbs/qcom。无论软件包采用哪种布局，
+# Release 自身都携带经过 SHA256SUMS 校验的 Raphael DTB，因此在切换启动文件前
+# 明确安装该 DTB 到设备实际使用的固定路径，避免依赖 dpkg 的 DTB 布局。
+mkdir -p "$(dirname "${TARGET_DTB}")"
+install -m 0644 "${RELEASE_DTB}" "${TARGET_DTB}.new"
+sync
+mv -f "${TARGET_DTB}.new" "${TARGET_DTB}"
+sync
+
 [[ -s "${TARGET_DTB}" ]] || {
     echo "缺少 Raphael DTB: ${TARGET_DTB}" >&2
     exit 1
