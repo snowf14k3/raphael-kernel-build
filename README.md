@@ -136,7 +136,7 @@ raphael-kernel-arm64
 ### GitHub 直连
 
 ```bash
-sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/snowf14k3/raphael-kernel-build/main/scripts/update-kernel.sh)"
+curl -fsSL 'https://raw.githubusercontent.com/snowf14k3/raphael-kernel-build/main/scripts/update-kernel.sh' | sudo bash -s --
 ```
 
 ### GitHub 镜像线路
@@ -158,10 +158,10 @@ scripts/ghproxy-update-kernel.sh
 
 ```bash
 # 通过 ghfast.top 获取镜像更新入口（附带时间戳避免代理缓存旧脚本）
-sudo bash -c "$(curl -fsSL \"https://ghfast.top/https://raw.githubusercontent.com/snowf14k3/raphael-kernel-build/refs/heads/main/scripts/ghproxy-update-kernel.sh?ts=$(date +%s)\")"
+curl -fsSL "https://ghfast.top/https://raw.githubusercontent.com/snowf14k3/raphael-kernel-build/refs/heads/main/scripts/ghproxy-update-kernel.sh?ts=$(date +%s)" | sudo bash -s --
 
 # 通过 proxy.koishi.asia 获取镜像更新入口
-sudo bash -c "$(curl -fsSL \"https://proxy.koishi.asia/https://raw.githubusercontent.com/snowf14k3/raphael-kernel-build/refs/heads/main/scripts/ghproxy-update-kernel.sh?ts=$(date +%s)\")"
+curl -fsSL "https://proxy.koishi.asia/https://raw.githubusercontent.com/snowf14k3/raphael-kernel-build/refs/heads/main/scripts/ghproxy-update-kernel.sh?ts=$(date +%s)" | sudo bash -s --
 ```
 
 也可以直接指定线路：
