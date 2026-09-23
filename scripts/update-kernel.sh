@@ -129,6 +129,34 @@ api_get() {
     "${API_CURL[@]}" "$1"
 }
 
+release_assets_json() {
+    local release_json="$1"
+    local assets_url=""
+
+    if [[ "${RAPHAEL_NO_JQ:-0}" != 1 ]] && command -v jq >/dev/null 2>&1; then
+        if printf '%s\n' "${release_json}" | jq -e '(.assets // []) | length > 0' >/dev/null 2>&1; then
+            printf '%s\n' "${release_json}" | jq -c '.assets'
+            return
+        fi
+        assets_url="$(printf '%s\n' "${release_json}" | jq -r '.assets_url // empty')"
+    else
+        if grep -q '"browser_download_url":' <<< "${release_json}"; then
+            printf '%s\n' "${release_json}"
+            return
+        fi
+        assets_url="$(printf '%s\n' "${release_json}" |
+            grep -o '"assets_url":"[^"]*"' |
+            head -n1 |
+            sed 's/^"assets_url":"//;s/"$//' || true)"
+    fi
+
+    if [[ -n "${assets_url}" ]]; then
+        api_get "${assets_url}"
+    else
+        printf '[]\n'
+    fi
+}
+
 tty_read() {
     local prompt="$1"
     local __var="$2"
@@ -153,23 +181,33 @@ confirm() {
 
 # 输出: tag<TAB>name<TAB>published_at
 list_prereleases() {
-    local json
+    local json tag meta assets name published count=0
     json="$(api_get "${API_BASE}/releases?per_page=20")"
 
     if [[ "${RAPHAEL_NO_JQ:-0}" != 1 ]] && command -v jq >/dev/null 2>&1; then
-        printf '%s\n' "${json}" | jq -r '
-            .[]
-            | select(.draft == false and .prerelease == true)
-            | select(any(.assets[]?; (.name | endswith(".tar.gz"))))
-            | [.tag_name, (.name // .tag_name), (.published_at // "")]
-            | @tsv
-        '
+        while IFS=$'\t' read -r tag name published; do
+            [[ -n "${tag}" ]] || continue
+            ((count+=1))
+            (( count <= 8 )) || break
+
+            meta="$(api_get "${API_BASE}/releases/tags/${tag}")" || continue
+            assets="$(release_assets_json "${meta}")"
+            printf '%s\n' "${assets}" |
+                jq -e 'any(.[]?; (.name | endswith(".tar.gz")))' >/dev/null 2>&1 || continue
+            printf '%s\t%s\t%s\n' "${tag}" "${name}" "${published}"
+        done < <(
+            printf '%s\n' "${json}" | jq -r '
+                .[]
+                | select(.draft == false and .prerelease == true)
+                | [.tag_name, (.name // .tag_name), (.published_at // "")]
+                | @tsv
+            '
+        )
         return
     fi
 
     # GitHub API 可能返回单行 JSON。无 jq 时先从 release 列表抽取 tag，
     # 再逐个查询前 8 个 release 的元数据，避免依赖 JSON 格式化方式。
-    local tag meta name published count=0
     while IFS= read -r tag; do
         [[ -n "${tag}" ]] || continue
         ((count+=1))
@@ -179,7 +217,8 @@ list_prereleases() {
         [[ -n "${meta}" ]] || continue
         grep -q '"prerelease":true' <<< "${meta}" || continue
         grep -q '"draft":false' <<< "${meta}" || continue
-        grep -Eq '"browser_download_url":"[^"]+\.tar\.gz"' <<< "${meta}" || continue
+        assets="$(release_assets_json "${meta}")"
+        grep -Eq '"name":"[^"]+\.tar\.gz"' <<< "${assets}" || continue
 
         name="$(printf '%s\n' "${meta}" | grep -o '"name":"[^"]*"' | head -n1 | sed 's/^"name":"//;s/"$//')"
         published="$(printf '%s\n' "${meta}" | grep -o '"published_at":"[^"]*"' | head -n1 | sed 's/^"published_at":"//;s/"$//')"
@@ -233,19 +272,20 @@ if [[ -z "${TAG}" ]]; then
 fi
 
 RELEASE_JSON="$(api_get "${API_BASE}/releases/tags/${TAG}")"
+ASSETS_JSON="$(release_assets_json "${RELEASE_JSON}")"
 if [[ "${RAPHAEL_NO_JQ:-0}" != 1 ]] && command -v jq >/dev/null 2>&1; then
     IS_PRE="$(printf '%s\n' "${RELEASE_JSON}" | jq -r '.prerelease')"
     IS_DRAFT="$(printf '%s\n' "${RELEASE_JSON}" | jq -r '.draft')"
     RELEASE_NAME="$(printf '%s\n' "${RELEASE_JSON}" | jq -r '.name // .tag_name')"
-    ARCHIVE_URL="$(printf '%s\n' "${RELEASE_JSON}" | jq -r '.assets[]? | select(.name | endswith(".tar.gz")) | .browser_download_url' | head -n1)"
-    SHA_URL="$(printf '%s\n' "${RELEASE_JSON}" | jq -r '.assets[]? | select(.name | endswith(".tar.gz.sha256")) | .browser_download_url' | head -n1)"
+    ARCHIVE_URL="$(printf '%s\n' "${ASSETS_JSON}" | jq -r '.[]? | select(.name | endswith(".tar.gz")) | .browser_download_url' | head -n1)"
+    SHA_URL="$(printf '%s\n' "${ASSETS_JSON}" | jq -r '.[]? | select(.name | endswith(".tar.gz.sha256")) | .browser_download_url' | head -n1)"
 else
     grep -q '"prerelease":true' <<< "${RELEASE_JSON}" && IS_PRE=true || IS_PRE=false
     grep -q '"draft":true' <<< "${RELEASE_JSON}" && IS_DRAFT=true || IS_DRAFT=false
     RELEASE_NAME="$(printf '%s\n' "${RELEASE_JSON}" | grep -o '"name":"[^"]*"' | head -n1 | sed 's/^"name":"//;s/"$//' || true)"
     [[ -n "${RELEASE_NAME}" ]] || RELEASE_NAME="${TAG}"
-    ARCHIVE_URL="$(printf '%s\n' "${RELEASE_JSON}" | grep -o '"browser_download_url":"[^"]*\.tar\.gz"' | head -n1 | sed 's/^"browser_download_url":"//;s/"$//' || true)"
-    SHA_URL="$(printf '%s\n' "${RELEASE_JSON}" | grep -o '"browser_download_url":"[^"]*\.tar\.gz\.sha256"' | head -n1 | sed 's/^"browser_download_url":"//;s/"$//' || true)"
+    ARCHIVE_URL="$(printf '%s\n' "${ASSETS_JSON}" | grep -o '"browser_download_url":"[^"]*\.tar\.gz"' | head -n1 | sed 's/^"browser_download_url":"//;s/"$//' || true)"
+    SHA_URL="$(printf '%s\n' "${ASSETS_JSON}" | grep -o '"browser_download_url":"[^"]*\.tar\.gz\.sha256"' | head -n1 | sed 's/^"browser_download_url":"//;s/"$//' || true)"
 fi
 
 [[ "${IS_PRE}" == "true" && "${IS_DRAFT}" != "true" ]] || {
