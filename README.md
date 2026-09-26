@@ -4,6 +4,31 @@
 
 仓库采用“固定上游基线 + 独立补丁集 + 可复现构建”的方式维护 Raphael 适配。`main` 分支只保留已经整理并验证过的修复，不包含 bring-up 阶段使用的临时诊断补丁。
 
+## 当前支持状态
+
+### 硬件加速
+
+| Format          | Hardware Encoding | Hardware Decoding |
+| --------------- | ----------------- | ----------------- |
+| H.264           | ✅ Working         | ✅ Working         |
+| HEVC Main 8-bit | ✅ Working         | ✅ Working         |
+| HEVC Main10     | ✅ Working         | ✅ Working         |
+| VP8             | ✅ Working         | ✅ Working         |
+| VP9             | ❌ Not supported   | ✅ Working         |
+
+### 整体硬件支持
+
+|     分类     | 支持项目                  | 状态 |
+| :----------: | :------------------------ | :--: |
+| 🌐 **网络**  | 2.4G / 5G 双频 Wi-Fi      | ✅ |
+| 📡 **蓝牙**  | 文件传输 · 音频输出       | ✅ |
+| 📶 **蜂窝**  | 网络支持                  | ❌ |
+| 🔌 **USB**   | NCM 网络共享 · OTG 功能   | ✅ |
+| 🖥️ **显示** | 屏幕输出 · GPU 渲染       | ✅ |
+| 🔊 **音频**  | 扬声器 · 耳机输出         | ✅ |
+| 👆 **输入**  | 触摸屏 · 闪光灯（手电筒） | ✅ |
+| 🔋 **系统**  | 电池检测 · 实时时钟 · FDE 加密 | ✅ |
+
 ## 内核基线
 
 当前构建基于 GengWei1997 的 Raphael Linux 7.1 内核：
@@ -87,10 +112,7 @@ raphael-kernel-arm64
 
 ## 分支用途
 
-- `main`：当前已整理、已验证的 Raphael 通用修复与正式构建基线；
-- `raphael-dsi-brightness-flicker-fix`：DSI / 亮度闪屏修复开发与验证分支；
-- `raphael-mic-recording-fix`：麦克风采集与路由修复分支；
-- `raphael-venus-hwaccel`：全新的 Qualcomm Venus 硬件编解码适配分支。
+- `main`：当前唯一保留的 Raphael 通用修复与正式构建基线。
 
 ## 本地开发目录
 
