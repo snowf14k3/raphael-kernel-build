@@ -450,6 +450,16 @@ HEADERS_PACKAGE="$(dpkg-deb -f "${HEADERS_DEB}" Package)"
 IMAGE_VERSION="$(dpkg-deb -f "${IMAGE_DEB}" Version)"
 HEADERS_VERSION="$(dpkg-deb -f "${HEADERS_DEB}" Version)"
 
+# U-Boot uses bootefi on /boot/linux.efi. Reject a gzip vmlinuz before any
+# package installation or boot-file changes; the EFI payload must start MZ.
+PACKAGE_VMLINUZ="${TMP_DIR}/package-vmlinuz"
+dpkg-deb --fsys-tarfile "${IMAGE_DEB}" |
+    tar -xOf - "./boot/vmlinuz-${TARGET_KERNEL}" > "${PACKAGE_VMLINUZ}"
+if [[ ! -s "${PACKAGE_VMLINUZ}" || "$(head -c 2 "${PACKAGE_VMLINUZ}")" != MZ ]]; then
+    echo "Release 内核不是 U-Boot bootefi 可加载的 PE/COFF 文件，拒绝安装。" >&2
+    exit 1
+fi
+
 echo "=== 更新计划 ==="
 echo "当前运行: ${CURRENT_KERNEL}"
 echo "目标内核: ${TARGET_KERNEL}"
@@ -728,6 +738,10 @@ INITRD="/boot/initrd.img-${TARGET_KERNEL}"
     exit 1
 }
 
+[[ "$(head -c 2 "${VMLINUZ}")" == MZ ]] || {
+    echo "finalize: 目标内核不是 EFI 文件，保留当前启动文件" >&2
+    exit 1
+}
 cp "${VMLINUZ}" /boot/linux.efi.new
 cp "${INITRD}" /boot/initramfs.new
 sync
@@ -764,6 +778,10 @@ systemctl enable raphael-kernel-finalize.service >/dev/null
 
 # 所有安装和校验完成后才切换固定启动文件。
 echo "=== 原子切换固定启动文件 ==="
+[[ "$(head -c 2 "${TARGET_VMLINUZ}")" == MZ ]] || {
+    echo "目标内核不是 EFI 文件，保留当前 /boot/linux.efi" >&2
+    exit 1
+}
 cp "${TARGET_VMLINUZ}" /boot/linux.efi.new
 cp "${TARGET_INITRD}" /boot/initramfs.new
 sync
